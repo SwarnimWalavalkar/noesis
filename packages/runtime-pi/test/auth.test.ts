@@ -453,6 +453,7 @@ describe("Pi authentication", () => {
     expect(composed.streamSimple).toBe(provider.streamSimple);
     await expect(
       composed.auth.apiKey?.resolve({
+        signal: new AbortController().signal,
         ctx: {
           env: async (name) =>
             name === "OPENCODE_API_KEY"
@@ -593,7 +594,7 @@ describe("Pi authentication", () => {
       type: "oauth",
       access: "initial-access",
       refresh: "initial-refresh",
-      expires: Date.now() + 60_000,
+      expires: Date.now() + 600_000,
     }));
     const faux = fauxProvider({ provider: providerId, api: "rejected-oauth-api" });
     const statuses = [401, 200];
@@ -613,7 +614,7 @@ describe("Pi authentication", () => {
               type: "oauth",
               access: "rotated-access",
               refresh: "rotated-refresh",
-              expires: Date.now() + 60_000,
+              expires: Date.now() + 600_000,
             };
           },
           toAuth: async (credential) => ({ apiKey: credential.access }),
@@ -663,7 +664,7 @@ describe("Pi authentication", () => {
       type: "oauth",
       access: "second-rejected-access",
       refresh: "second-rejected-refresh",
-      expires: Date.now() + 60_000,
+      expires: Date.now() + 600_000,
     }));
     statuses.push(401, 401);
     const rejectedRetry = await models.completeSimple(model, { messages: [] });
@@ -679,7 +680,7 @@ describe("Pi authentication", () => {
       type: "oauth",
       access: "shared-initial-access",
       refresh: "shared-initial-refresh",
-      expires: Date.now() + 60_000,
+      expires: Date.now() + 600_000,
     }));
     const faux = fauxProvider({ provider: providerId, api: "concurrent-rejected-oauth-api" });
     const requestKeys: (string | undefined)[] = [];
@@ -703,7 +704,7 @@ describe("Pi authentication", () => {
               type: "oauth",
               access: "shared-rotated-access",
               refresh: "shared-rotated-refresh",
-              expires: Date.now() + 60_000,
+              expires: Date.now() + 600_000,
             };
           },
           toAuth: async (credential) => ({ apiKey: credential.access }),
@@ -739,7 +740,7 @@ describe("Pi authentication", () => {
       type: "oauth",
       access: "visible-access",
       refresh: "visible-refresh",
-      expires: Date.now() + 60_000,
+      expires: Date.now() + 600_000,
     }));
     const faux = fauxProvider({ provider: providerId, api: "visible-oauth-api" });
     let calls = 0;

@@ -8,15 +8,19 @@ import {
   type Context,
   type Credential,
   type CredentialStore,
+  type DeferredHandle,
   type Model,
   type Models,
   type ModelsApiStreamOptions,
+  type ModelsDeferredCancelOptions,
+  type ModelsDeferredFetchOptions,
   type ModelsSimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 
 type AuthResolutionOverrides = Parameters<Models["getAuth"]>[1];
 type ResponseObserver = NonNullable<ModelsSimpleStreamOptions["onResponse"]>;
 type StreamDispatch = (observeResponse: ResponseObserver) => AssistantMessageEventStream;
+const NEVER_ABORTED_SIGNAL = new AbortController().signal;
 
 function withResponseObserver<TOptions extends { readonly onResponse?: ResponseObserver }>(
   options: TOptions | undefined,
@@ -141,8 +145,9 @@ export function createOAuthRecoveringModels(delegate: Models, credentials: Crede
     if (!oauth) throw new Error(`${providerId} no longer exposes OAuth refresh`);
     const current = await credentials.modify(providerId, async (credential) => {
       if (credential?.type !== "oauth" || credential.access !== rejected.access) return undefined;
-      signal?.throwIfAborted();
-      return await oauth.refresh(credential, signal);
+      const refreshSignal = signal ?? NEVER_ABORTED_SIGNAL;
+      refreshSignal.throwIfAborted();
+      return await oauth.refresh(credential, refreshSignal);
     });
     if (!current) throw new Error(`${providerId} is no longer connected`);
   };
@@ -270,6 +275,35 @@ export function createOAuthRecoveringModels(delegate: Models, credentials: Crede
     return await streamSimple(model, context, options).result();
   }
 
+  function streamDeferred(
+    model: Model<Api>,
+    handle: DeferredHandle,
+    options?: ModelsDeferredFetchOptions,
+  ): AssistantMessageEventStream {
+    return recoveringStream(
+      model,
+      (observeResponse) =>
+        delegate.streamDeferred(model, handle, withResponseObserver(options, observeResponse)),
+      options?.signal,
+    );
+  }
+
+  async function fetchDeferred(
+    model: Model<Api>,
+    handle: DeferredHandle,
+    options?: ModelsDeferredFetchOptions,
+  ): Promise<AssistantMessage> {
+    return await streamDeferred(model, handle, options).result();
+  }
+
+  async function cancelDeferred(
+    model: Model<Api>,
+    handle: DeferredHandle,
+    options?: ModelsDeferredCancelOptions,
+  ): Promise<void> {
+    await delegate.cancelDeferred(model, handle, options);
+  }
+
   const models: Models = {
     getProviders: () => delegate.getProviders(),
     getProvider: (id) => delegate.getProvider(id),
@@ -285,6 +319,9 @@ export function createOAuthRecoveringModels(delegate: Models, credentials: Crede
     complete,
     streamSimple,
     completeSimple,
+    streamDeferred,
+    fetchDeferred,
+    cancelDeferred,
   };
   return Object.freeze(models);
 }

@@ -1,4 +1,4 @@
-import { type Terminal, TUI } from "@earendil-works/pi-tui";
+import { type Terminal, TuiMainScreen } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import {
   createNoesisCommandAutocompleteProvider,
@@ -264,7 +264,7 @@ describe("Noesis slash command autocomplete", () => {
   });
 
   test("wires Pi's live suggestions and completion through the safe editor", async () => {
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.handleInput?.("/cont");
 
     await vi.waitFor(() => expect(editor.render(80).join("\n")).toContain("context"));
@@ -274,7 +274,7 @@ describe("Noesis slash command autocomplete", () => {
   });
 
   test("enriches an already-live editor when skill discovery settles later", async () => {
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
 
     editor.setSkillCommands([
       {
@@ -290,7 +290,7 @@ describe("Noesis slash command autocomplete", () => {
   });
 
   test("preserves native Backspace while suggestions are open", async () => {
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.handleInput?.("/help");
     await vi.waitFor(() => expect(editor.render(80).join("\n")).toContain("help"));
 

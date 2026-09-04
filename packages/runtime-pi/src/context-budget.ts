@@ -1,6 +1,18 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { calculateContextTokens } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai";
+import {
+  createAssistantMessageEventStream,
+  type Api,
+  type AssistantMessage,
+  type AssistantMessageEventStream,
+  type AuthResult,
+  type Context,
+  type Model,
+  type Models,
+  type ModelsApiStreamOptions,
+  type ModelsSimpleStreamOptions,
+  type ToolResultMessage,
+} from "@earendil-works/pi-ai";
 import { estimateInputTokens } from "@noesis/agent-types";
 import { sha256 } from "@noesis/domain";
 
@@ -30,6 +42,110 @@ export interface PiRequestBudgetInput {
 
 export interface PiRequestBudgetProjector {
   readonly project: (input: PiRequestBudgetInput) => PiRequestBudgetProjection;
+}
+
+type AuthResolutionOverrides = Parameters<Models["getAuth"]>[1];
+
+function failedRequestMessage(model: Model<Api>, failure: Error): AssistantMessage {
+  return Object.freeze({
+    role: "assistant",
+    content: [],
+    api: model.api,
+    provider: model.provider,
+    model: model.id,
+    usage: Object.freeze({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }),
+    }),
+    stopReason: "error",
+    errorMessage: failure.message,
+    timestamp: Date.now(),
+  });
+}
+
+function failedRequestStream(model: Model<Api>, failure: Error): AssistantMessageEventStream {
+  const stream = createAssistantMessageEventStream();
+  queueMicrotask(() => {
+    const message = failedRequestMessage(model, failure);
+    stream.push({ type: "error", reason: "error", error: message });
+  });
+  return stream;
+}
+
+/** Prevents a failed request projection from reaching the provider. */
+export function createPiRequestGuardedModels(
+  delegate: Models,
+  currentFailure: () => Error | undefined,
+): Models {
+  function getAuth(providerId: string, overrides?: AuthResolutionOverrides): Promise<AuthResult | undefined>;
+  function getAuth(model: Model<Api>, overrides?: AuthResolutionOverrides): Promise<AuthResult | undefined>;
+  async function getAuth(
+    providerOrModel: string | Model<Api>,
+    overrides?: AuthResolutionOverrides,
+  ): Promise<AuthResult | undefined> {
+    return typeof providerOrModel === "string"
+      ? await delegate.getAuth(providerOrModel, overrides)
+      : await delegate.getAuth(providerOrModel, overrides);
+  }
+
+  function stream<TApi extends Api>(
+    model: Model<TApi>,
+    context: Context,
+    options?: ModelsApiStreamOptions<TApi>,
+  ): AssistantMessageEventStream {
+    const failure = currentFailure();
+    return failure ? failedRequestStream(model, failure) : delegate.stream(model, context, options);
+  }
+
+  async function complete<TApi extends Api>(
+    model: Model<TApi>,
+    context: Context,
+    options?: ModelsApiStreamOptions<TApi>,
+  ): Promise<AssistantMessage> {
+    return await stream(model, context, options).result();
+  }
+
+  function streamSimple(
+    model: Model<Api>,
+    context: Context,
+    options?: ModelsSimpleStreamOptions,
+  ): AssistantMessageEventStream {
+    const failure = currentFailure();
+    return failure ? failedRequestStream(model, failure) : delegate.streamSimple(model, context, options);
+  }
+
+  async function completeSimple(
+    model: Model<Api>,
+    context: Context,
+    options?: ModelsSimpleStreamOptions,
+  ): Promise<AssistantMessage> {
+    return await streamSimple(model, context, options).result();
+  }
+
+  const guarded: Models = {
+    getProviders: () => delegate.getProviders(),
+    getProvider: (id) => delegate.getProvider(id),
+    getModels: (provider) => delegate.getModels(provider),
+    getModel: (provider, id) => delegate.getModel(provider, id),
+    refresh: async (options) => await delegate.refresh(options),
+    checkAuth: async (providerId, options) => await delegate.checkAuth(providerId, options),
+    getAvailable: async (providerId, options) => await delegate.getAvailable(providerId, options),
+    getAuth,
+    login: async (providerId, type, interaction) => await delegate.login(providerId, type, interaction),
+    logout: async (providerId, options) => await delegate.logout(providerId, options),
+    stream,
+    complete,
+    streamSimple,
+    completeSimple,
+    streamDeferred: (model, handle, options) => delegate.streamDeferred(model, handle, options),
+    fetchDeferred: async (model, handle, options) => await delegate.fetchDeferred(model, handle, options),
+    cancelDeferred: async (model, handle, options) => await delegate.cancelDeferred(model, handle, options),
+  };
+  return Object.freeze(guarded);
 }
 
 function validAssistantUsage(message: AgentMessage): message is AssistantMessage {

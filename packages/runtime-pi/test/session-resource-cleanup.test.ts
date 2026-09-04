@@ -1,5 +1,10 @@
 import { createConnection, createServer, type Server, type Socket } from "node:net";
-import { AgentHarness, Session } from "@earendil-works/pi-agent-core";
+import {
+  AgentHarness,
+  MemorySessionRepo,
+  type Context,
+  type SessionCreateOptions,
+} from "@earendil-works/pi-agent-core";
 import {
   cleanupSessionResources,
   createModels,
@@ -234,13 +239,17 @@ describe("Pi session resource ownership", () => {
     const sessionSetupGate = new Promise<void>((resolve) => {
       releaseSessionSetup = resolve;
     });
-    const originalGetMetadata = Session.prototype.getMetadata;
-    const getMetadata = vi
-      .spyOn(Session.prototype, "getMetadata")
-      .mockImplementationOnce(async function (this: Session) {
+    const originalCreate = MemorySessionRepo.prototype.create;
+    const createSession = vi
+      .spyOn(MemorySessionRepo.prototype, "create")
+      .mockImplementationOnce(async function (
+        this: MemorySessionRepo,
+        options: SessionCreateOptions,
+        context: Context,
+      ) {
         markSessionSetupStarted?.();
         await sessionSetupGate;
-        return originalGetMetadata.call(this);
+        return await originalCreate.call(this, options, context);
       });
     const controller = new AbortController();
     const backend = createPiRoleModelBackend(process.cwd(), models);
@@ -264,7 +273,7 @@ describe("Pi session resource ownership", () => {
       expect(cleanedSessionIds).toHaveLength(1);
     } finally {
       releaseSessionSetup?.();
-      getMetadata.mockRestore();
+      createSession.mockRestore();
     }
   });
 
@@ -291,13 +300,17 @@ describe("Pi session resource ownership", () => {
     const sessionSetupGate = new Promise<void>((resolve) => {
       releaseSessionSetup = resolve;
     });
-    const originalGetMetadata = Session.prototype.getMetadata;
-    const getMetadata = vi
-      .spyOn(Session.prototype, "getMetadata")
-      .mockImplementationOnce(async function (this: Session) {
+    const originalCreate = MemorySessionRepo.prototype.create;
+    const createSession = vi
+      .spyOn(MemorySessionRepo.prototype, "create")
+      .mockImplementationOnce(async function (
+        this: MemorySessionRepo,
+        options: SessionCreateOptions,
+        context: Context,
+      ) {
         markSessionSetupStarted?.();
         await sessionSetupGate;
-        return originalGetMetadata.call(this);
+        return await originalCreate.call(this, options, context);
       });
     const runtime = createPiAgentRuntime(process.cwd(), models);
 
@@ -328,7 +341,7 @@ describe("Pi session resource ownership", () => {
       expect(cleanedSessionIds).toHaveLength(1);
     } finally {
       releaseSessionSetup?.();
-      getMetadata.mockRestore();
+      createSession.mockRestore();
     }
   });
 
@@ -380,15 +393,21 @@ describe("Pi session resource ownership", () => {
       prompt: "finish",
       activeCapabilities: [],
     };
-    const waitForIdle = vi
-      .spyOn(AgentHarness.prototype, "waitForIdle")
-      .mockRejectedValueOnce(new Error("injected waitForIdle failure"));
+    const originalCreate = AgentHarness.create.bind(AgentHarness);
+    const createHarness = vi
+      .spyOn(AgentHarness, "create")
+      .mockImplementationOnce(async (options, context) => {
+        const created = await originalCreate(options, context);
+        const lane = await created.harness.lane("main", context);
+        vi.spyOn(lane, "waitForIdle").mockRejectedValueOnce(new Error("injected waitForIdle failure"));
+        return created;
+      });
 
     try {
       await expect(runtime.run(request, () => undefined)).rejects.toThrow("injected waitForIdle failure");
       expect(resources.size).toBe(0);
     } finally {
-      waitForIdle.mockRestore();
+      createHarness.mockRestore();
     }
 
     provider.appendResponses([resourceResponse()]);

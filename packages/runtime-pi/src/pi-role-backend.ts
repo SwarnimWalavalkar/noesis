@@ -1,9 +1,13 @@
 import { createConditionalObject } from "@noesis/domain";
-import { AgentHarness } from "@earendil-works/pi-agent-core";
+import { AgentHarness, TODO_CONTEXT, type AgentLane } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Models } from "@earendil-works/pi-ai";
 import type { AgentUsage } from "@noesis/agent-types";
 import { createAgentRoleRunner } from "./role-runner.ts";
-import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
+import {
+  createEphemeralPiSession,
+  NOESIS_PI_COMPACTION_SETTINGS,
+  NOESIS_PI_LANE_NAME,
+} from "./session-lifecycle.ts";
 import type {
   RoleBackendRequest,
   RoleBackendResult,
@@ -46,7 +50,8 @@ function missingAuthMessage(provider: string): string {
 interface ActivePiRoleRun {
   readonly controller: AbortController;
   harness?: AgentHarness;
-  sessionId?: string;
+  lane?: AgentLane;
+  closePiSession?: () => Promise<void>;
   requestHarnessAbort?: () => Promise<void>;
   abortError?: unknown;
 }
@@ -72,26 +77,40 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
       const auth = await models.getAuth(model);
       if (!auth) throw new Error(missingAuthMessage(request.provider));
       if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
-      const { session, sessionId } = await createEphemeralPiSession();
-      execution.sessionId = sessionId;
+      const { session, close } = await createEphemeralPiSession();
+      execution.closePiSession = close;
       if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      const harness = new AgentHarness({
-        session,
-        models,
-        model,
-        tools: [],
-        thinkingLevel: request.reasoning,
-        systemPrompt: request.systemPrompt,
-        streamOptions: createConditionalObject({} as const)
-          .addOptional(!(request.timeoutMs === undefined) ? { timeoutMs: request.timeoutMs } : undefined)
-          .addOptional(!(request.maxRetries === undefined) ? { maxRetries: request.maxRetries } : undefined)
-          .finish(),
-      });
+      const { harness } = await AgentHarness.create(
+        {
+          session,
+          models,
+          model,
+          tools: [],
+          thinkingLevel: request.reasoning,
+          compaction: NOESIS_PI_COMPACTION_SETTINGS,
+          systemPrompt: request.systemPrompt,
+          streamOptions: createConditionalObject({} as const)
+            .addOptional(!(request.timeoutMs === undefined) ? { timeoutMs: request.timeoutMs } : undefined)
+            .addOptional(!(request.maxRetries === undefined) ? { maxRetries: request.maxRetries } : undefined)
+            .finish(),
+        },
+        TODO_CONTEXT,
+      );
+      const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
       execution.harness = harness;
+      execution.lane = lane;
+      let terminalAssistant: AssistantMessage | undefined;
+      const unsubscribeMessage = harness.events.on("message_end", (event) => {
+        if (event.message.role === "assistant") terminalAssistant = event.message;
+      });
+      const unsubscribeProviderAbort = harness.hooks.on("after_response", async (event, context) => {
+        if (event.message.stopReason === "aborted") await lane.requestAbort(event.runId, context);
+        return undefined;
+      });
       let abortPromise: Promise<void> | undefined;
       const requestHarnessAbort = (): Promise<void> => {
-        abortPromise ??= harness.abort().then(
+        abortPromise ??= lane.abort(TODO_CONTEXT).then(
           () => undefined,
           (cause: unknown) => {
             execution.abortError = cause;
@@ -104,7 +123,18 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
       execution.controller.signal.addEventListener("abort", abortHarness, { once: true });
       let result: RoleBackendResult;
       try {
-        const message = await harness.prompt(request.prompt);
+        const runResult = await lane.prompt(request.prompt, undefined, TODO_CONTEXT);
+        if (!runResult.ok) throw runResult.error;
+        if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
+        if (runResult.value.status === "suspended")
+          throw new Error("Pi suspended the role run for a deferred response");
+        const message = terminalAssistant;
+        if (!message) {
+          const detail = runResult.value.error?.message ?? `operation ${runResult.value.status}`;
+          throw new Error(`Pi role run ended without a terminal assistant response: ${detail}`);
+        }
+        if (message.stopReason === "pending" || message.stopReason === "deferred")
+          throw new Error(`Pi role run ended with a ${message.stopReason} assistant response`);
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         result = Object.freeze(
           createConditionalObject({
@@ -119,6 +149,8 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
         );
       } finally {
         execution.controller.signal.removeEventListener("abort", abortHarness);
+        unsubscribeMessage();
+        unsubscribeProviderAbort();
         await abortPromise;
       }
       if (execution.abortError) throw execution.abortError;
@@ -127,9 +159,13 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
       request.signal.removeEventListener("abort", forwardAbort);
       try {
         try {
-          if (execution.harness) await execution.harness.waitForIdle();
+          if (execution.lane) await execution.lane.waitForIdle(TODO_CONTEXT);
         } finally {
-          if (execution.sessionId) releasePiSessionResources(execution.sessionId);
+          try {
+            await execution.harness?.close(TODO_CONTEXT);
+          } finally {
+            await execution.closePiSession?.();
+          }
         }
       } finally {
         if (active.get(request.runId) === execution) active.delete(request.runId);

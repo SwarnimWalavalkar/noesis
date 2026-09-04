@@ -1,3 +1,8 @@
 packages:
   - apps/*
   - packages/*
+
+packageExtensions:
+  "@earendil-works/pi-coding-agent@0.85.0":
+    dependencies:
+      "@earendil-works/pi-server": "0.85.0"

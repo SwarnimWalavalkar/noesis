@@ -1,4 +1,4 @@
-import { type Terminal, TUI, visibleWidth } from "@earendil-works/pi-tui";
+import { type Terminal, TuiMainScreen, visibleWidth } from "@earendil-works/pi-tui";
 import type { SubAgentSummary } from "@noesis/agent-types";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
@@ -86,7 +86,7 @@ describe("Noesis safe editor key path", () => {
     ["Ctrl+J", "\n"],
   ] as const)("preserves pi-tui native %s multiline input", (_key, sequence) => {
     const submitted: string[] = [];
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.onSubmit = (text) => submitted.push(text);
     editor.handleInput?.("first");
 
@@ -98,7 +98,7 @@ describe("Noesis safe editor key path", () => {
   });
 
   test("sanitizes programmatic buffer replacement and insertion", () => {
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
 
     editor.setText("first\u001b[2J\r\nsecond");
     editor.insertText("\u0007\nthird");
@@ -112,7 +112,7 @@ describe("Noesis safe editor key path", () => {
     ["DEL", "\u007f"],
     ["BS", "\u0008"],
   ] as const)("delegates ordinary %s Backspace to pi-tui", (_variant, backspace) => {
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.handleInput?.("abc");
 
     editor.handleInput?.(backspace);
@@ -121,7 +121,7 @@ describe("Noesis safe editor key path", () => {
   });
 
   test("preserves pi-tui grapheme deletion semantics", () => {
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.handleInput?.("a👨‍👩‍👧‍👦");
 
     editor.handleInput?.("\u007f");
@@ -130,7 +130,7 @@ describe("Noesis safe editor key path", () => {
   });
 
   test("preserves the line-start deletion binding used by terminal Cmd+Backspace mappings", () => {
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.handleInput?.("abc");
 
     editor.handleInput?.("\u0015");
@@ -140,7 +140,7 @@ describe("Noesis safe editor key path", () => {
 
   test("recognizes a paste start fragmented beyond pi-tui's assembly window", async () => {
     vi.useFakeTimers();
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     const standaloneEscape = vi.fn(() => true);
     editor.createStandaloneEscapeHandler = () => standaloneEscape;
     editor.handleInput?.("\u001b");
@@ -158,7 +158,7 @@ describe("Noesis safe editor key path", () => {
 
   test("routes a settled standalone Escape only after paste ambiguity expires", async () => {
     vi.useFakeTimers();
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     const standaloneEscape = vi.fn(() => true);
     editor.createStandaloneEscapeHandler = () => standaloneEscape;
 
@@ -172,7 +172,7 @@ describe("Noesis safe editor key path", () => {
   });
 
   test("routes a complete Kitty Escape sequence without paste ambiguity delay", () => {
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     const standaloneEscape = vi.fn(() => true);
     editor.createStandaloneEscapeHandler = () => standaloneEscape;
 
@@ -184,7 +184,7 @@ describe("Noesis safe editor key path", () => {
 
   test("sanitizes a bracketed-paste payload when its closing marker is split across chunks", async () => {
     vi.useFakeTimers();
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.handleInput?.("\u001b[200~safe\u001b[2J\u0007\u009b31m\u007f");
     editor.handleInput?.(" text\u001b[20");
     await vi.advanceTimersByTimeAsync(200);
@@ -199,7 +199,7 @@ describe("Noesis safe editor key path", () => {
   test("quarantines an early close and malicious trailing Enter until the real close", async () => {
     vi.useFakeTimers();
     const submitted: string[] = [];
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.onSubmit = (text) => submitted.push(text);
     editor.handleInput?.("\u001b[200~safe\u001b[201~");
     editor.handleInput?.("\rBAD\u001b[2J\u0007\u009b31m\u007f\u001b[201~");
@@ -217,7 +217,7 @@ describe("Noesis safe editor key path", () => {
   test("treats bytes trailing a close in the same chunk as sanitized paste, never keys", async () => {
     vi.useFakeTimers();
     const submitted: string[] = [];
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.onSubmit = (text) => submitted.push(text);
     editor.handleInput?.("\u001b[200~safe\u001b[201~\r\u0003\u001b\u007f");
 
@@ -230,7 +230,7 @@ describe("Noesis safe editor key path", () => {
 
   test("settles standalone Escape without trapping later input and preserves key sequences", async () => {
     vi.useFakeTimers();
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.handleInput?.("\u001b");
     await settleSafeEditorAmbiguity();
     editor.handleInput?.("abc");
@@ -242,7 +242,7 @@ describe("Noesis safe editor key path", () => {
 
   test("normalizes one CRLF when a large paste flush splits the pair", async () => {
     vi.useFakeTimers();
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     const prefix = "x".repeat(1024 * 1024 - 5);
 
     editor.handleInput?.(`\u001b[200~${prefix}\r\nabcx\u001b[201~`);
@@ -253,7 +253,7 @@ describe("Noesis safe editor key path", () => {
 
   test("programmatic edits discard partial terminal input and its timers", async () => {
     vi.useFakeTimers();
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.handleInput?.("\u001b[200~discarded paste");
 
     editor.setText("replacement");
@@ -1115,7 +1115,7 @@ describe("Noesis transcript rendering", () => {
         },
       ],
     };
-    const editor = createSafeEditor(new TUI(inertTerminal));
+    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.focused = true;
     editor.handleInput?.("界面 and 🧠 input");
     for (let width = 1; width <= 120; width += 1) {

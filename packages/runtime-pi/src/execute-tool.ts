@@ -1,5 +1,5 @@
 import { createConditionalObject, isJsonObject } from "@noesis/domain";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentHarnessTool } from "@earendil-works/pi-agent-core";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { JsonValue } from "@noesis/domain";
 import { z } from "zod";
@@ -187,18 +187,19 @@ export function createPiExecuteTool(input: {
   readonly turnId: string;
   readonly signal: AbortSignal;
   readonly emit: (event: PiCodeExecutionEvent, parentToolCallId: string, recordedByBroker?: boolean) => void;
-}): AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> {
-  const tool: AgentTool<typeof executeParametersJsonSchema, PiExecuteToolDetails> = {
+}): AgentHarnessTool<undefined, typeof executeParametersJsonSchema, PiExecuteToolDetails> {
+  const tool: AgentHarnessTool<undefined, typeof executeParametersJsonSchema, PiExecuteToolDetails> = {
     name: "execute",
     label: "Execute JavaScript",
     description: `${EXECUTE_DESCRIPTION} ${shellOutputContract(input.prepared.catalog)}`,
     parameters: executeParametersJsonSchema,
     executionMode: "sequential",
-    execute: async (toolCallId, rawInput, toolSignal, onUpdate) => {
+    execute: async (toolCallId, rawInput, onUpdate, _toolContext, _invocation, context) => {
       const params = executeParameters.parse(rawInput);
       if (new TextEncoder().encode(params.source).byteLength > MAX_SOURCE_BYTES)
         throw new Error(`Codemode source exceeds ${String(MAX_SOURCE_BYTES)} UTF-8 bytes`);
       const controller = new AbortController();
+      const toolSignal = context.abortSignal;
       const abortTurn = (): void => controller.abort(input.signal.reason);
       const abortTool = (): void => controller.abort(toolSignal?.reason);
       if (input.signal.aborted) abortTurn();
@@ -216,7 +217,7 @@ export function createPiExecuteTool(input: {
             if (event.type === "started") executionId = event.executionId;
             input.emit(event, parentToolCallId ?? toolCallId, recordedByBroker);
             // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-            onUpdate?.({
+            onUpdate({
               content: [],
               details: Object.freeze(
                 createConditionalObject({

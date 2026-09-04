@@ -1,5 +1,5 @@
 import { createConditionalObject } from "@noesis/domain";
-import { AgentHarness, type Skill } from "@earendil-works/pi-agent-core";
+import { AgentHarness, TODO_CONTEXT, type AgentLane, type Skill } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
 import {
   type AgentAssistantMessageBoundary,
@@ -14,7 +14,7 @@ import {
   validateFrozenTurnPlan,
 } from "@noesis/agent-types";
 import { toAgentActionPayload } from "./action-payload.ts";
-import { createPiRequestBudgetProjector } from "./context-budget.ts";
+import { createPiRequestBudgetProjector, createPiRequestGuardedModels } from "./context-budget.ts";
 import {
   createPiExecuteTool,
   type PiCodeExecutionAdapter,
@@ -26,7 +26,11 @@ import {
   createPiBrokerTools,
   FOREGROUND_DIRECT_TOOL_NAMES,
 } from "./broker-tools.ts";
-import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
+import {
+  createEphemeralPiSession,
+  NOESIS_PI_COMPACTION_SETTINGS,
+  NOESIS_PI_LANE_NAME,
+} from "./session-lifecycle.ts";
 import { resolvePiSkillInvocation } from "./skill-invocation.ts";
 import type { PiSkillLibrary, PiSkillResource } from "./skill-library.ts";
 export type {
@@ -327,7 +331,7 @@ function piToolUpdatePayload(value: unknown): unknown {
   );
 }
 export interface PiAgentRuntime extends NoesisAgentRuntime {
-  readonly name: "pi-agent-harness-0.82.1";
+  readonly name: "pi-agent-harness-0.85.0";
 }
 export interface CreatePiAgentRuntimeOptions {
   readonly codeExecution?: PiCodeExecutionAdapter;
@@ -346,7 +350,8 @@ export function createPiAgentRuntime(
     acceptsSteering: boolean;
     hasQueuedSteering: boolean;
     harness?: AgentHarness;
-    sessionId?: string;
+    lane?: AgentLane;
+    closePiSession?: () => Promise<void>;
     preparedCode?: PreparedPiCodeExecution;
     requestHarnessAbort?: () => Promise<void>;
     abortError?: unknown;
@@ -532,8 +537,8 @@ export function createPiAgentRuntime(
       const directAliases = preparedCode
         ? createBrokerToolAliases(preparedCode.catalog)
         : new Map<string, string>();
-      const { session, sessionId } = await createEphemeralPiSession();
-      execution.sessionId = sessionId;
+      const { session, close } = await createEphemeralPiSession();
+      execution.closePiSession = close;
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
       const executeTool =
         plan && preparedCode
@@ -600,19 +605,29 @@ export function createPiAgentRuntime(
         : [];
       const skillsSystemPrompt = formatSkillsForNoesisPrompt(piSkills, executeTool !== undefined);
       const completeSystemPrompt = [request.systemPrompt, skillsSystemPrompt].filter(Boolean).join("\n\n");
-      const harness = new AgentHarness({
-        session,
-        models,
-        model,
-        tools: agentTools,
-        activeToolNames: initialActiveToolNames,
-        thinkingLevel: request.thinkingLevel,
-        steeringMode: "all",
-        resources: {
-          skills: piSkills,
+      let requestBudgetFailure: Error | undefined;
+      const requestModels = createPiRequestGuardedModels(models, () => requestBudgetFailure);
+      const { harness } = await AgentHarness.create(
+        {
+          session,
+          models: requestModels,
+          model,
+          tools: agentTools,
+          activeToolNames: initialActiveToolNames,
+          thinkingLevel: request.thinkingLevel,
+          compaction: NOESIS_PI_COMPACTION_SETTINGS,
+          steeringMode: "all",
+          toolExecution: "sequential",
+          resources: {
+            skills: piSkills,
+          },
+          systemPrompt: completeSystemPrompt,
         },
-        systemPrompt: completeSystemPrompt,
-      });
+        TODO_CONTEXT,
+      );
+      const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
+      execution.harness = harness;
+      execution.lane = lane;
       const requestBudget =
         plan?.requestTokenBudget === undefined
           ? undefined
@@ -621,39 +636,48 @@ export function createPiAgentRuntime(
       const unsubscribeBudgetGuard =
         requestBudget === undefined
           ? () => undefined
-          : harness.on("context", ({ messages }) => {
-              const activeTools = harness.getActiveTools();
-              const activeToolMaterial = JSON.stringify(
-                activeTools.map((tool) => ({
-                  name: tool.name,
-                  description: tool.description,
-                  parameters: tool.parameters,
-                })),
-              );
-              const projection = requestBudgetProjector.project({
-                messages,
-                systemPrompt: completeSystemPrompt,
-                activeToolMaterial,
-                activeToolCount: activeTools.length,
-                tokenBudget: requestBudget.tokens,
-                planId: requestBudget.planId,
-              });
-              return { messages: projection.messages };
+          : harness.hooks.on("transform_context", async ({ messages }, context) => {
+              try {
+                const activeToolNames = new Set(await lane.getActiveTools(context));
+                const activeTools = (await harness.getTools(context)).filter((tool) =>
+                  activeToolNames.has(tool.name),
+                );
+                const activeToolMaterial = JSON.stringify(
+                  activeTools.map((tool) => ({
+                    name: tool.name,
+                    description: tool.description,
+                    parameters: tool.parameters,
+                  })),
+                );
+                const projection = requestBudgetProjector.project({
+                  messages,
+                  systemPrompt: completeSystemPrompt,
+                  activeToolMaterial,
+                  activeToolCount: activeTools.length,
+                  tokenBudget: requestBudget.tokens,
+                  planId: requestBudget.planId,
+                });
+                requestBudgetFailure = undefined;
+                return { messages: projection.messages };
+              } catch (cause) {
+                requestBudgetFailure = cause instanceof Error ? cause : new Error(String(cause));
+                return undefined;
+              }
             });
       const historyBaseTimestamp = Date.now() - history.length;
       for (const [index, message] of history.entries()) {
         if (message.role === "assistant" && message.content.length === 0) continue;
         const timestamp = historyTimestamp(message.createdAt, historyBaseTimestamp + index);
-        await harness.appendMessage(
+        await lane.appendMessage(
           message.role === "user"
             ? priorUserMessage(message.content, timestamp)
             : priorAssistantMessage(message.content, timestamp, model),
+          TODO_CONTEXT,
         );
       }
-      execution.harness = harness;
       let abortPromise: Promise<void> | undefined;
       const requestHarnessAbort = (): Promise<void> => {
-        abortPromise ??= harness.abort().then(
+        abortPromise ??= lane.abort(TODO_CONTEXT).then(
           () => undefined,
           (cause: unknown) => {
             execution.abortError = cause;
@@ -667,38 +691,46 @@ export function createPiAgentRuntime(
       if (execution.controller.signal.aborted) await requestHarnessAbort();
       const assistantDeltas = createAssistantDeltaAggregator();
       let initialUserMessageObserved = false;
-      const unsubscribe = harness.subscribe((event) => {
-        if (event.type === "queue_update") {
-          execution.hasQueuedSteering = event.steer.length > 0;
-        } else if (event.type === "message_start" && event.message.role === "assistant") {
+      let terminalAssistant: AssistantMessage | undefined;
+      const unsubscribers = [
+        harness.events.on("queue_update", (event) => {
+          execution.hasQueuedSteering = event.queues.some((item) => item.kind === "steer");
+        }),
+        harness.events.on("message_start", (event) => {
+          if (event.message.role !== "assistant") return;
           assistantDeltas.beginMessage();
-        } else if (event.type === "message_end" && event.message.role === "user") {
-          if (!initialUserMessageObserved) {
-            initialUserMessageObserved = true;
+        }),
+        harness.events.on("message_end", (event) => {
+          if (event.message.role === "user") {
+            if (!initialUserMessageObserved) {
+              initialUserMessageObserved = true;
+              return;
+            }
+            const text = userMessageText(event.message);
+            const pendingIndex = execution.pendingSteers.findIndex((receipt) => receipt.text === text);
+            if (pendingIndex >= 0) {
+              const [receipt] = execution.pendingSteers.splice(pendingIndex, 1);
+              receipt?.resolve(
+                Object.freeze({
+                  status: "consumed",
+                  timelineSequence: claimTimelineSequence(),
+                  consumedAt: now(),
+                }),
+              );
+            }
             return;
           }
-          const text = userMessageText(event.message);
-          const pendingIndex = execution.pendingSteers.findIndex((receipt) => receipt.text === text);
-          if (pendingIndex >= 0) {
-            const [receipt] = execution.pendingSteers.splice(pendingIndex, 1);
-            receipt?.resolve(
-              Object.freeze({
-                status: "consumed",
-                timelineSequence: claimTimelineSequence(),
-                consumedAt: now(),
-              }),
-            );
-          }
-        } else if (event.type === "message_end" && event.message.role === "assistant") {
+          if (event.message.role !== "assistant") return;
+          terminalAssistant = event.message;
+          if (execution.controller.signal.aborted) return;
           const reasoning = assistantReasoning(event.message);
-          if (reasoning.length > 0) {
+          if (reasoning.length > 0)
             emit({
               type: "reasoning-message",
               text: reasoning,
               timelineSequence: claimTimelineSequence(),
               createdAt: now(),
             });
-          }
           const text = assistantText(event.message);
           if (text.length === 0) return;
           const boundary = Object.freeze({
@@ -708,16 +740,15 @@ export function createPiAgentRuntime(
           });
           assistantMessages.push(boundary);
           emit({ type: "assistant-message", ...boundary });
-        } else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-          const delta = assistantDeltas.push(event.assistantMessageEvent.delta);
-          if (delta) emit({ type: "delta", text: delta });
-        } else if (
-          event.type === "message_update" &&
-          event.assistantMessageEvent.type === "thinking_delta" &&
-          event.assistantMessageEvent.delta.length > 0
-        ) {
-          emit({ type: "reasoning-delta", text: event.assistantMessageEvent.delta });
-        } else if (event.type === "tool_execution_start") {
+        }),
+        harness.events.on("message_update", (event) => {
+          if (event.event.type === "text_delta") {
+            const delta = assistantDeltas.push(event.event.delta);
+            if (delta) emit({ type: "delta", text: delta });
+          } else if (event.event.type === "thinking_delta" && event.event.delta.length > 0)
+            emit({ type: "reasoning-delta", text: event.event.delta });
+        }),
+        harness.events.on("tool_start", (event) => {
           if (directToolNames.has(event.toolName)) {
             pendingDirectToolInputs.set(event.toolCallId, toAgentActionPayload(event.args));
             return;
@@ -729,7 +760,8 @@ export function createPiAgentRuntime(
             input: toAgentActionPayload(event.args),
             timelineSequence: claimTimelineSequence(),
           });
-        } else if (event.type === "tool_execution_update") {
+        }),
+        harness.events.on("tool_update", (event) => {
           if (directToolNames.has(event.toolName)) return;
           emit({
             type: "tool-update",
@@ -737,7 +769,8 @@ export function createPiAgentRuntime(
             name: event.toolName,
             update: toAgentActionPayload(piToolUpdatePayload(event.partialResult)),
           });
-        } else if (event.type === "tool_execution_end") {
+        }),
+        harness.events.on("tool_end", (event) => {
           if (directToolNames.has(event.toolName)) {
             const actionId = `direct:${event.toolCallId}`;
             const directInput = pendingDirectToolInputs.get(event.toolCallId) ?? {};
@@ -767,20 +800,37 @@ export function createPiAgentRuntime(
             isError: event.isError,
             result: toAgentActionPayload(event.result),
           });
-        }
-      });
-      const unsubscribeSteeringToolGuard = harness.on("tool_call", () =>
+        }),
+      ];
+      const unsubscribe = (): void => {
+        for (const dispose of unsubscribers.toReversed()) dispose();
+      };
+      const unsubscribeSteeringToolGuard = harness.hooks.on("before_tool", () =>
         execution.hasQueuedSteering
           ? {
-              block: true,
-              reason: "Skipped because a newer user steering message is pending.",
+              block: { reason: "Skipped because a newer user steering message is pending." },
             }
           : undefined,
       );
+      const unsubscribeProviderAbort = harness.hooks.on("after_response", async (event, context) => {
+        if (event.message.stopReason === "aborted") await lane.requestAbort(event.runId, context);
+        return undefined;
+      });
       execution.acceptsSteering = true;
       emit({ type: "status", status: "started" });
       try {
-        const message = await harness.prompt(explicitSkill?.prompt ?? request.prompt);
+        const runResult = await lane.prompt(explicitSkill?.prompt ?? request.prompt, undefined, TODO_CONTEXT);
+        if (!runResult.ok) throw runResult.error;
+        if (execution.controller.signal.aborted) return abortedBeforePrompt();
+        if (runResult.value.status === "suspended")
+          throw new Error("Pi suspended the foreground run for a deferred response");
+        const message = terminalAssistant;
+        if (!message) {
+          const detail = runResult.value.error?.message ?? `operation ${runResult.value.status}`;
+          throw new Error(`Pi run ended without a terminal assistant response: ${detail}`);
+        }
+        if (message.stopReason === "pending" || message.stopReason === "deferred")
+          throw new Error(`Pi run ended with a ${message.stopReason} assistant response`);
         const finalText = assistantText(message);
         if (assistantMessages.length === 0 && finalText.length > 0) {
           const boundary = Object.freeze({
@@ -832,6 +882,7 @@ export function createPiAgentRuntime(
         execution.controller.signal.removeEventListener("abort", abortHarness);
         unsubscribe();
         unsubscribeSteeringToolGuard();
+        unsubscribeProviderAbort();
         unsubscribeBudgetGuard();
         await abortPromise;
         settlePendingSteers(
@@ -845,12 +896,16 @@ export function createPiAgentRuntime(
     } finally {
       try {
         try {
-          if (execution.harness) await execution.harness.waitForIdle();
+          if (execution.lane) await execution.lane.waitForIdle(TODO_CONTEXT);
         } finally {
           try {
-            await execution.preparedCode?.close().catch(() => undefined);
+            await execution.harness?.close(TODO_CONTEXT);
           } finally {
-            if (execution.sessionId) releasePiSessionResources(execution.sessionId);
+            try {
+              await execution.preparedCode?.close().catch(() => undefined);
+            } finally {
+              await execution.closePiSession?.();
+            }
           }
         }
       } finally {
@@ -865,8 +920,8 @@ export function createPiAgentRuntime(
   };
   const steer = async (trailId: string, text: string): Promise<AgentSteerResult> => {
     const execution = active.get(trailId);
-    const harness = execution?.harness;
-    if (!execution || !harness) return notConsumed("not-running");
+    const lane = execution?.lane;
+    if (!execution || !lane) return notConsumed("not-running");
     if (!execution.acceptsSteering)
       return notConsumed(execution.controller.signal.aborted ? "aborted" : "turn-ended");
     const deferred = Promise.withResolvers<AgentSteerResult>();
@@ -877,7 +932,8 @@ export function createPiAgentRuntime(
     });
     execution.pendingSteers.push(receipt);
     try {
-      await harness.steer(text);
+      const queued = await lane.steer(text, undefined, TODO_CONTEXT);
+      if (!queued.ok) throw queued.error;
     } catch {
       // Pi can fail after queue insertion while notifying queue observers. Keep the receipt pending:
       // only a user message_end or terminal turn settlement can prove the outcome.
@@ -892,5 +948,5 @@ export function createPiAgentRuntime(
     await execution.requestHarnessAbort?.();
     if (execution.abortError) throw execution.abortError;
   };
-  return Object.freeze({ name: "pi-agent-harness-0.82.1", run, steer, abort });
+  return Object.freeze({ name: "pi-agent-harness-0.85.0", run, steer, abort });
 }

@@ -39,7 +39,7 @@ export function createControlledPiModels(options: CreateControlledPiModelsOption
   const provider = fauxProvider(
     createConditionalObject({
       provider: CONTROLLED_PI_PROVIDER,
-      models: [{ id: CONTROLLED_PI_MODEL, contextWindow: 8000, maxTokens: 1000 }],
+      models: [{ id: CONTROLLED_PI_MODEL, contextWindow: 200_000, maxTokens: 1_000 }],
     })
       .addOptional(
         !(options.tokensPerSecond === undefined) ? { tokensPerSecond: options.tokensPerSecond } : undefined,

@@ -11,6 +11,7 @@ import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import {
   type AuthInteraction,
+  type ProviderAuthInteraction,
   type Credential,
   type CredentialInfo,
   type CredentialStore,
@@ -427,14 +428,17 @@ export interface PiAuthManager {
   readonly logout: (providerId: string) => Promise<void>;
 }
 export type PiAuthOperations = PiAuthManager;
+const NEVER_ABORTED_SIGNAL = new AbortController().signal;
+
 export function createPiAuthManager(models: Models, credentials: CredentialStore): PiAuthManager {
   const login = async (providerId: string, callbacks: NoesisAuthLoginCallbacks): Promise<PiAuthStatus> => {
     if (!isNoesisProviderId(providerId)) throw new Error(`Unknown Pi provider ${providerId}`);
     const provider = models.getProvider(providerId);
     if (!provider) throw new Error(`Unknown Pi provider ${providerId}`);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const piCallbacks: AuthInteraction = createConditionalObject({} as const)
-      .addOptional(callbacks.signal ? { signal: callbacks.signal } : undefined)
+    const piCallbacks: ProviderAuthInteraction = createConditionalObject({
+      signal: callbacks.signal ?? NEVER_ABORTED_SIGNAL,
+    } as const)
       .add({
         prompt: async (prompt: Parameters<AuthInteraction["prompt"]>[0]) => await callbacks.prompt(prompt),
         notify: (event: Parameters<AuthInteraction["notify"]>[0]) => callbacks.notify(event),
