@@ -43,7 +43,7 @@ After a request, the inspector shows the last request captured after tool-result
 
 `/capabilities` opens the existing `/learning` explorer filtered to active Capabilities. The all-activity filter still provides access to paused Capabilities and historical records.
 
-Long sessions may compact older settled turns into a continuation checkpoint while keeping recent transcript messages raw. Compaction never deletes or rewrites the visible transcript. Resume and search still use the complete original conversation. Only future model context becomes smaller.
+Long sessions may compact older settled turns into independent, immutable continuity notes while keeping recent transcript messages raw. A bounded session notebook keeps the most recent note windows resident; omitted windows remain searchable from the current session through their original messages and tool traces. Repeated compaction never summarizes prior notes again. Compaction never deletes or rewrites the visible transcript. Resume and search still use the complete original conversation. Only future model context becomes smaller.
 
 The visible user and assistant messages from a failed or aborted turn remain in later context and are labelled as unfinished. They are not queued again or retried automatically. A later request such as "keep going" can therefore refer to the same current-session history the user sees.
 

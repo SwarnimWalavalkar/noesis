@@ -5,6 +5,7 @@ import {
   contextCheckpointActivationRequestDigest,
   estimateContextTokens,
   prepareCompactionWindow,
+  resolveContextNotebook,
   resolveContextTokenBudget,
   resolveHistoryTokenBudget,
   resolvedSessionContext,
@@ -127,6 +128,7 @@ describe("session compaction", () => {
     const checkpoint = Object.freeze({
       checkpointId: "checkpoint-1",
       sessionId: "session-1",
+      summaryKind: "note_delta" as const,
       summary: "prior summary",
       summaryDigest: "a".repeat(64),
       sourceDigest: "b".repeat(64),
@@ -154,6 +156,52 @@ describe("session compaction", () => {
     expect(current.messages.map(({ messageId }) => messageId)).toEqual(["3", "4", "5", "6"]);
     expect(window?.sourceMessages.map(({ messageId }) => messageId)).toEqual(["3", "4"]);
     expect(window?.previousCheckpoint?.checkpointId).toBe("checkpoint-1");
+    if (!window) throw new Error("Expected a repeated compaction window");
+    expect(serializeCompactionWindow(window)).toContain('"previousCheckpointId":"checkpoint-1"');
+    expect(serializeCompactionWindow(window)).not.toContain("prior summary");
+  });
+
+  test("renders independent checkpoint notes without recompressing prior note text", () => {
+    const first = Object.freeze({
+      checkpointId: "checkpoint-1",
+      sessionId: "session-1",
+      summaryKind: "note_delta" as const,
+      summary: "[CONTEXT NOTE DELTA]\n- [constraint] Preserve the copper requirement verbatim.",
+      summaryDigest: "a".repeat(64),
+      sourceDigest: "b".repeat(64),
+      sources: Object.freeze([Object.freeze({ messageId: "1", contentDigest: "c".repeat(64) })]),
+      firstRetainedMessageId: "2",
+      lastCoveredMessageId: "1",
+      tokenBudget: 1_000,
+      estimatedSummaryTokens: 20,
+      sensitivity: "normal" as const,
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off" as const,
+      usage: Object.freeze({ inputTokens: 1, outputTokens: 1, totalTokens: 2, estimatedCost: 0 }),
+      createdAt: "2026-08-13T00:00:00.000Z",
+    });
+    const second = Object.freeze({
+      ...first,
+      checkpointId: "checkpoint-2",
+      previousCheckpointId: first.checkpointId,
+      summary: "[CONTEXT NOTE DELTA]\n- [fact] The silver result passed.",
+      summaryDigest: "d".repeat(64),
+      sourceDigest: "e".repeat(64),
+      sources: Object.freeze([Object.freeze({ messageId: "2", contentDigest: "f".repeat(64) })]),
+      firstRetainedMessageId: "3",
+      lastCoveredMessageId: "2",
+      createdAt: "2026-08-13T00:01:00.000Z",
+    });
+
+    const notebook = resolveContextNotebook(Object.freeze([first, second]), 1_000);
+
+    expect(notebook?.selectedCheckpoints.map(({ checkpointId }) => checkpointId)).toEqual([
+      "checkpoint-1",
+      "checkpoint-2",
+    ]);
+    expect(notebook?.content).toContain("Preserve the copper requirement verbatim.");
+    expect(notebook?.content).toContain("The silver result passed.");
   });
 
   test("manual compaction covers an oldest complete turn below the automatic threshold", () => {
