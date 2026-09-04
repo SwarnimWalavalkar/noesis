@@ -9,6 +9,31 @@ packageExtensionsChecksum: sha256-C8mnkwV1Ngon9vAZaP0e977VHZanrVNiuz+G9K0MxO8=
 importers:
 
   .:
+    dependencies:
+      '@earendil-works/pi-agent-core':
+        specifier: 0.82.1
+        version: 0.82.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
+      '@earendil-works/pi-ai':
+        specifier: 0.82.1
+        version: 0.82.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
+      '@earendil-works/pi-coding-agent':
+        specifier: 0.82.1
+        version: 0.82.1(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(ws@8.21.1)(zod@4.4.3)
+      '@earendil-works/pi-tui':
+        specifier: 0.80.6
+        version: 0.80.6
+      '@modelcontextprotocol/sdk':
+        specifier: 1.30.0
+        version: 1.30.0(zod@4.4.3)
+      acorn:
+        specifier: 8.18.0
+        version: 8.18.0
+      proper-lockfile:
+        specifier: 4.1.2
+        version: 4.1.2
+      zod:
+        specifier: 4.4.3
+        version: 4.4.3
     devDependencies:
       '@oxlint/plugins':
         specifier: 1.79.0

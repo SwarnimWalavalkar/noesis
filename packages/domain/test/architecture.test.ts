@@ -136,6 +136,7 @@ describe("first-party architecture boundaries", () => {
       const localPath = relativePath(path);
       // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       const manifest = JSON.parse(await readFile(path, "utf8")) as {
+        readonly name?: string;
         readonly dependencies?: Readonly<Record<string, string>>;
         readonly devDependencies?: Readonly<Record<string, string>>;
       };
@@ -151,7 +152,9 @@ describe("first-party architecture boundaries", () => {
             name === "@earendil-works/pi-ai" ||
             name === "@earendil-works/pi-coding-agent");
         const allowedTui = localPath === "packages/tui/package.json" && name === "@earendil-works/pi-tui";
-        if (!allowedRuntimePi && !allowedTui) dependencyViolations.push(`${localPath}:${name}`);
+        const allowedDistribution = localPath === "package.json" && manifest.name === "noesisai";
+        if (!allowedRuntimePi && !allowedTui && !allowedDistribution)
+          dependencyViolations.push(`${localPath}:${name}`);
       }
     }
     expect(dependencyViolations).toEqual([]);

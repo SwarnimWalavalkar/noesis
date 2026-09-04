@@ -1,19 +1,56 @@
 {
-  "name": "noesis",
-  "version": "0.1.0",
-  "private": true,
+  "name": "noesisai",
+  "version": "0.0.1",
+  "description": "The self-evolving agent harness for tinkerers.",
+  "keywords": [
+    "agent",
+    "ai",
+    "coding-agent",
+    "self-improvement",
+    "terminal"
+  ],
+  "homepage": "https://github.com/SwarnimWalavalkar/noesis#readme",
+  "bugs": {
+    "url": "https://github.com/SwarnimWalavalkar/noesis/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SwarnimWalavalkar/noesis.git"
+  },
+  "bin": {
+    "noesis": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc --noEmit",
+    "build:release": "vite build --config vite.release.config.ts",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
     "dev": "./scripts/noesis-dev",
     "dev:install": "./scripts/install-noesis-dev",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
+    "package:smoke": "pnpm build:release && node scripts/test-package.mjs",
     "start": "tsx apps/noesis/src/cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.82.1",
+    "@earendil-works/pi-ai": "0.82.1",
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@earendil-works/pi-tui": "0.80.6",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "acorn": "8.18.0",
+    "proper-lockfile": "4.1.2",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@oxlint/plugins": "1.79.0",
