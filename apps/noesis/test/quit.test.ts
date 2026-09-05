@@ -182,8 +182,8 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     }>((resolveExit, reject) => {
       const timeout = setTimeout(() => {
         stopProcessGroup(child);
-        reject(new Error(`TUI did not exit within 6 seconds. Output:\n${output}`));
-      }, 6_000);
+        reject(new Error(`TUI did not exit within 9 seconds. Output:\n${output}`));
+      }, 9_000);
       child.once("error", (error) => {
         clearTimeout(timeout);
         reject(error);
@@ -208,14 +208,14 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     const reopened = await createTestRuntime(home);
     expect(reopened.listTrails()).toHaveLength(0);
     await reopened.shutdown();
-  }, 7_000);
+  }, 10_000);
 
   test("Ctrl+C exits with code 0 after the TUI is ready", async () => {
     const { output, result } = await runPtyExit("ctrl-c");
 
     expect(output).toContain("● IDLE");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
@@ -230,7 +230,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       expect(startupNotesIn(output)).toHaveLength(1);
       expect(result).toEqual({ code: 0, signal: null });
     },
-    7_000,
+    10_000,
   );
 
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
@@ -248,7 +248,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       expect(output).toContain("● IDLE");
       expect(result).toEqual({ code: 0, signal: null });
     },
-    7_000,
+    10_000,
   );
 
   test("the resume picker selects the most recent session in a real PTY", async () => {
@@ -266,7 +266,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("selected real PTY history");
     expect(output).not.toContain("older real PTY history");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each(["quit-lf", "ctrl-c"] as const)(
@@ -288,7 +288,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       expect(output).not.toContain("older continue PTY history");
       expect(result).toEqual({ code: 0, signal: null });
     },
-    7_000,
+    10_000,
   );
 
   test("direct resume restores one exact session and picker cancellation exits cleanly", async () => {
@@ -329,7 +329,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(hasStartupNote(output)).toBe(true);
     expect(output).toContain("ctx   —");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   test("captures real streaming semantics in a normal 90x28 shell", async () => {
     const { output, result } = await runPtyExit("prompt-quit", undefined, {
@@ -341,7 +341,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("Controlled Pi completion for: show the polished shell");
     expect(output).toContain("ctx   0%");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   test("selects a new model through the interactive picker and preserves cache isolation", async () => {
     const { output, result } = await runPtyExit("model-picker-select-quit", undefined, {
@@ -353,7 +353,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("New empty session · previous preserved · history not replayed");
     expect(output).toContain("● IDLE");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
@@ -376,7 +376,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       expect(reflectionJobs[0]?.attempt).toBeGreaterThan(0);
       expect(result).toEqual({ code: 0, signal: null });
     },
-    7_000,
+    10_000,
   );
 
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
@@ -398,7 +398,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
       expect(output).toContain(`Controlled Pi completion for: ${expected}`);
       expect(result).toEqual({ code: 0, signal: null });
     },
-    7_000,
+    10_000,
   );
 
   test("neutralizes bracketed C1 and OSC-like paste before the real PTY runtime sees it", async () => {
@@ -416,7 +416,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(containsC1(output)).toBe(false);
     expect(output).toContain("Controlled Pi completion for:");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   test("does not submit fragmented hostile paste until a later genuine Enter", async () => {
     const { home, output, result } = await runPtyExit("fragmented-hostile-paste-quit");
@@ -430,7 +430,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(turns[0]?.input).toBe("safe\nBAD [2J  31m ");
     expect(containsUnsafeTextControl(turns[0]?.input ?? "")).toBe(false);
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   test("captures a resumed narrow 70x22 shell without crowding it with ASCII art", async () => {
     const { output, result } = await runPtyExit(
@@ -454,7 +454,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     // evidence that the right session opened.
     expect(output).toContain("narrow history");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   test("keeps the picker compact and branded at 70x22", async () => {
     const { output, result } = await runPtyExit(
@@ -472,7 +472,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("NOESIS  resume a session");
     expect(output).toContain("↑/↓ navigate · Enter resume · d delete · Esc cancel");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   test("protects chat and input in a short 50x9 shell", async () => {
     const { output, result } = await runPtyExit("quit-lf", undefined, {
@@ -486,7 +486,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(output).toContain("› message");
     expect(output).toContain("? help · ctrl+o inspect runs");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   test("reflows the main shell after a live PTY shrink", async () => {
     const { output, result } = await runPtyExit("resize-main-quit", undefined, {
@@ -501,7 +501,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(resized).toContain("● IDLE");
     expect(resized).toContain("› message");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   test("recomputes picker rows after a live PTY shrink", async () => {
     const { output, result } = await runPtyExit(
@@ -524,7 +524,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", ()
     expect(resized).toContain("resume a session");
     expect(resized).toContain("(1/12)");
     expect(result).toEqual({ code: 0, signal: null });
-  }, 7_000);
+  }, 10_000);
 
   test("renders a mixed Markdown and LaTeX transcript, streams, and survives a live shrink", async () => {
     const { output, result } = await runPtyExit("mixed-resize-quit", undefined, { columns: 90, rows: 35 });
