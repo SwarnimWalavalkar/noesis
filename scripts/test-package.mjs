@@ -105,7 +105,7 @@ try {
     "Installed package cannot open its store",
   );
 
-  const packageRoot = join(installRoot, "node_modules", "noesisai");
+  const packageRoot = join(installRoot, "node_modules", ...sourceManifest.name.split("/"));
   const manifest = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8"));
   requireCondition(
     !JSON.stringify(manifest).includes("workspace:"),
