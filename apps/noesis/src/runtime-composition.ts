@@ -4256,6 +4256,9 @@ export async function createApplicationRuntimeComposition(
         return Object.freeze({
           executionId: result.executionId,
           value: result.value,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          logsTruncated: result.logsTruncated,
           calls: result.calls,
           durationMs: result.durationMs,
         });

@@ -5,7 +5,7 @@ description: Compose multi-call work through Noesis Code Mode and its injected S
 
 # Execute Code Mode
 
-Compose one JavaScript program around the result the user needs. Keep intermediate data in code and produce one JSON-compatible final value. Foreground `execute` returns its final top-level expression automatically; an explicit `return` also works. Saved Program bodies retain ordinary function-body semantics and must return their output explicitly.
+Compose one JavaScript program around the result the user needs. Foreground `execute` returns `{ value, stdout?, stderr?, logsTruncated? }`: `value` is its final top-level expression or explicit `return`; console output appears alongside it. Saved Program bodies must explicitly return their schema-valid output.
 
 1. Call a known catalog tool with `tools.<family>.<operation>(input)`.
 2. For a broader need, call `noesis.search(query)` once, inspect the selected tool with `noesis.describe(name)`, then invoke its exact contract.
@@ -23,7 +23,7 @@ return { readme, status };
 
 ## SDK reference
 
-- `tools.<family>.<operation>(input)` invokes a known canonical Broker tool.
+- `tools.<family>.<operation>(input)` invokes a canonical Broker tool; `Object.keys` lists its frozen namespaces and operations.
 - `noesis.search(query, limit?)` finds relevant tools in the frozen catalog.
 - `noesis.describe(name)` returns one tool's exact input and output schemas.
 - `noesis.invoke(name, input?)` invokes a tool by its exact string name.

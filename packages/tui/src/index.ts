@@ -231,42 +231,45 @@ export async function startNoesisTui(
       streamDeltas.clear();
       reasoningDeltas.clear();
       try {
-        await terminal.drainInput(1000);
-      } finally {
-        // Keep the closing glyph ticking through dispose and drain; only stop when the TUI dies.
-        stopWorkingAnimation();
-        if (!terminalStopped) {
-          terminalStopped = true;
-          tui.stop();
+        let shutdownFailure:
+          | {
+              readonly error: unknown;
+            }
+          | undefined;
+        if (abortAndSettle) {
+          let graceTimer: NodeJS.Timeout | undefined;
+          const settlement = await Promise.race<ShutdownSettlement>([
+            abortAndSettle,
+            new Promise<ShutdownSettlement>((resolve) => {
+              graceTimer = setTimeout(() => resolve({ status: "timed-out" }), TUI_TIMINGS.shutdownGraceMs);
+              graceTimer.unref();
+            }),
+          ]);
+          if (graceTimer) clearTimeout(graceTimer);
+          if (settlement.status === "rejected") shutdownFailure = { error: settlement.error };
+          if (settlement.status === "timed-out") void abortAndSettle;
         }
-      }
-      let shutdownFailure:
-        | {
-            readonly error: unknown;
+        if (exclusiveCommand) {
+          try {
+            await exclusiveCommand;
+          } catch (error) {
+            shutdownFailure ??= { error };
           }
-        | undefined;
-      if (abortAndSettle) {
-        let graceTimer: NodeJS.Timeout | undefined;
-        const settlement = await Promise.race<ShutdownSettlement>([
-          abortAndSettle,
-          new Promise<ShutdownSettlement>((resolve) => {
-            graceTimer = setTimeout(() => resolve({ status: "timed-out" }), TUI_TIMINGS.shutdownGraceMs);
-            graceTimer.unref();
-          }),
-        ]);
-        if (graceTimer) clearTimeout(graceTimer);
-        if (settlement.status === "rejected") shutdownFailure = { error: settlement.error };
-        if (settlement.status === "timed-out") void abortAndSettle;
-      }
-      if (exclusiveCommand) {
+        }
+        if (!shutdownFailure && trailId) await runtime.discardTrailIfEmpty(trailId);
+        await options.onShutdown?.();
+        if (shutdownFailure) throw shutdownFailure.error;
+      } finally {
         try {
-          await exclusiveCommand;
-        } catch (error) {
-          shutdownFailure ??= { error };
+          await terminal.drainInput(1000);
+        } finally {
+          stopWorkingAnimation();
+          if (!terminalStopped) {
+            terminalStopped = true;
+            tui.stop();
+          }
         }
       }
-      if (!shutdownFailure && trailId) await runtime.discardTrailIfEmpty(trailId);
-      if (shutdownFailure) throw shutdownFailure.error;
     })();
     shutdownPromise.then(resolveShutdown, rejectShutdown);
     return shutdownPromise;

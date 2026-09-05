@@ -64,6 +64,14 @@ function boundedJsonSafe(value, maximum, label) {
 function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value === undefined ? null : value));
 }
+async function flushOutput() {
+  await Promise.all(
+    [process.stdout, process.stderr].map(
+      (stream) =>
+        new Promise((resolve, reject) => stream.write("", (error) => (error ? reject(error) : resolve()))),
+    ),
+  );
+}
 function sourceWithLastExpressionCompletion(source) {
   const prefix = "async function __noesis_execute__() {\n";
   const program = parse(`${prefix}${source}\n}`, {
@@ -113,32 +121,19 @@ function delegate(kind, payload) {
     [Symbol.toStringTag]: "Promise",
   });
 }
-const toolNamespaces = new Map();
-const tools = new Proxy(
-  {},
-  {
-    get(_target, family) {
-      if (typeof family !== "string") return undefined;
-      const existing = toolNamespaces.get(family);
-      if (existing) return existing;
-      const namespace = new Proxy(
-        {},
-        {
-          get(_namespaceTarget, operation) {
-            if (typeof operation !== "string") return undefined;
-            return (input = {}) =>
-              delegate("invoke", {
-                name: `${family}.${operation}`,
-                input,
-              });
-          },
-        },
-      );
-      toolNamespaces.set(family, namespace);
-      return namespace;
-    },
-  },
-);
+function createTools(names) {
+  const families = new Map();
+  for (const name of names) {
+    const separator = name.indexOf(".");
+    const family = name.slice(0, separator);
+    const operation = name.slice(separator + 1);
+    const members = families.get(family) ?? [];
+    members.push([operation, (input = {}) => delegate("invoke", { name, input })]);
+    families.set(family, members);
+  }
+  const namespace = (entries) => Object.freeze(Object.setPrototypeOf(Object.fromEntries(entries), null));
+  return namespace([...families].map(([family, members]) => [family, namespace(members)]));
+}
 const noesis = Object.freeze({
   search: (query, limit) =>
     delegate(
@@ -244,6 +239,7 @@ process.on("message", async (message) => {
     return;
   }
   if (message.type !== "run" || typeof message.source !== "string") return;
+  const tools = createTools(message.toolNames);
   const sessionStore = new Map(Array.isArray(message.storeEntries) ? message.storeEntries : []);
   const storeMutations = new Map();
   let progressBytes = 0;
@@ -314,7 +310,7 @@ process.on("message", async (message) => {
       "input",
       "context",
       "agents",
-      `"use strict";\n${executableSource}`,
+      `"use strict";\nreturn await (async function () {\n${executableSource}\n})();`,
     );
     const value = await execute(
       tools,
@@ -327,12 +323,14 @@ process.on("message", async (message) => {
       context,
       agents,
     );
+    await flushOutput();
     send({
       type: "result",
       value: jsonSafe(value),
       storeMutations: [...storeMutations.entries()],
     });
   } catch (error) {
+    await flushOutput();
     sendFailure(error);
   }
 });

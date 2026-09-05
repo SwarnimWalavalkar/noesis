@@ -41,14 +41,32 @@ describe("production codemode journey", () => {
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
     const controlled = createControlledPiModels({
-      respond: ({ context }) =>
-        context.messages.at(-1)?.role === "toolResult"
-          ? "The frozen execute skill is loaded."
-          : controlledToolCallResponse(
-              "execute",
-              { source: 'tools.skills.load({ name: "execute" })' },
-              "call-load-execute-skill",
-            ),
+      respond: ({ context }) => {
+        const last = context.messages.at(-1);
+        if (last?.role === "toolResult") {
+          expect(last.content).toEqual([
+            expect.objectContaining({
+              type: "text",
+              text: expect.stringContaining('"stdout":"skill loaded\\n"'),
+            }),
+          ]);
+          expect(last.content).toEqual([
+            expect.objectContaining({
+              type: "text",
+              text: expect.stringContaining('"value":'),
+            }),
+          ]);
+          return "The frozen execute skill is loaded.";
+        }
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source:
+              'const noesis = await tools.skills.load({ name: "execute" }); console.log("skill loaded"); noesis;',
+          },
+          "call-load-execute-skill",
+        );
+      },
     });
     const skills = createPiSkillLibrary({
       cwd: process.cwd(),
