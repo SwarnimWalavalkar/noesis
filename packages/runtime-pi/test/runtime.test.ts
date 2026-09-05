@@ -3,9 +3,15 @@ import {
   fauxText,
   fauxThinking,
   fauxToolCall,
+  registerSessionResourceCleanup,
   type Models,
 } from "@earendil-works/pi-ai";
-import { AgentHarness, TODO_CONTEXT, type AgentHarnessToolInvocation } from "@earendil-works/pi-agent-core";
+import {
+  AgentHarness,
+  Closed,
+  TODO_CONTEXT,
+  type AgentHarnessToolInvocation,
+} from "@earendil-works/pi-agent-core";
 import {
   type AgentRuntimeEvent,
   type AgentUsage,
@@ -302,7 +308,11 @@ describe("agent runtime factories", () => {
   };
   const completedLease = async () => ({ complete: async () => undefined, fail: async () => undefined });
 
-  test.each(["harness", "lane"])("cancels subagent startup while %s creation is pending", async (stage) => {
+  test.each(
+    ["foreground", "role", "subagent"].flatMap((kind) =>
+      ["harness", "lane"].map((stage) => ({ kind, stage })),
+    ),
+  )("prevents $kind prompting after cancellation during $stage creation", async ({ kind, stage }) => {
     const started = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const controlled = createControlledPiModels();
@@ -323,20 +333,50 @@ describe("agent runtime factories", () => {
       }
       return created;
     });
-    const runner = createTestSubAgentTaskRunner(process.cwd(), controlled.models);
+    const subagent = createTestSubAgentTaskRunner(process.cwd(), controlled.models);
+    const foreground = createPiAgentRuntime(process.cwd(), controlled.models);
+    const role = createPiRoleModelBackend(process.cwd(), controlled.models);
     try {
-      const running = runner.run({
-        plan: reviewPlan,
-        prepared: reviewPrepared,
-        turnId: stage,
-        signal: new AbortController().signal,
-        authorizeModelCall: completedLease,
-        emit: () => undefined,
-      });
+      const running =
+        kind === "subagent"
+          ? subagent.run({
+              plan: reviewPlan,
+              prepared: reviewPrepared,
+              turnId: stage,
+              signal: new AbortController().signal,
+              authorizeModelCall: completedLease,
+              emit: () => undefined,
+            })
+          : kind === "role"
+            ? role.run({
+                runId: stage,
+                provider: CONTROLLED_PI_PROVIDER,
+                model: CONTROLLED_PI_MODEL,
+                reasoning: "off",
+                systemPrompt: "Reply",
+                prompt: "reply",
+                signal: new AbortController().signal,
+              })
+            : foreground.run(
+                {
+                  trailId: stage,
+                  provider: CONTROLLED_PI_PROVIDER,
+                  model: CONTROLLED_PI_MODEL,
+                  thinkingLevel: "off",
+                  systemPrompt: "Reply",
+                  prompt: "reply",
+                  activeCapabilities: [],
+                },
+                () => undefined,
+              );
       await started.promise;
-      await runner.abort(stage);
+      await (kind === "subagent" ? subagent : kind === "role" ? role : foreground).abort(stage);
       release.resolve();
-      await expect(running).rejects.toThrow("Subagent task was cancelled");
+      if (kind === "foreground") await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+      else
+        await expect(running).rejects.toThrow(
+          kind === "subagent" ? "Subagent task was cancelled" : "Pi role run aborted",
+        );
       expect(provider).not.toHaveBeenCalled();
     } finally {
       release.resolve();
@@ -392,21 +432,47 @@ describe("agent runtime factories", () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  test.each(["foreground", "role", "subagent"])(
-    "settles a suspended %s response without hanging cleanup",
-    async (kind) => {
-      const controlled = createControlledPiModels({
-        respond: () => ({
-          ...fauxAssistantMessage("", { stopReason: "deferred" }),
-          deferred: {
-            provider: CONTROLLED_PI_PROVIDER,
-            modelId: CONTROLLED_PI_MODEL,
-            api: controlled.provider.api,
-            id: "deferred-response",
-          },
-        }),
+  test.each(
+    ["foreground", "role", "subagent"].flatMap((kind) =>
+      ["success", "rejection", "error-result"].map((abort) => ({ kind, abort })),
+    ),
+  )("settles a suspended $kind response when abort returns $abort", async ({ kind, abort }) => {
+    const controlled = createControlledPiModels({
+      respond: () => ({
+        ...fauxAssistantMessage("", { stopReason: "deferred" }),
+        deferred: {
+          provider: CONTROLLED_PI_PROVIDER,
+          modelId: CONTROLLED_PI_MODEL,
+          api: controlled.provider.api,
+          id: "deferred-response",
+        },
+      }),
+    });
+    vi.spyOn(controlled.models, "cancelDeferred").mockResolvedValue(undefined);
+    const cleaned: string[] = [];
+    const unregister = registerSessionResourceCleanup((sessionId) => {
+      if (sessionId) cleaned.push(sessionId);
+    });
+    const closed = vi.fn();
+    const originalCreate = AgentHarness.create.bind(AgentHarness);
+    const create = vi.spyOn(AgentHarness, "create").mockImplementationOnce(async (options, context) => {
+      const created = await originalCreate(options, context);
+      const lane = await created.harness.lane("main", context);
+      if (abort === "rejection") vi.spyOn(lane, "abort").mockRejectedValueOnce(new Error("abort failed"));
+      if (abort === "error-result")
+        vi.spyOn(lane, "abort").mockResolvedValueOnce({
+          ok: false,
+          error: new Closed({ message: "abort failed" }),
+        });
+      const close = created.harness.close.bind(created.harness);
+      vi.spyOn(created.harness, "close").mockImplementation(async (closeContext) => {
+        await close(closeContext);
+        closed();
       });
-      vi.spyOn(controlled.models, "cancelDeferred").mockResolvedValue(undefined);
+      return created;
+    });
+    const expectedError = abort === "success" ? "suspended" : "abort failed";
+    try {
       if (kind === "subagent") {
         await expect(
           createTestSubAgentTaskRunner(process.cwd(), controlled.models).run({
@@ -417,7 +483,7 @@ describe("agent runtime factories", () => {
             authorizeModelCall: completedLease,
             emit: () => undefined,
           }),
-        ).rejects.toThrow("suspended");
+        ).rejects.toThrow(expectedError);
       } else if (kind === "role") {
         await expect(
           createPiRoleModelBackend(process.cwd(), controlled.models).run({
@@ -429,7 +495,7 @@ describe("agent runtime factories", () => {
             prompt: "reply",
             signal: new AbortController().signal,
           }),
-        ).rejects.toThrow("suspended");
+        ).rejects.toThrow(expectedError);
       } else {
         await expect(
           createPiAgentRuntime(process.cwd(), controlled.models).run(
@@ -444,10 +510,15 @@ describe("agent runtime factories", () => {
             },
             () => undefined,
           ),
-        ).rejects.toThrow("suspended");
+        ).rejects.toThrow(expectedError);
       }
-    },
-  );
+      expect(closed).toHaveBeenCalledOnce();
+      expect(cleaned).toHaveLength(1);
+    } finally {
+      create.mockRestore();
+      unregister();
+    }
+  });
   test("cancellation during authentication settles before subagent provider work starts", async () => {
     let providerRequests = 0;
     const controlled = createControlledPiModels({

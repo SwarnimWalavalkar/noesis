@@ -341,9 +341,11 @@ export function createPiSubAgentTaskRunner(
       task.lane = lane;
       const requestAbort = (): Promise<void> => {
         abortPromise ??= lane.abort(TODO_CONTEXT).then(
-          () => undefined,
+          (result) => {
+            if (!result.ok && result.error._tag !== "NoActiveOperation") task.abortError = result.error;
+          },
           (cause: unknown) => {
-            task.abortError = cause;
+            task.abortError = cause instanceof Error ? cause : new Error(String(cause));
           },
         );
         return abortPromise;
@@ -551,6 +553,7 @@ export function createPiSubAgentTaskRunner(
         if (!runResult.ok) throw runResult.error;
         if (runResult.value.status === "suspended") {
           await requestAbort();
+          if (task.abortError) throw task.abortError;
           if (settlementFailure) throw settlementFailure;
           throw new Error("Pi suspended the subagent run for a deferred response");
         }
@@ -606,7 +609,8 @@ export function createPiSubAgentTaskRunner(
       settleSteers(task, notConsumed(task.controller.signal.aborted ? "aborted" : "turn-ended"));
       try {
         await abortPromise;
-        if (task.lane) await task.lane.waitForIdle(TODO_CONTEXT);
+        // A failed abort may leave an operation suspended. Close seals the lane and drains its drive.
+        if (task.lane && !task.abortError) await task.lane.waitForIdle(TODO_CONTEXT);
       } finally {
         try {
           await task.harness?.close(TODO_CONTEXT);

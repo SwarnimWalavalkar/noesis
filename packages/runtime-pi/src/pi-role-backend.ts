@@ -111,9 +111,11 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
       let abortPromise: Promise<void> | undefined;
       const requestHarnessAbort = (): Promise<void> => {
         abortPromise ??= lane.abort(TODO_CONTEXT).then(
-          () => undefined,
+          (result) => {
+            if (!result.ok && result.error._tag !== "NoActiveOperation") execution.abortError = result.error;
+          },
           (cause: unknown) => {
-            execution.abortError = cause;
+            execution.abortError = cause instanceof Error ? cause : new Error(String(cause));
           },
         );
         return abortPromise;
@@ -129,6 +131,7 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
         if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
         if (runResult.value.status === "suspended") {
           await requestHarnessAbort();
+          if (execution.abortError) throw execution.abortError;
           throw new Error("Pi suspended the role run for a deferred response");
         }
         const message = terminalAssistant;
@@ -162,7 +165,8 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
       request.signal.removeEventListener("abort", forwardAbort);
       try {
         try {
-          if (execution.lane) await execution.lane.waitForIdle(TODO_CONTEXT);
+          // A failed abort may leave an operation suspended. Close seals the lane and drains its drive.
+          if (execution.lane && !execution.abortError) await execution.lane.waitForIdle(TODO_CONTEXT);
         } finally {
           try {
             await execution.harness?.close(TODO_CONTEXT);

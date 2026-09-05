@@ -678,9 +678,11 @@ export function createPiAgentRuntime(
       let abortPromise: Promise<void> | undefined;
       const requestHarnessAbort = (): Promise<void> => {
         abortPromise ??= lane.abort(TODO_CONTEXT).then(
-          () => undefined,
+          (result) => {
+            if (!result.ok && result.error._tag !== "NoActiveOperation") execution.abortError = result.error;
+          },
           (cause: unknown) => {
-            execution.abortError = cause;
+            execution.abortError = cause instanceof Error ? cause : new Error(String(cause));
           },
         );
         return abortPromise;
@@ -825,6 +827,7 @@ export function createPiAgentRuntime(
         if (execution.controller.signal.aborted) return abortedBeforePrompt();
         if (runResult.value.status === "suspended") {
           await requestHarnessAbort();
+          if (execution.abortError) throw execution.abortError;
           throw new Error("Pi suspended the foreground run for a deferred response");
         }
         const message = terminalAssistant;
@@ -899,7 +902,8 @@ export function createPiAgentRuntime(
     } finally {
       try {
         try {
-          if (execution.lane) await execution.lane.waitForIdle(TODO_CONTEXT);
+          // A failed abort may leave an operation suspended. Close seals the lane and drains its drive.
+          if (execution.lane && !execution.abortError) await execution.lane.waitForIdle(TODO_CONTEXT);
         } finally {
           try {
             await execution.harness?.close(TODO_CONTEXT);
