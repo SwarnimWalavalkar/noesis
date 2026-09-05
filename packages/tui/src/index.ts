@@ -6,7 +6,7 @@ import {
   matchesKey,
   ProcessTerminal,
   type Terminal,
-  TUI,
+  TuiMainScreen,
 } from "@earendil-works/pi-tui";
 import type { RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
 import { tuiActionForAgentEvent } from "./agent-event.ts";
@@ -66,7 +66,7 @@ export async function startNoesisTui(
   terminal: Terminal = new ProcessTerminal(),
 ): Promise<void> {
   const session = resolveTuiSessionRequest(runtime, options.session);
-  const tui = new TUI(terminal);
+  const tui = new TuiMainScreen(terminal);
   tui.setClearOnShrink(false);
   const root = new Container();
   const requestedProvider = options.provider ?? runtime.agentDefaults.provider;

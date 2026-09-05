@@ -1,4 +1,4 @@
-import { AgentHarness } from "@earendil-works/pi-agent-core";
+import { AgentHarness, TODO_CONTEXT, type AgentLane } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
 import type {
   AgentRuntimeEvent,
@@ -7,7 +7,8 @@ import type {
   FrozenSubAgentPlan,
 } from "@noesis/agent-types";
 import { createConditionalObject, toJsonValue, type JsonValue } from "@noesis/domain";
-import { createPiRequestBudgetProjector } from "./context-budget.ts";
+import { toAgentActionPayload } from "./action-payload.ts";
+import { createPiRequestBudgetProjector, createPiRequestGuardedModels } from "./context-budget.ts";
 import {
   createPiExecuteTool,
   type PiCodeExecutionEvent,
@@ -18,7 +19,11 @@ import {
   createPiBrokerTools,
   FOREGROUND_DIRECT_TOOL_NAMES,
 } from "./broker-tools.ts";
-import { createEphemeralPiSession, releasePiSessionResources } from "./session-lifecycle.ts";
+import {
+  createEphemeralPiSession,
+  NOESIS_PI_COMPACTION_SETTINGS,
+  NOESIS_PI_LANE_NAME,
+} from "./session-lifecycle.ts";
 
 export const PI_SUBAGENT_SYSTEM_PROMPT = `You are a retained subagent inside Noesis.
 Work on the task and communicate useful results explicitly through the agents API when coordination helps.
@@ -179,9 +184,11 @@ export function createPiSubAgentTaskRunner(
       forwarded: boolean;
     }[];
     harness?: AgentHarness;
+    lane?: AgentLane;
     acceptsSteering: boolean;
     hasQueuedSteering: boolean;
     requestAbort?: () => Promise<void>;
+    abortError?: unknown;
   }
   const active = new Map<string, ActiveTask>();
   const notConsumed = (reason: "not-running" | "turn-ended" | "aborted"): AgentSteerResult =>
@@ -210,9 +217,14 @@ export function createPiSubAgentTaskRunner(
         tools: Object.freeze(request.prepared.catalog.tools.filter((tool) => selectedNames.has(tool.name))),
       }),
     });
-    let sessionId: string | undefined;
+    let closePiSession: (() => Promise<void>) | undefined;
     let abortPromise: Promise<void> | undefined;
     let activeLease: PiSubAgentModelCallLease | undefined;
+    let settlementFailure: Error | undefined;
+    const abortHarness = (): void => {
+      void task.requestAbort?.();
+    };
+    task.controller.signal.addEventListener("abort", abortHarness, { once: true });
     let modelCalls = 0;
     let toolCalls = 0;
     let usage: AgentUsage = Object.freeze({
@@ -231,7 +243,7 @@ export function createPiSubAgentTaskRunner(
       const auth = await awaitWithAbort(models.getAuth(model), task.controller.signal);
       if (!auth) throw new Error(missingAuthMessage(request.plan.route.provider));
       const resources = await createEphemeralPiSession();
-      sessionId = resources.sessionId;
+      closePiSession = resources.close;
       const aliases = createBrokerToolAliases(selectedPrepared.catalog);
       const brokerRecorded = new Set<string>();
       const emitCodeEvent = (
@@ -307,77 +319,120 @@ export function createPiSubAgentTaskRunner(
         }),
       );
       const pendingDirectInputs = new Map<string, JsonValue>();
-      const harness = new AgentHarness({
-        session: resources.session,
-        models,
-        model,
-        tools: [executeTool, ...directTools],
-        activeToolNames: ["execute", ...directTools.map((tool) => tool.name)],
-        thinkingLevel: request.plan.thinkingLevel,
-        steeringMode: "all",
-        systemPrompt: request.plan.renderedSystemPrompt,
-      });
-      task.harness = harness;
-      const budgetProjector = createPiRequestBudgetProjector();
-      let currentRequest: JsonValue = requestProjection([]);
-      const unsubscribeBudget = harness.on("context", ({ messages }) => {
-        const projected = budgetProjector.project({
-          messages,
+      let requestBudgetFailure: Error | undefined;
+      const requestModels = createPiRequestGuardedModels(models, () => requestBudgetFailure);
+      const { harness } = await AgentHarness.create(
+        {
+          session: resources.session,
+          models: requestModels,
+          model,
+          tools: [executeTool, ...directTools],
+          activeToolNames: ["execute", ...directTools.map((tool) => tool.name)],
+          thinkingLevel: request.plan.thinkingLevel,
+          compaction: NOESIS_PI_COMPACTION_SETTINGS,
+          steeringMode: "all",
+          toolExecution: "sequential",
           systemPrompt: request.plan.renderedSystemPrompt,
-          activeToolMaterial: JSON.stringify(
-            harness.getActiveTools().map((tool) => ({
-              name: tool.name,
-              description: tool.description,
-              parameters: tool.parameters,
-            })),
-          ),
-          activeToolCount: harness.getActiveTools().length,
-          tokenBudget: request.plan.requestTokenBudget,
-          planId: request.taskId,
-        });
-        currentRequest = requestProjection(projected.messages);
-        return { messages: projected.messages };
+        },
+        TODO_CONTEXT,
+      );
+      task.harness = harness;
+      const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
+      task.lane = lane;
+      const requestAbort = (): Promise<void> => {
+        abortPromise ??= lane.abort(TODO_CONTEXT).then(
+          (result) => {
+            if (!result.ok && result.error._tag !== "NoActiveOperation") task.abortError = result.error;
+          },
+          (cause: unknown) => {
+            task.abortError = cause instanceof Error ? cause : new Error(String(cause));
+          },
+        );
+        return abortPromise;
+      };
+      task.requestAbort = requestAbort;
+      if (task.controller.signal.aborted) throw new Error("Subagent task was cancelled");
+      const budgetProjector = createPiRequestBudgetProjector();
+      const unsubscribeBudget = harness.hooks.on("transform_context", async ({ messages }, context) => {
+        try {
+          if (settlementFailure) throw settlementFailure;
+          if (task.controller.signal.aborted) throw new Error("Subagent task was cancelled");
+          const activeToolNames = new Set(await lane.getActiveTools(context));
+          const activeTools = (await harness.getTools(context)).filter((tool) =>
+            activeToolNames.has(tool.name),
+          );
+          const projected = budgetProjector.project({
+            messages,
+            systemPrompt: request.plan.renderedSystemPrompt,
+            activeToolMaterial: JSON.stringify(
+              activeTools.map((tool) => ({
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters,
+              })),
+            ),
+            activeToolCount: activeTools.length,
+            tokenBudget: request.plan.requestTokenBudget,
+            planId: request.taskId,
+          });
+          if (activeLease) throw new Error("Previous subagent model-call reservation is still active");
+          modelCalls += 1;
+          activeLease = await request.authorizeModelCall({
+            round: modelCalls,
+            request: requestProjection(projected.messages),
+            startedAt: now(),
+            timelineSequence: claimSequence(),
+          });
+          if (task.controller.signal.aborted) throw new Error("Subagent task was cancelled");
+          requestBudgetFailure = undefined;
+          return { messages: projected.messages };
+        } catch (cause) {
+          requestBudgetFailure = cause instanceof Error ? cause : new Error(String(cause));
+          return undefined;
+        }
       });
-      const unsubscribeModel = harness.on("before_provider_request", async () => {
-        if (activeLease) throw new Error("Previous subagent model-call reservation is still active");
-        modelCalls += 1;
-        activeLease = await request.authorizeModelCall({
-          round: modelCalls,
-          request: currentRequest,
-          startedAt: now(),
-          timelineSequence: claimSequence(),
-        });
-        return undefined;
-      });
+      const historyBase = Date.now() - request.history.length;
+      for (const [index, message] of request.history.entries()) {
+        const timestamp = historyTimestamp(message.createdAt, historyBase + index);
+        await lane.appendMessage(
+          message.role === "user"
+            ? priorUserMessage(message.content, timestamp)
+            : priorAssistantMessage(message.content, timestamp, model),
+          TODO_CONTEXT,
+        );
+      }
       let initialUserObserved = false;
-      const unsubscribe = harness.subscribe(async (event) => {
-        if (event.type === "queue_update") task.hasQueuedSteering = event.steer.length > 0;
-        else if (event.type === "message_end" && event.message.role === "user") {
-          if (!initialUserObserved) {
-            initialUserObserved = true;
+      let terminalAssistant: AssistantMessage | undefined;
+      const unsubscribers = [
+        harness.events.on("queue_update", (event) => {
+          task.hasQueuedSteering = event.queues.some((item) => item.kind === "steer");
+        }),
+        harness.events.on("message_end", async (event) => {
+          if (event.message.role === "user") {
+            if (!initialUserObserved) {
+              initialUserObserved = true;
+              return;
+            }
+            const text =
+              typeof event.message.content === "string"
+                ? event.message.content
+                : event.message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+            const index = task.pendingSteers.findIndex((receipt) => receipt.text === text);
+            if (index >= 0) {
+              const [receipt] = task.pendingSteers.splice(index, 1);
+              receipt?.resolve(
+                Object.freeze({
+                  status: "consumed",
+                  timelineSequence: claimSequence(),
+                  consumedAt: now(),
+                }),
+              );
+            }
             return;
           }
-          const text =
-            typeof event.message.content === "string"
-              ? event.message.content
-              : event.message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
-          const index = task.pendingSteers.findIndex((receipt) => receipt.text === text);
-          if (index >= 0) {
-            const [receipt] = task.pendingSteers.splice(index, 1);
-            receipt?.resolve(
-              Object.freeze({
-                status: "consumed",
-                timelineSequence: claimSequence(),
-                consumedAt: now(),
-              }),
-            );
-          }
-        } else if (event.type === "message_update") {
-          if (event.assistantMessageEvent.type === "text_delta")
-            request.emit({ type: "delta", text: event.assistantMessageEvent.delta });
-          else if (event.assistantMessageEvent.type === "thinking_delta")
-            request.emit({ type: "reasoning-delta", text: event.assistantMessageEvent.delta });
-        } else if (event.type === "message_end" && event.message.role === "assistant") {
+          if (event.message.role !== "assistant") return;
+          terminalAssistant = event.message;
+          if (settlementFailure) return;
           const messageUsage = usageOf(event.message);
           usage = addUsage(usage, messageUsage);
           const reasoning = assistantReasoning(event.message);
@@ -399,17 +454,28 @@ export function createPiSubAgentTaskRunner(
             });
           }
           const lease = activeLease;
-          activeLease = undefined;
-          if (event.message.stopReason === "error" || event.message.stopReason === "aborted")
-            await lease?.fail(
-              event.message.stopReason === "aborted"
-                ? "Subagent task was cancelled"
-                : event.message.errorMessage?.trim() || "Subagent provider request failed",
-              messageUsage,
-              event.message.stopReason === "aborted" ? "cancelled" : "failed",
-            );
-          else await lease?.complete({ output: text, usage: messageUsage });
-        } else if (event.type === "tool_execution_start") {
+          try {
+            if (event.message.stopReason === "error" || event.message.stopReason === "aborted")
+              await lease?.fail(
+                event.message.stopReason === "aborted"
+                  ? "Subagent task was cancelled"
+                  : event.message.errorMessage?.trim() || "Subagent provider request failed",
+                messageUsage,
+                event.message.stopReason === "aborted" ? "cancelled" : "failed",
+              );
+            else await lease?.complete({ output: text, usage: messageUsage });
+            activeLease = undefined;
+          } catch (cause) {
+            settlementFailure = cause instanceof Error ? cause : new Error(String(cause));
+            requestBudgetFailure = settlementFailure;
+          }
+        }),
+        harness.events.on("message_update", (event) => {
+          if (event.event.type === "text_delta") request.emit({ type: "delta", text: event.event.delta });
+          else if (event.event.type === "thinking_delta")
+            request.emit({ type: "reasoning-delta", text: event.event.delta });
+        }),
+        harness.events.on("tool_start", (event) => {
           toolCalls += 1;
           if (directToolNames.has(event.toolName))
             pendingDirectInputs.set(event.toolCallId, toJsonValue(event.args));
@@ -421,7 +487,8 @@ export function createPiSubAgentTaskRunner(
               input: toJsonValue(event.args),
               timelineSequence: claimSequence(),
             });
-        } else if (event.type === "tool_execution_end") {
+        }),
+        harness.events.on("tool_end", (event) => {
           if (directToolNames.has(event.toolName)) {
             const actionId = `direct:${event.toolCallId}`;
             const input = pendingDirectInputs.get(event.toolCallId) ?? null;
@@ -440,7 +507,7 @@ export function createPiSubAgentTaskRunner(
               actionId,
               name,
               isError: event.isError,
-              result: toJsonValue(event.result),
+              result: toAgentActionPayload(event.result),
             });
           } else
             request.emit({
@@ -448,31 +515,24 @@ export function createPiSubAgentTaskRunner(
               actionId: event.toolCallId,
               name: event.toolName,
               isError: event.isError,
-              result: toJsonValue(event.result),
+              result: toAgentActionPayload(event.result),
             });
-        }
-      });
-      const unsubscribeToolGuard = harness.on("tool_call", () =>
-        task.hasQueuedSteering
-          ? { block: true, reason: "Skipped because a collaboration message is pending." }
-          : undefined,
-      );
-      const historyBase = Date.now() - request.history.length;
-      for (const [index, message] of request.history.entries()) {
-        const timestamp = historyTimestamp(message.createdAt, historyBase + index);
-        await harness.appendMessage(
-          message.role === "user"
-            ? priorUserMessage(message.content, timestamp)
-            : priorAssistantMessage(message.content, timestamp, model),
-        );
-      }
-      const requestAbort = (): Promise<void> => {
-        abortPromise ??= harness.abort().then(() => undefined);
-        return abortPromise;
+        }),
+      ];
+      const unsubscribe = (): void => {
+        for (const dispose of unsubscribers.toReversed()) dispose();
       };
-      task.requestAbort = requestAbort;
-      const abortHarness = (): void => void requestAbort();
-      task.controller.signal.addEventListener("abort", abortHarness, { once: true });
+      const unsubscribeToolGuard = harness.hooks.on("before_tool", () =>
+        settlementFailure
+          ? { block: { reason: settlementFailure.message } }
+          : task.hasQueuedSteering
+            ? { block: { reason: "Skipped because a collaboration message is pending." } }
+            : undefined,
+      );
+      const unsubscribeProviderAbort = harness.hooks.on("after_response", async (event, context) => {
+        if (event.message.stopReason === "aborted") await lane.requestAbort(event.runId, context);
+        return undefined;
+      });
       task.acceptsSteering = true;
       request.emit({
         type: "model",
@@ -482,17 +542,34 @@ export function createPiSubAgentTaskRunner(
       });
       request.emit({ type: "status", status: "started" });
       try {
-        const prompt = harness.prompt(request.prompt);
+        if (task.controller.signal.aborted) throw new Error("Subagent task was cancelled");
+        const prompt = lane.prompt(request.prompt, undefined, TODO_CONTEXT);
         for (const pending of task.pendingSteers.slice()) {
           if (pending.forwarded) continue;
           pending.forwarded = true;
-          await harness.steer(pending.text).catch(() => undefined);
+          await lane.steer(pending.text, undefined, TODO_CONTEXT).catch(() => undefined);
         }
-        const final = await prompt;
+        const runResult = await prompt;
+        if (!runResult.ok) throw runResult.error;
+        if (runResult.value.status === "suspended") {
+          await requestAbort();
+          if (task.abortError) throw task.abortError;
+          if (settlementFailure) throw settlementFailure;
+          throw new Error("Pi suspended the subagent run for a deferred response");
+        }
+        if (settlementFailure) throw settlementFailure;
+        const final = terminalAssistant;
+        if (!final) {
+          const detail = runResult.value.error?.message ?? `operation ${runResult.value.status}`;
+          throw new Error(`Pi subagent run ended without a terminal assistant response: ${detail}`);
+        }
+        if (final.stopReason === "pending" || final.stopReason === "deferred")
+          throw new Error(`Pi subagent run ended with a ${final.stopReason} assistant response`);
         if (final.stopReason === "aborted" || task.controller.signal.aborted)
           throw new Error("Subagent task was cancelled");
         if (final.stopReason === "error")
           throw new Error(final.errorMessage?.trim() || "Subagent provider request failed");
+        if (task.abortError) throw task.abortError;
         request.emit({ type: "status", status: "completed" });
         return Object.freeze({
           text: assistantMessages.join("\n\n"),
@@ -504,10 +581,9 @@ export function createPiSubAgentTaskRunner(
         });
       } finally {
         task.acceptsSteering = false;
-        task.controller.signal.removeEventListener("abort", abortHarness);
         unsubscribe();
         unsubscribeToolGuard();
-        unsubscribeModel();
+        unsubscribeProviderAbort();
         unsubscribeBudget();
         const lease = activeLease;
         activeLease = undefined;
@@ -528,13 +604,23 @@ export function createPiSubAgentTaskRunner(
         });
       throw cause;
     } finally {
+      task.controller.signal.removeEventListener("abort", abortHarness);
       task.acceptsSteering = false;
       settleSteers(task, notConsumed(task.controller.signal.aborted ? "aborted" : "turn-ended"));
       try {
-        if (task.harness) await task.harness.waitForIdle();
+        await abortPromise;
+        // A failed abort may leave an operation suspended. Close seals the lane and drains its drive.
+        if (task.lane && !task.abortError) await task.lane.waitForIdle(TODO_CONTEXT);
       } finally {
-        if (sessionId) releasePiSessionResources(sessionId);
-        active.delete(request.taskId);
+        try {
+          await task.harness?.close(TODO_CONTEXT);
+        } finally {
+          try {
+            await closePiSession?.();
+          } finally {
+            active.delete(request.taskId);
+          }
+        }
       }
     }
   };
@@ -550,10 +636,11 @@ export function createPiSubAgentTaskRunner(
       forwarded: false,
     };
     task.pendingSteers.push(receipt);
-    if (task.harness && task.acceptsSteering) {
+    if (task.lane && task.acceptsSteering) {
       receipt.forwarded = true;
       try {
-        await task.harness.steer(text);
+        const queued = await task.lane.steer(text, undefined, TODO_CONTEXT);
+        if (!queued.ok) throw queued.error;
       } catch {
         // Consumption or task settlement provides the durable answer.
       }
@@ -567,6 +654,7 @@ export function createPiSubAgentTaskRunner(
     task.acceptsSteering = false;
     task.controller.abort();
     await task.requestAbort?.();
+    if (task.abortError) throw task.abortError;
   };
 
   return Object.freeze({ run, steer, abort });

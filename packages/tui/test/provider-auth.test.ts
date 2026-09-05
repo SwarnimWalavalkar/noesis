@@ -1,5 +1,5 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
-import { Container, TUI } from "@earendil-works/pi-tui";
+import { Container, TuiMainScreen } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import {
   createSelectTheme,
@@ -32,7 +32,7 @@ const agent: NoesisAgentRuntime = {
 
 function createHarness() {
   const terminal = createTestTerminal();
-  const tui = new TUI(terminal);
+  const tui = new TuiMainScreen(terminal);
   tui.addChild(new Container());
   tui.start();
   return { terminal, tui };

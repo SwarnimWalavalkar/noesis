@@ -6,9 +6,12 @@ import {
   type AuthResult,
   type Context,
   type CredentialStore,
+  type DeferredHandle,
   type Model,
   type Models,
   type ModelsApiStreamOptions,
+  type ModelsDeferredCancelOptions,
+  type ModelsDeferredFetchOptions,
   type ModelsSimpleStreamOptions,
   type ModelsStore,
   type MutableModels,
@@ -149,6 +152,46 @@ export function createConfiguredModelsProjection(projected: Models, source: Mode
     return await streamSimple(model, context, options).result();
   }
 
+  function streamDeferred(
+    model: Model<Api>,
+    handle: DeferredHandle,
+    options?: ModelsDeferredFetchOptions,
+  ): AssistantMessageEventStream {
+    return projected.streamDeferred(model, handle, {
+      ...options,
+      transformHeaders: async (current) => {
+        const headers = await configuredHeaders(model, options?.apiKey, options?.env);
+        let merged = mergeHeaders(current, headers) ?? {};
+        merged = mergeHeaders(merged, options?.headers) ?? {};
+        return options?.transformHeaders ? await options.transformHeaders(merged) : merged;
+      },
+    });
+  }
+
+  async function fetchDeferred(
+    model: Model<Api>,
+    handle: DeferredHandle,
+    options?: ModelsDeferredFetchOptions,
+  ): Promise<AssistantMessage> {
+    return await streamDeferred(model, handle, options).result();
+  }
+
+  async function cancelDeferred(
+    model: Model<Api>,
+    handle: DeferredHandle,
+    options?: ModelsDeferredCancelOptions,
+  ): Promise<void> {
+    await projected.cancelDeferred(model, handle, {
+      ...options,
+      transformHeaders: async (current) => {
+        const headers = await configuredHeaders(model, options?.apiKey, options?.env);
+        let merged = mergeHeaders(current, headers) ?? {};
+        merged = mergeHeaders(merged, options?.headers) ?? {};
+        return options?.transformHeaders ? await options.transformHeaders(merged) : merged;
+      },
+    });
+  }
+
   return Object.freeze({
     getProviders: () => projected.getProviders(),
     getProvider: (providerId) => projected.getProvider(providerId),
@@ -164,6 +207,9 @@ export function createConfiguredModelsProjection(projected: Models, source: Mode
     complete,
     streamSimple,
     completeSimple,
+    streamDeferred,
+    fetchDeferred,
+    cancelDeferred,
   } satisfies Models);
 }
 

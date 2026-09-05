@@ -9,7 +9,7 @@ import {
   type Component,
   type SelectListTheme,
   type Terminal,
-  TUI,
+  TuiMainScreen,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import {
@@ -214,7 +214,7 @@ export async function runNoesisOnboardingTui<T>(
   const colorEnabled =
     terminal instanceof ProcessTerminal && shouldUseColor(process.env) && process.stdout.hasColors();
   const theme = createSelectTheme(colorEnabled);
-  const tui = new TUI(terminal);
+  const tui = new TuiMainScreen(terminal);
   const root = new Container();
   const body = new Container();
   const entries: TranscriptEntry[] = [];

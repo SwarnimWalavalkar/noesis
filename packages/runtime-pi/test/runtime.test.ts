@@ -3,9 +3,15 @@ import {
   fauxText,
   fauxThinking,
   fauxToolCall,
+  registerSessionResourceCleanup,
   type Models,
 } from "@earendil-works/pi-ai";
-import { AgentHarness } from "@earendil-works/pi-agent-core";
+import {
+  AgentHarness,
+  Closed,
+  TODO_CONTEXT,
+  type AgentHarnessToolInvocation,
+} from "@earendil-works/pi-agent-core";
 import {
   type AgentRuntimeEvent,
   type AgentUsage,
@@ -23,6 +29,7 @@ import {
   createAssistantDeltaAggregator,
   createBrokerToolAliases,
   createPiAgentRuntime,
+  createPiRoleModelBackend,
   createPiExecuteTool,
   createPiSubAgentTaskRunner,
   type FrozenSessionToolResolver,
@@ -50,6 +57,13 @@ const sessionToolNames = [
   "find_similar_tasks",
   "prior_experiment_outcomes",
 ] as const satisfies readonly SessionToolName[];
+const TEST_TOOL_INVOCATION: AgentHarnessToolInvocation = Object.freeze({
+  invocationId: "test-invocation",
+  operationId: "test-operation",
+  turnId: "test-turn",
+  getMemo: async () => undefined,
+  setMemo: async () => undefined,
+});
 
 function material(revisionId: string, workingPath: string, content: string): FrozenRevisionMaterial {
   const revision: FileRevisionRef = Object.freeze({
@@ -214,7 +228,10 @@ function createTestSubAgentTaskRunner(cwd: string, models: Models) {
       readonly prepared: PreparedPiCodeExecution;
       readonly turnId: string;
       readonly signal: AbortSignal;
-      readonly authorizeModelCall: (round: number) => Promise<{
+      readonly authorizeModelCall: (
+        round: number,
+        input: JsonValue,
+      ) => Promise<{
         readonly complete: (request: {
           readonly output: string;
           readonly usage: import("@noesis/agent-types").AgentUsage;
@@ -259,7 +276,8 @@ function createTestSubAgentTaskRunner(cwd: string, models: Models) {
           history: Object.freeze([]),
           prepared: request.prepared,
           startingTimelineSequence: 0,
-          authorizeModelCall: async ({ round }) => await request.authorizeModelCall(round),
+          authorizeModelCall: async ({ round, request: input }) =>
+            await request.authorizeModelCall(round, input),
           emit: request.emit,
         });
       } finally {
@@ -272,6 +290,235 @@ function createTestSubAgentTaskRunner(cwd: string, models: Models) {
 }
 
 describe("agent runtime factories", () => {
+  const reviewPlan: TestSubAgentTaskPlan = {
+    runId: "review-regression",
+    systemPrompt: "Use the supplied tools.",
+    prompt: "Inspect this exact current request.",
+    tools: [],
+    thinkingLevel: "off",
+    route: { provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL },
+    frozenTools: [],
+    authority: { parentExecutionId: "parent-execution", parentToolCallId: "parent-call" },
+    budget: { requestTokenBudget: 2_000 },
+  };
+  const reviewPrepared: PreparedPiCodeExecution = {
+    catalog: emptyCatalog("review-catalog"),
+    execute: async () => ({ executionId: "review-execution", value: null, calls: 0, durationMs: 0 }),
+    close: async () => undefined,
+  };
+  const completedLease = async () => ({ complete: async () => undefined, fail: async () => undefined });
+
+  test.each(
+    ["foreground", "role", "subagent"].flatMap((kind) =>
+      ["harness", "lane"].map((stage) => ({ kind, stage })),
+    ),
+  )("prevents $kind prompting after cancellation during $stage creation", async ({ kind, stage }) => {
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const controlled = createControlledPiModels();
+    const provider = vi.spyOn(controlled.models, "streamSimple");
+    const originalCreate = AgentHarness.create.bind(AgentHarness);
+    const create = vi.spyOn(AgentHarness, "create").mockImplementationOnce(async (options, context) => {
+      const created = await originalCreate(options, context);
+      if (stage === "harness") {
+        started.resolve();
+        await release.promise;
+      } else {
+        const originalLane = created.harness.lane.bind(created.harness);
+        vi.spyOn(created.harness, "lane").mockImplementationOnce(async (name) => {
+          started.resolve();
+          await release.promise;
+          return await originalLane(name, context);
+        });
+      }
+      return created;
+    });
+    const subagent = createTestSubAgentTaskRunner(process.cwd(), controlled.models);
+    const foreground = createPiAgentRuntime(process.cwd(), controlled.models);
+    const role = createPiRoleModelBackend(process.cwd(), controlled.models);
+    try {
+      const running =
+        kind === "subagent"
+          ? subagent.run({
+              plan: reviewPlan,
+              prepared: reviewPrepared,
+              turnId: stage,
+              signal: new AbortController().signal,
+              authorizeModelCall: completedLease,
+              emit: () => undefined,
+            })
+          : kind === "role"
+            ? role.run({
+                runId: stage,
+                provider: CONTROLLED_PI_PROVIDER,
+                model: CONTROLLED_PI_MODEL,
+                reasoning: "off",
+                systemPrompt: "Reply",
+                prompt: "reply",
+                signal: new AbortController().signal,
+              })
+            : foreground.run(
+                {
+                  trailId: stage,
+                  provider: CONTROLLED_PI_PROVIDER,
+                  model: CONTROLLED_PI_MODEL,
+                  thinkingLevel: "off",
+                  systemPrompt: "Reply",
+                  prompt: "reply",
+                  activeCapabilities: [],
+                },
+                () => undefined,
+              );
+      await started.promise;
+      await (kind === "subagent" ? subagent : kind === "role" ? role : foreground).abort(stage);
+      release.resolve();
+      if (kind === "foreground") await expect(running).resolves.toMatchObject({ outcome: "aborted" });
+      else
+        await expect(running).rejects.toThrow(
+          kind === "subagent" ? "Subagent task was cancelled" : "Pi role run aborted",
+        );
+      expect(provider).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      create.mockRestore();
+    }
+  });
+
+  test.each(["budget", "authorization"])(
+    "does not invoke a provider after %s rejects the current request",
+    async (failure) => {
+      const controlled = createControlledPiModels();
+      const provider = vi.spyOn(controlled.models, "streamSimple");
+      const authorize = vi.fn(async () => {
+        throw new Error("admission denied");
+      });
+      const runner = createTestSubAgentTaskRunner(process.cwd(), controlled.models);
+      await expect(
+        runner.run({
+          plan: failure === "budget" ? { ...reviewPlan, budget: { requestTokenBudget: 1 } } : reviewPlan,
+          prepared: reviewPrepared,
+          turnId: failure,
+          signal: new AbortController().signal,
+          authorizeModelCall: authorize,
+          emit: () => undefined,
+        }),
+      ).rejects.toThrow(failure === "budget" ? "token budget" : "admission denied");
+      expect(provider).not.toHaveBeenCalled();
+      expect(authorize).toHaveBeenCalledTimes(failure === "budget" ? 0 : 1);
+    },
+  );
+
+  test("keeps a failed settlement available for cleanup and prevents subsequent tools", async () => {
+    const controlled = createControlledPiModels({
+      respond: () => controlledToolCallResponse("execute", { source: "return 1" }, "settlement-call"),
+    });
+    const complete = vi.fn(async () => {
+      throw new Error("settlement storage failed");
+    });
+    const fail = vi.fn(async () => undefined);
+    const execute = vi.fn(reviewPrepared.execute);
+    await expect(
+      createTestSubAgentTaskRunner(process.cwd(), controlled.models).run({
+        plan: reviewPlan,
+        prepared: { ...reviewPrepared, execute },
+        turnId: "settlement-failure",
+        signal: new AbortController().signal,
+        authorizeModelCall: async () => ({ complete, fail }),
+        emit: () => undefined,
+      }),
+    ).rejects.toThrow("settlement storage failed");
+    expect(complete).toHaveBeenCalledOnce();
+    expect(fail).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test.each(
+    ["foreground", "role", "subagent"].flatMap((kind) =>
+      ["success", "rejection", "error-result"].map((abort) => ({ kind, abort })),
+    ),
+  )("settles a suspended $kind response when abort returns $abort", async ({ kind, abort }) => {
+    const controlled = createControlledPiModels({
+      respond: () => ({
+        ...fauxAssistantMessage("", { stopReason: "deferred" }),
+        deferred: {
+          provider: CONTROLLED_PI_PROVIDER,
+          modelId: CONTROLLED_PI_MODEL,
+          api: controlled.provider.api,
+          id: "deferred-response",
+        },
+      }),
+    });
+    vi.spyOn(controlled.models, "cancelDeferred").mockResolvedValue(undefined);
+    const cleaned: string[] = [];
+    const unregister = registerSessionResourceCleanup((sessionId) => {
+      if (sessionId) cleaned.push(sessionId);
+    });
+    const closed = vi.fn();
+    const originalCreate = AgentHarness.create.bind(AgentHarness);
+    const create = vi.spyOn(AgentHarness, "create").mockImplementationOnce(async (options, context) => {
+      const created = await originalCreate(options, context);
+      const lane = await created.harness.lane("main", context);
+      if (abort === "rejection") vi.spyOn(lane, "abort").mockRejectedValueOnce(new Error("abort failed"));
+      if (abort === "error-result")
+        vi.spyOn(lane, "abort").mockResolvedValueOnce({
+          ok: false,
+          error: new Closed({ message: "abort failed" }),
+        });
+      const close = created.harness.close.bind(created.harness);
+      vi.spyOn(created.harness, "close").mockImplementation(async (closeContext) => {
+        await close(closeContext);
+        closed();
+      });
+      return created;
+    });
+    const expectedError = abort === "success" ? "suspended" : "abort failed";
+    try {
+      if (kind === "subagent") {
+        await expect(
+          createTestSubAgentTaskRunner(process.cwd(), controlled.models).run({
+            plan: reviewPlan,
+            prepared: reviewPrepared,
+            turnId: kind,
+            signal: new AbortController().signal,
+            authorizeModelCall: completedLease,
+            emit: () => undefined,
+          }),
+        ).rejects.toThrow(expectedError);
+      } else if (kind === "role") {
+        await expect(
+          createPiRoleModelBackend(process.cwd(), controlled.models).run({
+            runId: kind,
+            provider: CONTROLLED_PI_PROVIDER,
+            model: CONTROLLED_PI_MODEL,
+            reasoning: "off",
+            systemPrompt: "Reply",
+            prompt: "reply",
+            signal: new AbortController().signal,
+          }),
+        ).rejects.toThrow(expectedError);
+      } else {
+        await expect(
+          createPiAgentRuntime(process.cwd(), controlled.models).run(
+            {
+              trailId: kind,
+              provider: CONTROLLED_PI_PROVIDER,
+              model: CONTROLLED_PI_MODEL,
+              thinkingLevel: "off",
+              systemPrompt: "Reply",
+              prompt: "reply",
+              activeCapabilities: [],
+            },
+            () => undefined,
+          ),
+        ).rejects.toThrow(expectedError);
+      }
+      expect(closed).toHaveBeenCalledOnce();
+      expect(cleaned).toHaveLength(1);
+    } finally {
+      create.mockRestore();
+      unregister();
+    }
+  });
   test("cancellation during authentication settles before subagent provider work starts", async () => {
     let providerRequests = 0;
     const controlled = createControlledPiModels({
@@ -354,17 +601,22 @@ describe("agent runtime factories", () => {
     const firstForwarded = Promise.withResolvers<void>();
     const releaseFirstForward = Promise.withResolvers<void>();
     const forwarded: string[] = [];
-    const originalSteer = AgentHarness.prototype.steer;
-    const steerSpy = vi.spyOn(AgentHarness.prototype, "steer").mockImplementation(async function (
-      this: AgentHarness,
-      text: string,
-    ) {
-      forwarded.push(text);
-      await originalSteer.call(this, text);
-      if (text === "first queued steer") {
-        firstForwarded.resolve();
-        await releaseFirstForward.promise;
-      }
+    const originalCreate = AgentHarness.create.bind(AgentHarness);
+    const createSpy = vi.spyOn(AgentHarness, "create").mockImplementation(async (options, context) => {
+      const created = await originalCreate(options, context);
+      const lane = await created.harness.lane("main", context);
+      const originalSteer = lane.steer.bind(lane);
+      vi.spyOn(lane, "steer").mockImplementation(async (text, images, steerContext) => {
+        const message = typeof text === "string" ? text : "";
+        forwarded.push(message);
+        const result = await originalSteer(text, images, steerContext);
+        if (message === "first queued steer") {
+          firstForwarded.resolve();
+          await releaseFirstForward.promise;
+        }
+        return result;
+      });
+      return created;
     });
     const runner = createTestSubAgentTaskRunner(process.cwd(), controlled.models);
     const turnId = "turn-subagent-steer-flush";
@@ -416,14 +668,16 @@ describe("agent runtime factories", () => {
       expect(forwarded.filter((text) => text === "first queued steer")).toHaveLength(1);
       expect(forwarded.filter((text) => text === "second direct steer")).toHaveLength(1);
     } finally {
-      steerSpy.mockRestore();
+      createSpy.mockRestore();
     }
   });
 
   test("does not impose provider-round or tool-call ceilings on productive subagents", async () => {
     let providerRequests = 0;
+    const providerContexts: string[] = [];
     const controlled = createControlledPiModels({
-      respond: () => {
+      respond: ({ context }) => {
+        providerContexts.push(JSON.stringify(context.messages));
         providerRequests += 1;
         return providerRequests <= 33
           ? controlledToolCallResponse(
@@ -459,13 +713,15 @@ describe("agent runtime factories", () => {
     });
 
     const authorizedModelCalls: number[] = [];
+    const authorizedContexts: string[] = [];
     const settledModelCalls: number[] = [];
     const result = await createTestSubAgentTaskRunner(process.cwd(), controlled.models).run({
       plan,
       prepared,
       turnId: "turn-subagent-many-rounds",
       signal: new AbortController().signal,
-      authorizeModelCall: async (modelCall) => {
+      authorizeModelCall: async (modelCall, input) => {
+        authorizedContexts.push(JSON.stringify(input));
         authorizedModelCalls.push(modelCall);
         return Object.freeze({
           complete: async () => {
@@ -485,6 +741,8 @@ describe("agent runtime factories", () => {
     expect(providerRequests).toBe(34);
     expect(authorizedModelCalls).toEqual(Array.from({ length: 34 }, (_, index) => index + 1));
     expect(settledModelCalls).toEqual(authorizedModelCalls);
+    expect(authorizedContexts).toEqual(providerContexts);
+    expect(authorizedContexts[0]).toContain(plan.prompt);
   });
 
   test.each([
@@ -1181,9 +1439,16 @@ describe("agent runtime factories", () => {
       emit: () => undefined,
     });
 
-    await expect(execute.execute("cancelled", { source: "return null;" })).rejects.toThrow(
-      "cancelled before start",
-    );
+    await expect(
+      execute.execute(
+        "cancelled",
+        { source: "return null;" },
+        () => undefined,
+        undefined,
+        TEST_TOOL_INVOCATION,
+        TODO_CONTEXT,
+      ),
+    ).rejects.toThrow("cancelled before start");
     expect(executions).toBe(0);
 
     const active = new AbortController();
@@ -1214,9 +1479,16 @@ describe("agent runtime factories", () => {
       signal: active.signal,
       emit: () => undefined,
     });
-    await expect(byteBounded.execute("oversized", { source: "😀".repeat(40_000) })).rejects.toThrow(
-      "UTF-8 bytes",
-    );
+    await expect(
+      byteBounded.execute(
+        "oversized",
+        { source: "😀".repeat(40_000) },
+        () => undefined,
+        undefined,
+        TEST_TOOL_INVOCATION,
+        TODO_CONTEXT,
+      ),
+    ).rejects.toThrow("UTF-8 bytes");
     expect(byteBounded.description).toContain("Compose related multi-call work in one program");
     expect(byteBounded.description).toContain('tools.skills.load({ name: "execute" })');
     expect(byteBounded.description).not.toContain("noesis.search");
@@ -1303,8 +1575,22 @@ describe("agent runtime factories", () => {
       emit: () => undefined,
     });
 
-    await firstTurn.execute("stable-parent-call", { source: "return null;" });
-    await secondTurn.execute("stable-parent-call", { source: "return null;" });
+    await firstTurn.execute(
+      "stable-parent-call",
+      { source: "return null;" },
+      () => undefined,
+      undefined,
+      TEST_TOOL_INVOCATION,
+      TODO_CONTEXT,
+    );
+    await secondTurn.execute(
+      "stable-parent-call",
+      { source: "return null;" },
+      () => undefined,
+      undefined,
+      TEST_TOOL_INVOCATION,
+      TODO_CONTEXT,
+    );
 
     expect(logicalExecutionIds).toEqual(["turn-one:stable-parent-call", "turn-two:stable-parent-call"]);
   });
@@ -1330,7 +1616,14 @@ describe("agent runtime factories", () => {
       emit: () => undefined,
     });
 
-    await execute.execute("long-timeout-call", { source: "return null;", timeoutMs: 3_600_000 });
+    await execute.execute(
+      "long-timeout-call",
+      { source: "return null;", timeoutMs: 3_600_000 },
+      () => undefined,
+      undefined,
+      TEST_TOOL_INVOCATION,
+      TODO_CONTEXT,
+    );
 
     expect(receivedTimeout).toBe(3_600_000);
   });
@@ -1356,7 +1649,14 @@ describe("agent runtime factories", () => {
       emit: () => undefined,
     });
 
-    await execute.execute("stable-parent-call", { source: "return null;" });
+    await execute.execute(
+      "stable-parent-call",
+      { source: "return null;" },
+      () => undefined,
+      undefined,
+      TEST_TOOL_INVOCATION,
+      TODO_CONTEXT,
+    );
 
     expect(logicalExecutionId).toBe("turn-stable:stable-parent-call");
   });

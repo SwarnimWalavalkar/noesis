@@ -1,4 +1,4 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentHarnessTool } from "@earendil-works/pi-agent-core";
 import { createConditionalObject, type JsonValue, JsonValueSchema, sha256 } from "@noesis/domain";
 import { z } from "zod";
 import type * as ZodCore from "zod/v4/core";
@@ -88,7 +88,7 @@ export function createPiBrokerTools(input: {
   readonly descriptionSuffix?: string;
   readonly origin?: "foreground" | "subagent";
   readonly emit: (event: PiCodeExecutionEvent, parentToolCallId?: string, recordedByBroker?: boolean) => void;
-}): readonly AgentTool[] {
+}): readonly AgentHarnessTool<undefined>[] {
   const invoke = input.prepared.invoke;
   const names = input.canonicalNames ?? input.prepared.catalog.tools.map((tool) => tool.name);
   const byName = new Map(input.prepared.catalog.tools.map((descriptor) => [descriptor.name, descriptor]));
@@ -110,19 +110,20 @@ export function createPiBrokerTools(input: {
       } catch {
         localInputSchema = undefined;
       }
-      const tool: AgentTool<typeof parameters, PiBrokerToolDetails> = {
+      const tool: AgentHarnessTool<undefined, typeof parameters, PiBrokerToolDetails> = {
         name: alias,
         label: descriptor.label,
         description: `${descriptor.description} ${input.descriptionSuffix ?? `Direct access to ${descriptor.name}.`}`,
         parameters,
         executionMode: "sequential",
-        execute: async (toolCallId, rawInput, toolSignal) => {
+        execute: async (toolCallId, rawInput, _onUpdate, _toolContext, _invocation, context) => {
           callCount += 1;
           if (input.maximumCalls !== undefined && callCount > input.maximumCalls)
             throw new Error(`Tool-call limit of ${String(input.maximumCalls)} exceeded`);
           assertJsonValue(rawInput);
           if (localInputSchema) localInputSchema.parse(rawInput);
           const controller = new AbortController();
+          const toolSignal = context.abortSignal;
           const abortTurn = (): void => controller.abort(input.signal.reason);
           const abortTool = (): void => controller.abort(toolSignal?.reason);
           if (input.signal.aborted) abortTurn();

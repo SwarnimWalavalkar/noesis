@@ -1,5 +1,5 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
-import { Container, TUI } from "@earendil-works/pi-tui";
+import { Container, TuiMainScreen } from "@earendil-works/pi-tui";
 import { describe, expect, test, vi } from "vitest";
 import {
   createSelectTheme,
@@ -59,7 +59,7 @@ const routes = Object.freeze([
 
 function createHarness(statuses: Map<string, TuiProviderAuthStatus>) {
   const terminal = createTestTerminal();
-  const tui = new TUI(terminal);
+  const tui = new TuiMainScreen(terminal);
   tui.addChild(new Container());
   tui.start();
   const base = createInMemoryTestRuntime(agent);
