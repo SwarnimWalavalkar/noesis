@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
+import { resolve } from "import-meta-resolve";
 
 const execute = promisify(execFile);
 const repositoryRoot = new URL("../", import.meta.url);
@@ -117,21 +118,63 @@ try {
   const broker = Object.freeze({
     catalogId: "package-smoke",
     catalogDigest: "package-smoke",
-    list: () => Object.freeze([]),
+    list: () => Object.freeze([{ name: "smoke.echo" }]),
     search: () => Object.freeze([]),
     describe: () => undefined,
-    invoke: async () => Object.freeze({ ok: false, code: "not_found", message: "No smoke tools" }),
+    invoke: async (name, input) =>
+      name === "smoke.echo"
+        ? Object.freeze({ ok: true, value: input })
+        : Object.freeze({ ok: false, code: "not_found", message: "Unknown smoke tool" }),
   });
   const codeMode = codeModeModule.createCodeModeRuntime({ cwd: project, broker });
   try {
     const result = await codeMode.execute({
-      source: "return { installedWorker: 6 * 7 };",
+      source:
+        'const noesis = 42; console.log("installed log"); return { installedWorker: noesis, families: Object.keys(tools), echoed: await tools.smoke.echo({ ok: true }) };',
       sessionId: "package-smoke",
     });
     requireCondition(result.value.installedWorker === 42, "Installed Code Mode worker did not execute");
+    requireCondition(result.stdout === "installed log\n", "Installed Code Mode lost stdout");
+    requireCondition(
+      result.value.families.includes("smoke") && result.value.echoed.ok,
+      "Installed Code Mode did not project the frozen catalog",
+    );
   } finally {
     await codeMode.shutdown();
   }
+
+  // Use the consumer's module graph, including shrinkwrapped nested Pi copies.
+  // A referenced timer makes missed cleanup an observable process-exit failure.
+  await run(
+    process.execPath,
+    [
+      "--input-type=module",
+      "-e",
+      `
+    import { resolve } from ${JSON.stringify(resolve("import-meta-resolve", pathToFileURL(join(packageRoot, "package.json")).href))};
+    const base = ${JSON.stringify(pathToFileURL(join(packageRoot, "package.json")).href)};
+    const owners = [...new Set([
+      resolve("@earendil-works/pi-ai", base),
+      ...["@earendil-works/pi-coding-agent", "@earendil-works/pi-agent-core"].map(owner =>
+        resolve("@earendil-works/pi-ai", resolve(owner, base))),
+    ])];
+    const seen = [];
+    const unregister = [];
+    for (const owner of owners) {
+      const resources = await import(owner);
+      const timer = setInterval(() => {}, 1000);
+      unregister.push(resources.registerSessionResourceCleanup(id => { clearInterval(timer); seen.push(id); }));
+    }
+    const { createEphemeralPiSession } = await import(${JSON.stringify(pathToFileURL(join(packageRoot, "dist/packages/runtime-pi/src/session-lifecycle.js")).href)});
+    const session = await createEphemeralPiSession();
+    await session.close();
+    if (seen.length !== owners.length || seen.some(id => id !== session.session.metadata.id + ":main"))
+      throw new Error("Installed Pi session cleanup missed a resource owner");
+    for (const remove of unregister) remove();
+  `,
+    ],
+    { cwd: project, timeout: 10_000 },
+  );
 
   console.log(`Package smoke passed for ${report.name}@${report.version} (${String(report.size)} bytes)`);
 } finally {

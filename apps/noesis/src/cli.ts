@@ -638,6 +638,7 @@ async function main(): Promise<void> {
         thinkingLevel: config.agent.thinkingLevel,
         startupNote,
         mcpInteractionBridge: created.mcpInteractionBridge,
+        onShutdown: () => runtime.shutdown(),
         openUrl: async (url) => {
           openAuthUrl(url);
         },

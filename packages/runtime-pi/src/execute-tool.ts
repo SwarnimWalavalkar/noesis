@@ -156,6 +156,9 @@ export interface PreparedPiCodeExecution {
   ) => Promise<{
     readonly executionId: string;
     readonly value: JsonValue;
+    readonly stdout?: string;
+    readonly stderr?: string;
+    readonly logsTruncated?: boolean;
     readonly calls: number;
     readonly durationMs: number;
   }>;
@@ -235,7 +238,18 @@ export function createPiExecuteTool(input: {
         );
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(result.value) }],
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                createConditionalObject({ value: result.value })
+                  .addOptional(result.stdout ? { stdout: result.stdout } : undefined)
+                  .addOptional(result.stderr ? { stderr: result.stderr } : undefined)
+                  .addOptional(result.logsTruncated ? { logsTruncated: true } : undefined)
+                  .finish(),
+              ),
+            },
+          ],
           details: {
             kind: "result",
             executionId: result.executionId,

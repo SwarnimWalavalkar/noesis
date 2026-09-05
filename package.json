@@ -52,6 +52,7 @@
     "@earendil-works/pi-tui": "0.85.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "acorn": "8.18.0",
+    "import-meta-resolve": "4.2.0",
     "proper-lockfile": "4.1.2",
     "zod": "4.4.3"
   },

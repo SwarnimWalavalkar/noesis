@@ -62,6 +62,7 @@ function runtime(
     readonly overrideInvocationResult?: ToolInvocationResult;
     readonly runAgent?: (input: ControlledAgentRunInput) => Promise<string>;
     readonly observeContext?: (context: ToolExecutionContext) => void;
+    readonly additionalToolNames?: readonly string[];
   } = {},
 ) {
   const runAgent = options.runAgent;
@@ -75,20 +76,22 @@ function runtime(
         credentialRefs: Object.freeze([]),
       }),
       definitions: [
-        defineTool({
-          name: "math.double",
-          label: "Double",
-          description: "Double a number",
-          inputSchema: z.strictObject({ value: z.number() }),
-          outputSchema: z.strictObject({ value: z.number() }),
-          effect: () => ({ effect: "read", resource: "math:double", estimatedCost: 0 }),
-          execute: async ({ value }, context) => {
-            options.observeContext?.(context);
-            await options.beforeDouble?.();
-            if (options.doubleProgress !== undefined) context.emitUpdate?.(options.doubleProgress);
-            return { value: value * 2 };
-          },
-        }),
+        ...["math.double", ...(options.additionalToolNames ?? [])].map((name) =>
+          defineTool({
+            name,
+            label: "Double",
+            description: "Double a number",
+            inputSchema: z.strictObject({ value: z.number() }),
+            outputSchema: z.strictObject({ value: z.number() }),
+            effect: () => ({ effect: "read", resource: "math:double", estimatedCost: 0 }),
+            execute: async ({ value }, context) => {
+              options.observeContext?.(context);
+              await options.beforeDouble?.();
+              if (options.doubleProgress !== undefined) context.emitUpdate?.(options.doubleProgress);
+              return { value: value * 2 };
+            },
+          }),
+        ),
         ...(runAgent
           ? [
               defineTool({
@@ -322,13 +325,116 @@ describe("codemode runtime", () => {
   it("returns actionable frozen-catalog recovery for an unknown tool name", async () => {
     await expect(
       runtime().execute({
-        source: "return await tools.math.multiply({ value: 4 });",
+        source: 'return await noesis.invoke("math.multiply", { value: 4 });',
         sessionId: "session-unknown-tool",
       }),
     ).rejects.toThrow(
       "Unknown tool: math.multiply. Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
     );
   });
+  it("allows local SDK shadowing without changing completion or session storage", async () => {
+    const code = runtime();
+    for (const completionMode of ["explicit", "last-expression"] as const) {
+      const result = await code.execute({
+        source: `
+          store("saved", await tools.math.double({ value: 3 }));
+          const noesis = "local";
+          { const tools = "nested"; if (tools !== "nested") throw new Error("scope"); }
+          ${completionMode === "explicit" ? "return" : ""} ({ noesis, stored: load("saved"), target: new.target ?? null });
+        `,
+        completionMode,
+        sessionId: "shadowing",
+      });
+      expect(result.value).toEqual({ noesis: "local", stored: { value: 6 }, target: null });
+    }
+    await expect(
+      code.execute({ source: 'return load("saved");', sessionId: "shadowing" }),
+    ).resolves.toMatchObject({ value: { value: 6 } });
+    await expect(
+      code.execute({ source: "const tools = 42; return tools;", sessionId: "shadowing" }),
+    ).resolves.toMatchObject({ value: 42 });
+  });
+  it("enumerates only frozen catalog tools without discovery calls", async () => {
+    const result = await runtime().execute({
+      source: `return {
+        families: Object.keys(tools), operations: Object.keys(tools.math),
+        missing: tools.missing === undefined && tools.math.missing === undefined,
+        inherited: tools.toString === undefined && tools.math.constructor === undefined,
+        doubled: await tools.math.double({ value: 7 }),
+      };`,
+      sessionId: "catalog-enumeration",
+    });
+    expect(result.value).toEqual({
+      families: ["math"],
+      operations: ["double"],
+      missing: true,
+      inherited: true,
+      doubled: { value: 14 },
+    });
+    expect(result.calls).toBe(1);
+  });
+  it("drains stdout and stderr alongside the returned value", async () => {
+    const result = await runtime().execute({
+      source: 'console.log("x".repeat(100_000)); console.error("warning"); return 42;',
+      sessionId: "console-output",
+    });
+    expect(result).toMatchObject({
+      value: 42,
+      stdout: `${"x".repeat(100_000)}\n`,
+      stderr: "warning\n",
+      logsTruncated: false,
+    });
+    const logged = await runtime().execute({
+      source: 'console.log("hello");',
+      completionMode: "last-expression",
+      sessionId: "console-only",
+    });
+    expect(logged).toMatchObject({ value: null, stdout: "hello\n" });
+    const large = await runtime().execute({
+      source: 'console.log("x".repeat(300_000)); return 42;',
+      sessionId: "large-console",
+    });
+    expect(large.value).toBe(42);
+    expect(large.logsTruncated).toBe(true);
+  });
+  it("supports bare tools alongside a namespace with the same name", async () => {
+    const result = await runtime({ additionalToolNames: ["foo", "foo.name", "mcp.server.double"] }).execute({
+      source: `return {
+        names: Object.keys(tools).sort(),
+        members: Object.keys(tools.foo),
+        bare: await tools.foo({ value: 2 }),
+        named: await tools.foo.name({ value: 3 }),
+        mcp: await tools.mcp["server.double"]({ value: 4 }),
+      };`,
+      sessionId: "bare-catalog-names",
+    });
+    expect(result.value).toEqual({
+      names: ["foo", "math", "mcp"],
+      members: ["name"],
+      bare: { value: 4 },
+      named: { value: 6 },
+      mcp: { value: 8 },
+    });
+    expect(result.calls).toBe(3);
+  });
+  it.each(["stdout", "stderr"])(
+    "preserves execution results and errors when %s flushing fails",
+    async (stream) => {
+      const breakFlush = `process.${stream}.write = (_chunk, callback) => { callback(new Error("closed output")); };`;
+      await expect(
+        runtime().execute({
+          source: `${breakFlush} return 42;`,
+          sessionId: "flush-result",
+        }),
+      ).resolves.toMatchObject({ value: 42, logsTruncated: true });
+      await expect(
+        runtime().execute({
+          source: `${breakFlush} throw new Error("original execution failure");`,
+          sessionId: "flush-failure",
+        }),
+      ).rejects.toThrow("original execution failure");
+    },
+  );
   it("supports Node imports and progress", async () => {
     const events: JsonValue[] = [];
     const result = await runtime().execute(
@@ -628,7 +734,7 @@ describe("codemode runtime", () => {
     await expect(
       runtime().execute({
         source: `
-          process.send({ type: "result", value: "x".repeat(2 * 1024 * 1024), storeMutations: [] });
+          process.send({ type: "result", value: "x".repeat(2 * 1024 * 1024), logsTruncated: false, storeMutations: [] });
           await new Promise(() => undefined);
         `,
         sessionId: "raw-result",

@@ -225,48 +225,53 @@ export async function startNoesisTui(
       removeSubAgentListener();
       tui.requestRender();
       await new Promise<void>((resolve) => setTimeout(resolve, TUI_TIMINGS.closingFeedbackMs));
-      selection.dispose();
-      learning.dispose();
-      await mcp.dispose();
-      streamDeltas.clear();
-      reasoningDeltas.clear();
-      try {
-        await terminal.drainInput(1000);
-      } finally {
-        // Keep the closing glyph ticking through dispose and drain; only stop when the TUI dies.
-        stopWorkingAnimation();
-        if (!terminalStopped) {
-          terminalStopped = true;
-          tui.stop();
-        }
-      }
-      let shutdownFailure:
-        | {
-            readonly error: unknown;
-          }
-        | undefined;
-      if (abortAndSettle) {
-        let graceTimer: NodeJS.Timeout | undefined;
-        const settlement = await Promise.race<ShutdownSettlement>([
-          abortAndSettle,
-          new Promise<ShutdownSettlement>((resolve) => {
-            graceTimer = setTimeout(() => resolve({ status: "timed-out" }), TUI_TIMINGS.shutdownGraceMs);
-            graceTimer.unref();
-          }),
-        ]);
-        if (graceTimer) clearTimeout(graceTimer);
-        if (settlement.status === "rejected") shutdownFailure = { error: settlement.error };
-        if (settlement.status === "timed-out") void abortAndSettle;
-      }
-      if (exclusiveCommand) {
+      const shutdownFailures: unknown[] = [];
+      const attemptCleanup = async (cleanup: () => void | Promise<void>): Promise<void> => {
         try {
-          await exclusiveCommand;
+          await cleanup();
         } catch (error) {
-          shutdownFailure ??= { error };
+          shutdownFailures.push(error);
+        }
+      };
+      try {
+        await attemptCleanup(() => selection.dispose());
+        await attemptCleanup(() => learning.dispose());
+        await attemptCleanup(() => mcp.dispose());
+        streamDeltas.clear();
+        reasoningDeltas.clear();
+        if (abortAndSettle) {
+          let graceTimer: NodeJS.Timeout | undefined;
+          const settlement = await Promise.race<ShutdownSettlement>([
+            abortAndSettle,
+            new Promise<ShutdownSettlement>((resolve) => {
+              graceTimer = setTimeout(() => resolve({ status: "timed-out" }), TUI_TIMINGS.shutdownGraceMs);
+              graceTimer.unref();
+            }),
+          ]);
+          if (graceTimer) clearTimeout(graceTimer);
+          if (settlement.status === "rejected") shutdownFailures.push(settlement.error);
+          if (settlement.status === "timed-out") void abortAndSettle;
+        }
+        if (exclusiveCommand) {
+          await attemptCleanup(() => exclusiveCommand);
+        }
+        if (shutdownFailures.length === 0 && trailId) await runtime.discardTrailIfEmpty(trailId);
+      } catch (error) {
+        shutdownFailures.push(error);
+      } finally {
+        await attemptCleanup(() => options.onShutdown?.());
+        try {
+          await attemptCleanup(() => terminal.drainInput(1000));
+        } finally {
+          stopWorkingAnimation();
+          if (!terminalStopped) {
+            terminalStopped = true;
+            await attemptCleanup(() => tui.stop());
+          }
         }
       }
-      if (!shutdownFailure && trailId) await runtime.discardTrailIfEmpty(trailId);
-      if (shutdownFailure) throw shutdownFailure.error;
+      if (shutdownFailures.length === 1) throw shutdownFailures[0];
+      if (shutdownFailures.length > 1) throw new AggregateError(shutdownFailures, "Session cleanup failed");
     })();
     shutdownPromise.then(resolveShutdown, rejectShutdown);
     return shutdownPromise;

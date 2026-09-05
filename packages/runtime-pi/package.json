@@ -13,6 +13,7 @@
     "@noesis/agent-types": "workspace:*",
     "@noesis/domain": "workspace:*",
     "@noesis/intelligence": "workspace:*",
+    "import-meta-resolve": "4.2.0",
     "proper-lockfile": "4.1.2",
     "zod": "4.4.3"
   },

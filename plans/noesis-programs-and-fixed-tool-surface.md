@@ -15,6 +15,8 @@ The set is not user-configurable and does not change when Noesis learns or saves
 
 The direct `execute` descriptor stays small and points to a progressively loaded, turn-frozen built-in `execute` skill. That skill teaches Code Mode composition, the injected SDK, and Program authoring. Exact tool call shapes remain in the frozen Tool Catalog.
 
+Each execution has a fresh async function scope inside its SDK bindings, so local declarations follow normal JavaScript shadowing rules. `store` and `load` remain the explicit cross-execution scratch state. Enumerable `tools` namespaces project exact names from the same frozen Broker catalog; absent properties are undefined. Foreground results expose the returned `value` alongside captured `stdout` and `stderr`, with explicit `logsTruncated` when the existing log retention bound is reached. Saved Program output schemas still validate only the returned value.
+
 Foreground Code Mode, shell commands, Programs, workflows, and subagents are governed by cancellation rather than implicit duration or call-count ceilings. A caller may request an explicit timeout when the task itself needs one. Context projections, individual IPC frames, durable scratch state, and model requests remain size-bounded at their typed boundaries; exceeding a presentation-only progress allowance drops further progress instead of failing productive work.
 
 ## Programs

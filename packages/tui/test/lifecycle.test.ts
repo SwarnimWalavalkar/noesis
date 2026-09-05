@@ -726,68 +726,66 @@ describe("Noesis TUI lifecycle", () => {
   test.each([
     ["/quit", "/quit\r"],
     ["Ctrl+C", "\u0003"],
-  ] as const)(
-    "releases the terminal immediately and settles an active compact before %s shutdown completes",
-    async (_exit, exitInput) => {
-      let releaseCompact: (() => void) | undefined;
-      const compactGate = new Promise<void>((resolve) => {
-        releaseCompact = resolve;
-      });
-      let compactStarted = false;
-      let compactFinished = false;
-      const base = await createRuntime({
-        name: "command-shutdown-scripted",
-        async run(request) {
-          return {
-            text: request.prompt,
-            provider: request.provider,
-            model: request.model,
-            outcome: "completed",
-            stopReason: "stop",
-          };
-        },
-        steer: consumeSteer,
-        async abort() {},
-      });
-      const runtime = Object.freeze({
-        ...base,
-        compact: async () => {
-          compactStarted = true;
-          await compactGate;
-          compactFinished = true;
-        },
-      });
-      const terminal = createTestTerminal();
-      const running = startNoesisTui(runtime, {}, terminal);
-      let shutdownCompleted = false;
-      void running.then(() => {
-        shutdownCompleted = true;
-      });
-      await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+  ] as const)("keeps closing visible while an active compact settles after %s", async (_exit, exitInput) => {
+    let releaseCompact: (() => void) | undefined;
+    const compactGate = new Promise<void>((resolve) => {
+      releaseCompact = resolve;
+    });
+    let compactStarted = false;
+    let compactFinished = false;
+    const base = await createRuntime({
+      name: "command-shutdown-scripted",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const runtime = Object.freeze({
+      ...base,
+      compact: async () => {
+        compactStarted = true;
+        await compactGate;
+        compactFinished = true;
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    let shutdownCompleted = false;
+    void running.then(() => {
+      shutdownCompleted = true;
+    });
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
-      terminal.type("/compact\r");
-      await vi.waitFor(() => expect(compactStarted).toBe(true));
-      terminal.type("survive shutdown\r");
-      await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1 · paused"));
-      const trailId = runtime.listTrails()[0]?.trailId;
-      if (!trailId) throw new Error("Expected an active trail");
-      terminal.type(exitInput);
-      await vi.waitFor(() => expect(terminal.stops).toBe(1));
-      expect(shutdownCompleted).toBe(false);
-      await new Promise<void>((resolve) => setTimeout(resolve, 300));
-      expect(shutdownCompleted).toBe(false);
+    terminal.type("/compact\r");
+    await vi.waitFor(() => expect(compactStarted).toBe(true));
+    terminal.type("survive shutdown\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("QUEUED · 1 · paused"));
+    const trailId = runtime.listTrails()[0]?.trailId;
+    if (!trailId) throw new Error("Expected an active trail");
+    terminal.type(exitInput);
+    await vi.waitFor(() => expect(terminal.output).toContain("CLOSING"));
+    expect(terminal.stops).toBe(0);
+    expect(shutdownCompleted).toBe(false);
+    await new Promise<void>((resolve) => setTimeout(resolve, 300));
+    expect(shutdownCompleted).toBe(false);
 
-      releaseCompact?.();
-      await running;
-      expect(compactFinished).toBe(true);
-      expect(terminal.output).not.toContain("Context compacted");
-      expect(terminal.stops).toBe(1);
-      await expect(runtime.inspectInteraction(trailId)).resolves.toMatchObject({
-        queuePaused: true,
-        pending: [expect.objectContaining({ text: "survive shutdown" })],
-      });
-    },
-  );
+    releaseCompact?.();
+    await running;
+    expect(compactFinished).toBe(true);
+    expect(terminal.output).not.toContain("Context compacted");
+    expect(terminal.stops).toBe(1);
+    await expect(runtime.inspectInteraction(trailId)).resolves.toMatchObject({
+      queuePaused: true,
+      pending: [expect.objectContaining({ text: "survive shutdown" })],
+    });
+  });
 
   test("echoes a prompt before durable admission finishes and renders it only once", async () => {
     let releaseAdmission: (() => void) | undefined;
@@ -2488,6 +2486,119 @@ describe("Noesis TUI lifecycle", () => {
     await running;
     expect(terminal.stops).toBe(1);
   });
+
+  test.each([false, true])(
+    "keeps closing animated through application cleanup (rejects: %s)",
+    async (rejects) => {
+      const runtime = await createRuntime({
+        name: "application-cleanup-scripted",
+        async run(request) {
+          return {
+            text: "done",
+            provider: request.provider,
+            model: request.model,
+            outcome: "completed",
+            stopReason: "stop",
+          };
+        },
+        steer: consumeSteer,
+        async abort() {},
+      });
+      const terminal = createTestTerminal();
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const onShutdown = vi.fn(async () => {
+        await gate;
+        if (rejects) throw new Error("application cleanup failed");
+      });
+      const running = startNoesisTui(runtime, { onShutdown }, terminal);
+      // BOUNDARY: Promise rejection values are unknown until asserted below.
+      const outcome = running.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+      terminal.type("\u0003");
+      await vi.waitFor(() => expect(onShutdown).toHaveBeenCalledOnce());
+      const before = terminal.output.length;
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      expect(terminal.output.length).toBeGreaterThan(before);
+      expect(terminal.stops).toBe(0);
+      release?.();
+      if (rejects) expect(await outcome).toMatchObject({ message: "application cleanup failed" });
+      else expect(await outcome).toBeUndefined();
+      expect(terminal.stops).toBe(1);
+    },
+  );
+
+  test.each([false, true])(
+    "runs application cleanup after trail discard fails (additional failures: %s)",
+    async (additionalFailures) => {
+      const base = await createRuntime({
+        name: "cleanup-failure-scripted",
+        async run() {
+          throw new Error("No foreground turn expected");
+        },
+        steer: consumeSteer,
+        async abort() {},
+      });
+      const trail = await base.startTrail({ title: "Empty cleanup test" });
+      const discardFailure = new Error("trail discard failed");
+      const applicationFailure = new Error("application cleanup failed");
+      const drainFailure = new Error("terminal drain failed");
+      const runtime = {
+        ...base,
+        discardTrailIfEmpty: vi.fn(async () => {
+          throw discardFailure;
+        }),
+      };
+      const terminal = createTestTerminal();
+      if (additionalFailures)
+        Object.defineProperty(terminal, "drainInput", {
+          value: async () => {
+            throw drainFailure;
+          },
+        });
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const onShutdown = vi.fn(async () => {
+        await gate;
+        if (additionalFailures) throw applicationFailure;
+      });
+      const running = startNoesisTui(
+        runtime,
+        {
+          session: { mode: "resume", trailId: trail.trailId },
+          onShutdown,
+        },
+        terminal,
+      );
+      // BOUNDARY: Promise rejection values are unknown until asserted below.
+      const outcome = running.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+      terminal.type("\u0003");
+      await vi.waitFor(() => expect(onShutdown).toHaveBeenCalledOnce());
+      expect(runtime.discardTrailIfEmpty).toHaveBeenCalledWith(trail.trailId);
+      const before = terminal.output.length;
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      expect(terminal.output.length).toBeGreaterThan(before);
+      expect(terminal.stops).toBe(0);
+      release?.();
+      if (additionalFailures)
+        expect(await outcome).toMatchObject({
+          errors: [discardFailure, applicationFailure, drainFailure],
+        });
+      else expect(await outcome).toBe(discardFailure);
+      expect(terminal.stops).toBe(1);
+    },
+  );
 
   test("Ctrl+C aborts an active turn before startNoesisTui returns", async () => {
     let finishTurn: (() => void) | undefined;

@@ -56,6 +56,7 @@ const childMessageSchema = z.union([
   z.strictObject({
     type: z.literal("result"),
     value: JsonValueSchema,
+    logsTruncated: z.boolean(),
     storeMutations: z.array(z.tuple([z.string(), JsonValueSchema])),
   }),
   z.strictObject({
@@ -69,6 +70,7 @@ type ParentMessage =
   | {
       readonly type: "run";
       readonly source: string;
+      readonly toolNames: readonly string[];
       readonly completionMode?: CodeExecutionCompletionMode;
       readonly storeEntries: readonly (readonly [string, JsonValue])[];
       readonly input?: JsonValue;
@@ -170,6 +172,7 @@ export interface CodeExecutionResult {
   readonly value: JsonValue;
   readonly stdout: string;
   readonly stderr: string;
+  readonly logsTruncated: boolean;
   readonly calls: number;
   readonly durationMs: number;
 }
@@ -330,10 +333,12 @@ async function waitForPendingSdkCalls(
 }
 export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): CodeModeRuntime {
   const active = new Map<string, ActiveExecution>();
+  let closing = false;
   const sessionStores = new Map<string, ReadonlyMap<string, JsonValue>>();
   const maxCalls = options.maxCalls;
   const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
   const execute: CodeModeRuntime["execute"] = async (request, emit = () => undefined) => {
+    if (closing) throw new Error("Codemode runtime is closed");
     if (!request.source.trim()) throw new Error("Codemode source must not be empty");
     if (Buffer.byteLength(request.source, "utf8") > 128 * 1024)
       throw new Error("Codemode source exceeds 128 KiB");
@@ -356,6 +361,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     active.set(executionId, Object.freeze({ child, controller, closed, settled }));
     const output = { stdout: "", stderr: "" };
     let outputBytes = 0;
+    let logsTruncated = false;
     let progressBytes = 0;
     let calls = 0;
     let ready = false;
@@ -371,9 +377,14 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
       }
     };
     const appendOutput = (kind: "stdout" | "stderr", chunk: string): void => {
-      if (!chunk || outputBytes >= maxOutputBytes) return;
+      if (!chunk) return;
+      if (outputBytes >= maxOutputBytes) {
+        logsTruncated = true;
+        return;
+      }
       const remaining = maxOutputBytes - outputBytes;
       const bytes = Buffer.from(chunk, "utf8");
+      if (bytes.length > remaining) logsTruncated = true;
       const accepted = bytes.subarray(0, remaining).toString("utf8");
       output[kind] += accepted;
       outputBytes += Buffer.byteLength(accepted, "utf8");
@@ -423,6 +434,8 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
           }
           sessionStores.set(request.sessionId, nextStore);
           terminal = true;
+          // Drain the child's pipes before snapshotting logs; IPC and stdio are separate channels.
+          await terminateChild(child, closed);
           const durationMs = Date.now() - startedAt;
           notify({ type: "completed", executionId, calls, durationMs });
           resolve(
@@ -431,6 +444,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               value,
               stdout: output.stdout,
               stderr: output.stderr,
+              logsTruncated,
               calls,
               durationMs,
             }),
@@ -580,6 +594,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                 createConditionalObject({
                   type: "run",
                   source: request.source,
+                  toolNames: options.broker.list().map((tool) => tool.name),
                   storeEntries: [...(sessionStores.get(request.sessionId) ?? new Map()).entries()],
                 } as const)
                   .addOptional(
@@ -612,6 +627,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               if (recordProgress(message.value))
                 notify({ type: "progress", executionId, value: message.value });
             } else if (message.type === "result") {
+              logsTruncated ||= message.logsTruncated;
               if (message.storeMutations.length > DEFAULT_MAX_STORE_ENTRIES) {
                 finishFailure(
                   new Error(`Codemode store mutations exceed ${String(DEFAULT_MAX_STORE_ENTRIES)} entries`),
@@ -693,6 +709,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     await execution.settled;
   };
   const shutdown = async (): Promise<void> => {
+    closing = true;
     const executions = [...active.values()];
     for (const execution of executions) {
       execution.controller.abort();
