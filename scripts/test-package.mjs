@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -177,6 +178,13 @@ try {
   );
 
   console.log(`Package smoke passed for ${report.name}@${report.version} (${String(report.size)} bytes)`);
+  const outputDirectory = process.env["PACKAGE_OUTPUT_DIR"];
+  if (outputDirectory) {
+    await mkdir(outputDirectory, { recursive: true });
+    const destination = join(outputDirectory, report.filename);
+    await copyFile(archive, destination, constants.COPYFILE_EXCL);
+    console.log(`Tested release artifact: ${destination}`);
+  }
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });
 }

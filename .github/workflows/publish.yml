@@ -1,33 +1,35 @@
-name: Stage npm release
+name: Publish npm release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Version already recorded in package.json
-        required: true
-        type: string
-      confirmation:
-        description: Type "stage noesisai@VERSION"
-        required: true
-        type: string
+  release:
+    types: [published]
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: npm-release
   cancel-in-progress: false
 
 jobs:
-  stage:
-    name: Verify and stage
-    if: github.ref == 'refs/heads/main'
+  publish:
+    name: Verify and publish
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: npm
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
+      - name: Set tested package directory
+        run: printf 'PACKAGE_OUTPUT_DIR=%s/npm-release\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
       - uses: pnpm/action-setup@v4
         with:
           version: 10.29.3
@@ -36,15 +38,27 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+      - name: Verify release tag, version, and main ancestry
+        id: release
+        run: node scripts/verify-release.mjs
       - run: npm install --global npm@11.19.1
       - run: pnpm install --frozen-lockfile
-      - name: Verify release inputs
-        run: pnpm release:verify
-        env:
-          RELEASE_VERSION: ${{ inputs.version }}
-          RELEASE_CONFIRMATION: ${{ inputs.confirmation }}
       - run: pnpm audit --prod
       - run: pnpm check
       - run: pnpm package:smoke
-      - name: Stage package for maintainer approval
-        run: npm stage publish --access public
+      - name: Preserve tested package for recovery
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-release
+          path: ${{ env.PACKAGE_OUTPUT_DIR }}/*.tgz
+          if-no-files-found: error
+      - name: Attach tested package to GitHub release
+        run: gh release upload "$RELEASE_TAG" "$PACKAGE_OUTPUT_DIR/$PACKAGE_FILENAME" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE_FILENAME: ${{ steps.release.outputs.filename }}
+      - name: Publish tested package through npm trusted publishing
+        run: npm publish "$PACKAGE_OUTPUT_DIR/$PACKAGE_FILENAME" --access public --tag "$NPM_DIST_TAG" --provenance
+        env:
+          PACKAGE_FILENAME: ${{ steps.release.outputs.filename }}
+          NPM_DIST_TAG: ${{ steps.release.outputs.dist-tag }}

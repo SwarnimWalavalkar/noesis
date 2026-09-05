@@ -42,7 +42,7 @@ Noesis is an early public beta. Its interfaces and internal design will change w
 
 Noesis requires Node.js 22.19 or newer.
 
-The npm command below is the public beta installation path. Until `noesisai@0.0.1` appears on npm, use the source setup under [Develop Noesis](#develop-noesis).
+Install the public beta from npm:
 
 ```sh
 npm install --global noesisai
@@ -197,6 +197,8 @@ pnpm check
 The check formats, lints, type-checks, and tests the repository. Tests use controlled providers and do not require paid credentials.
 
 The checked-in VS Code workspace recommends the Oxc extension. `Format Document` uses Oxfmt, while saving runs Oxfmt followed by Oxlint's safe fixes. Both read the same repository configuration as `pnpm check`.
+
+Maintainers publish new npm versions by [creating a GitHub release](docs/releases.md). The release workflow tests and publishes the same package archive through npm trusted publishing.
 
 ## Documentation
 
