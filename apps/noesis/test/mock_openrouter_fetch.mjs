@@ -15,7 +15,7 @@ function completionText(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const system = [
     ...messages.filter((message) => message?.role === "system").map(messageText),
-    ...(Array.isArray(body?.system) ? body.system.map(messageText) : []),
+    messageText({ content: body?.system }),
   ].join("\n");
   if (system.includes("role: reflector"))
     return JSON.stringify({

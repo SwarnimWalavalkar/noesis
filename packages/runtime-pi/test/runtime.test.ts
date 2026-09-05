@@ -23,6 +23,7 @@ import {
   createAssistantDeltaAggregator,
   createBrokerToolAliases,
   createPiAgentRuntime,
+  createPiRoleModelBackend,
   createPiExecuteTool,
   createPiSubAgentTaskRunner,
   type FrozenSessionToolResolver,
@@ -221,7 +222,10 @@ function createTestSubAgentTaskRunner(cwd: string, models: Models) {
       readonly prepared: PreparedPiCodeExecution;
       readonly turnId: string;
       readonly signal: AbortSignal;
-      readonly authorizeModelCall: (round: number) => Promise<{
+      readonly authorizeModelCall: (
+        round: number,
+        input: JsonValue,
+      ) => Promise<{
         readonly complete: (request: {
           readonly output: string;
           readonly usage: import("@noesis/agent-types").AgentUsage;
@@ -266,7 +270,8 @@ function createTestSubAgentTaskRunner(cwd: string, models: Models) {
           history: Object.freeze([]),
           prepared: request.prepared,
           startingTimelineSequence: 0,
-          authorizeModelCall: async ({ round }) => await request.authorizeModelCall(round),
+          authorizeModelCall: async ({ round, request: input }) =>
+            await request.authorizeModelCall(round, input),
           emit: request.emit,
         });
       } finally {
@@ -279,6 +284,170 @@ function createTestSubAgentTaskRunner(cwd: string, models: Models) {
 }
 
 describe("agent runtime factories", () => {
+  const reviewPlan: TestSubAgentTaskPlan = {
+    runId: "review-regression",
+    systemPrompt: "Use the supplied tools.",
+    prompt: "Inspect this exact current request.",
+    tools: [],
+    thinkingLevel: "off",
+    route: { provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL },
+    frozenTools: [],
+    authority: { parentExecutionId: "parent-execution", parentToolCallId: "parent-call" },
+    budget: { requestTokenBudget: 2_000 },
+  };
+  const reviewPrepared: PreparedPiCodeExecution = {
+    catalog: emptyCatalog("review-catalog"),
+    execute: async () => ({ executionId: "review-execution", value: null, calls: 0, durationMs: 0 }),
+    close: async () => undefined,
+  };
+  const completedLease = async () => ({ complete: async () => undefined, fail: async () => undefined });
+
+  test.each(["harness", "lane"])("cancels subagent startup while %s creation is pending", async (stage) => {
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const controlled = createControlledPiModels();
+    const provider = vi.spyOn(controlled.models, "streamSimple");
+    const originalCreate = AgentHarness.create.bind(AgentHarness);
+    const create = vi.spyOn(AgentHarness, "create").mockImplementationOnce(async (options, context) => {
+      const created = await originalCreate(options, context);
+      if (stage === "harness") {
+        started.resolve();
+        await release.promise;
+      } else {
+        const originalLane = created.harness.lane.bind(created.harness);
+        vi.spyOn(created.harness, "lane").mockImplementationOnce(async (name) => {
+          started.resolve();
+          await release.promise;
+          return await originalLane(name, context);
+        });
+      }
+      return created;
+    });
+    const runner = createTestSubAgentTaskRunner(process.cwd(), controlled.models);
+    try {
+      const running = runner.run({
+        plan: reviewPlan,
+        prepared: reviewPrepared,
+        turnId: stage,
+        signal: new AbortController().signal,
+        authorizeModelCall: completedLease,
+        emit: () => undefined,
+      });
+      await started.promise;
+      await runner.abort(stage);
+      release.resolve();
+      await expect(running).rejects.toThrow("Subagent task was cancelled");
+      expect(provider).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      create.mockRestore();
+    }
+  });
+
+  test.each(["budget", "authorization"])(
+    "does not invoke a provider after %s rejects the current request",
+    async (failure) => {
+      const controlled = createControlledPiModels();
+      const provider = vi.spyOn(controlled.models, "streamSimple");
+      const authorize = vi.fn(async () => {
+        throw new Error("admission denied");
+      });
+      const runner = createTestSubAgentTaskRunner(process.cwd(), controlled.models);
+      await expect(
+        runner.run({
+          plan: failure === "budget" ? { ...reviewPlan, budget: { requestTokenBudget: 1 } } : reviewPlan,
+          prepared: reviewPrepared,
+          turnId: failure,
+          signal: new AbortController().signal,
+          authorizeModelCall: authorize,
+          emit: () => undefined,
+        }),
+      ).rejects.toThrow(failure === "budget" ? "token budget" : "admission denied");
+      expect(provider).not.toHaveBeenCalled();
+      expect(authorize).toHaveBeenCalledTimes(failure === "budget" ? 0 : 1);
+    },
+  );
+
+  test("keeps a failed settlement available for cleanup and prevents subsequent tools", async () => {
+    const controlled = createControlledPiModels({
+      respond: () => controlledToolCallResponse("execute", { source: "return 1" }, "settlement-call"),
+    });
+    const complete = vi.fn(async () => {
+      throw new Error("settlement storage failed");
+    });
+    const fail = vi.fn(async () => undefined);
+    const execute = vi.fn(reviewPrepared.execute);
+    await expect(
+      createTestSubAgentTaskRunner(process.cwd(), controlled.models).run({
+        plan: reviewPlan,
+        prepared: { ...reviewPrepared, execute },
+        turnId: "settlement-failure",
+        signal: new AbortController().signal,
+        authorizeModelCall: async () => ({ complete, fail }),
+        emit: () => undefined,
+      }),
+    ).rejects.toThrow("settlement storage failed");
+    expect(complete).toHaveBeenCalledOnce();
+    expect(fail).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  test.each(["foreground", "role", "subagent"])(
+    "settles a suspended %s response without hanging cleanup",
+    async (kind) => {
+      const controlled = createControlledPiModels({
+        respond: () => ({
+          ...fauxAssistantMessage("", { stopReason: "deferred" }),
+          deferred: {
+            provider: CONTROLLED_PI_PROVIDER,
+            modelId: CONTROLLED_PI_MODEL,
+            api: controlled.provider.api,
+            id: "deferred-response",
+          },
+        }),
+      });
+      vi.spyOn(controlled.models, "cancelDeferred").mockResolvedValue(undefined);
+      if (kind === "subagent") {
+        await expect(
+          createTestSubAgentTaskRunner(process.cwd(), controlled.models).run({
+            plan: reviewPlan,
+            prepared: reviewPrepared,
+            turnId: kind,
+            signal: new AbortController().signal,
+            authorizeModelCall: completedLease,
+            emit: () => undefined,
+          }),
+        ).rejects.toThrow("suspended");
+      } else if (kind === "role") {
+        await expect(
+          createPiRoleModelBackend(process.cwd(), controlled.models).run({
+            runId: kind,
+            provider: CONTROLLED_PI_PROVIDER,
+            model: CONTROLLED_PI_MODEL,
+            reasoning: "off",
+            systemPrompt: "Reply",
+            prompt: "reply",
+            signal: new AbortController().signal,
+          }),
+        ).rejects.toThrow("suspended");
+      } else {
+        await expect(
+          createPiAgentRuntime(process.cwd(), controlled.models).run(
+            {
+              trailId: kind,
+              provider: CONTROLLED_PI_PROVIDER,
+              model: CONTROLLED_PI_MODEL,
+              thinkingLevel: "off",
+              systemPrompt: "Reply",
+              prompt: "reply",
+              activeCapabilities: [],
+            },
+            () => undefined,
+          ),
+        ).rejects.toThrow("suspended");
+      }
+    },
+  );
   test("cancellation during authentication settles before subagent provider work starts", async () => {
     let providerRequests = 0;
     const controlled = createControlledPiModels({
@@ -434,8 +603,10 @@ describe("agent runtime factories", () => {
 
   test("does not impose provider-round or tool-call ceilings on productive subagents", async () => {
     let providerRequests = 0;
+    const providerContexts: string[] = [];
     const controlled = createControlledPiModels({
-      respond: () => {
+      respond: ({ context }) => {
+        providerContexts.push(JSON.stringify(context.messages));
         providerRequests += 1;
         return providerRequests <= 33
           ? controlledToolCallResponse(
@@ -471,13 +642,15 @@ describe("agent runtime factories", () => {
     });
 
     const authorizedModelCalls: number[] = [];
+    const authorizedContexts: string[] = [];
     const settledModelCalls: number[] = [];
     const result = await createTestSubAgentTaskRunner(process.cwd(), controlled.models).run({
       plan,
       prepared,
       turnId: "turn-subagent-many-rounds",
       signal: new AbortController().signal,
-      authorizeModelCall: async (modelCall) => {
+      authorizeModelCall: async (modelCall, input) => {
+        authorizedContexts.push(JSON.stringify(input));
         authorizedModelCalls.push(modelCall);
         return Object.freeze({
           complete: async () => {
@@ -497,6 +670,8 @@ describe("agent runtime factories", () => {
     expect(providerRequests).toBe(34);
     expect(authorizedModelCalls).toEqual(Array.from({ length: 34 }, (_, index) => index + 1));
     expect(settledModelCalls).toEqual(authorizedModelCalls);
+    expect(authorizedContexts).toEqual(providerContexts);
+    expect(authorizedContexts[0]).toContain(plan.prompt);
   });
 
   test.each([

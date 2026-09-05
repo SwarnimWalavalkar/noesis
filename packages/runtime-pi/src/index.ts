@@ -625,8 +625,8 @@ export function createPiAgentRuntime(
         },
         TODO_CONTEXT,
       );
-      const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
       execution.harness = harness;
+      const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
       execution.lane = lane;
       const requestBudget =
         plan?.requestTokenBudget === undefined
@@ -819,11 +819,14 @@ export function createPiAgentRuntime(
       execution.acceptsSteering = true;
       emit({ type: "status", status: "started" });
       try {
+        if (execution.controller.signal.aborted) return abortedBeforePrompt();
         const runResult = await lane.prompt(explicitSkill?.prompt ?? request.prompt, undefined, TODO_CONTEXT);
         if (!runResult.ok) throw runResult.error;
         if (execution.controller.signal.aborted) return abortedBeforePrompt();
-        if (runResult.value.status === "suspended")
+        if (runResult.value.status === "suspended") {
+          await requestHarnessAbort();
           throw new Error("Pi suspended the foreground run for a deferred response");
+        }
         const message = terminalAssistant;
         if (!message) {
           const detail = runResult.value.error?.message ?? `operation ${runResult.value.status}`;

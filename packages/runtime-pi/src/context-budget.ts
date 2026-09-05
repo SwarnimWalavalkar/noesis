@@ -141,8 +141,16 @@ export function createPiRequestGuardedModels(
     complete,
     streamSimple,
     completeSimple,
-    streamDeferred: (model, handle, options) => delegate.streamDeferred(model, handle, options),
-    fetchDeferred: async (model, handle, options) => await delegate.fetchDeferred(model, handle, options),
+    streamDeferred: (model, handle, options) => {
+      const failure = currentFailure();
+      return failure ? failedRequestStream(model, failure) : delegate.streamDeferred(model, handle, options);
+    },
+    fetchDeferred: async (model, handle, options) => {
+      const failure = currentFailure();
+      return failure
+        ? failedRequestMessage(model, failure)
+        : await delegate.fetchDeferred(model, handle, options);
+    },
     cancelDeferred: async (model, handle, options) => await delegate.cancelDeferred(model, handle, options),
   };
   return Object.freeze(guarded);

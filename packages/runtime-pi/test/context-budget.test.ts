@@ -1,8 +1,13 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { estimateInputTokens } from "@noesis/agent-types";
-import { describe, expect, test } from "vitest";
-import { createPiRequestBudgetProjector } from "../src/context-budget.ts";
+import { describe, expect, test, vi } from "vitest";
+import { createPiRequestBudgetProjector, createPiRequestGuardedModels } from "../src/context-budget.ts";
+import {
+  createControlledPiModels,
+  CONTROLLED_PI_MODEL,
+  CONTROLLED_PI_PROVIDER,
+} from "./support/controlled-pi-models.ts";
 
 const usage = (totalTokens: number) => ({
   input: totalTokens,
@@ -14,6 +19,28 @@ const usage = (totalTokens: number) => ({
 });
 
 describe("Pi request token budgeting", () => {
+  test("guards deferred retrieval after projection failure but still allows cancellation", async () => {
+    const { models, provider } = createControlledPiModels();
+    const model = models.getModel(CONTROLLED_PI_PROVIDER, CONTROLLED_PI_MODEL);
+    if (!model) throw new Error("Missing controlled model");
+    const stream = vi.spyOn(models, "streamDeferred");
+    const fetch = vi.spyOn(models, "fetchDeferred");
+    const cancel = vi.spyOn(models, "cancelDeferred").mockResolvedValue(undefined);
+    const guarded = createPiRequestGuardedModels(models, () => new Error("projection rejected"));
+    const handle = { provider: model.provider, modelId: model.id, api: provider.api, id: "pending-response" };
+    await expect(guarded.streamDeferred(model, handle).result()).resolves.toMatchObject({
+      stopReason: "error",
+      errorMessage: "projection rejected",
+    });
+    await expect(guarded.fetchDeferred(model, handle)).resolves.toMatchObject({
+      stopReason: "error",
+      errorMessage: "projection rejected",
+    });
+    await guarded.cancelDeferred(model, handle);
+    expect(stream).not.toHaveBeenCalled();
+    expect(fetch).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
   test("uses a portable four-byte estimate before provider usage exists", () => {
     expect(estimateInputTokens("a".repeat(400))).toBe(100);
     expect(estimateInputTokens("界".repeat(4))).toBe(3);

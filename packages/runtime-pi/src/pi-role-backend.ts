@@ -97,8 +97,8 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
         },
         TODO_CONTEXT,
       );
-      const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
       execution.harness = harness;
+      const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
       execution.lane = lane;
       let terminalAssistant: AssistantMessage | undefined;
       const unsubscribeMessage = harness.events.on("message_end", (event) => {
@@ -123,11 +123,14 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
       execution.controller.signal.addEventListener("abort", abortHarness, { once: true });
       let result: RoleBackendResult;
       try {
+        if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
         const runResult = await lane.prompt(request.prompt, undefined, TODO_CONTEXT);
         if (!runResult.ok) throw runResult.error;
         if (execution.controller.signal.aborted) throw new Error("Pi role run aborted");
-        if (runResult.value.status === "suspended")
+        if (runResult.value.status === "suspended") {
+          await requestHarnessAbort();
           throw new Error("Pi suspended the role run for a deferred response");
+        }
         const message = terminalAssistant;
         if (!message) {
           const detail = runResult.value.error?.message ?? `operation ${runResult.value.status}`;
