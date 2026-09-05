@@ -38,7 +38,7 @@
     "format:check": "oxfmt --check .",
     "lint": "oxlint .",
     "package:smoke": "node scripts/test-package.mjs",
-    "prepack": "pnpm build:release",
+    "prepack": "npm run build:release",
     "start": "tsx apps/noesis/src/cli.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
