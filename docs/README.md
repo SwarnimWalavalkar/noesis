@@ -2,6 +2,8 @@
 
 These documents describe the current product. Use the document whose purpose matches your question.
 
+- [Configuration and everyday use](configuration.md) covers provider keys, models, context budgets, sessions, MCP servers, upgrades, and uninstalling.
+- [Codemode, context, and subagents](codemode.md) describes tool composition, the context API, agent lifecycle, and inspection.
 - [Product thesis](product-thesis.md) explains who Noesis is for, which problem it addresses, and how the product decides what belongs.
 - [Product experience](product-experience.md) explains how sessions, turn traces, reflection, Capabilities, and user control fit together.
 - [How a Noesis turn works](agent-intelligence-and-experience.md) is the architecture reference for turn plans, traces, model calls, tools, MCP, saved programs, and Capability selection.
@@ -10,4 +12,4 @@ The root [README](../README.md) introduces the product and shows how to run it. 
 
 [Implementation plans](../plans/README.md) record the decisions and constraints behind shipped systems. Plans are historical records. They are not the source of truth for current behavior.
 
-The source for the README diagram is [noesis-compounding-loop.tldraw](noesis-compounding-loop.tldraw). The committed image is [noesis-compounding-loop.jpg](noesis-compounding-loop.jpg).
+The source for the README diagram is [noesis-compounding-loop.tldraw](noesis-compounding-loop.tldraw). The committed image is [noesis-compounding-loop.jpg](assets/noesis-compounding-loop.jpg).
