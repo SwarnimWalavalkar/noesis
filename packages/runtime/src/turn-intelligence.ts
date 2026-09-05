@@ -30,6 +30,7 @@ import type {
 import { createConditionalObject, canonicalJson, sha256, toJsonValue } from "@noesis/domain";
 import { isCapabilityBindingAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
+import { MAX_COMPACTION_SUMMARY_TOKENS, resolveContextNotebook } from "./session-compaction.ts";
 const decoder = new TextDecoder("utf8", { fatal: true });
 export interface TurnCapabilityResolver {
   readonly resolveCapability: (capabilityId: string) => Promise<Capability | undefined>;
@@ -55,13 +56,23 @@ async function freezeContextCheckpoint(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
   checkpointId: string | undefined,
+  contextTokenBudget: number | undefined,
 ): Promise<FrozenContextCheckpoint | undefined> {
   if (checkpointId === undefined) return undefined;
-  const checkpoint = await workspace.operational.contextCheckpoints.get(checkpointId);
+  if (contextTokenBudget === undefined)
+    throw new Error(`Context checkpoint ${checkpointId} requires a context token budget`);
+  const lineage = await workspace.operational.contextCheckpoints.lineage(checkpointId);
+  const checkpoint = lineage.at(-1);
   if (!checkpoint || checkpoint.sessionId !== sessionId)
     throw new Error(`Context checkpoint ${checkpointId} does not belong to session ${sessionId}`);
   if (sha256(checkpoint.summary) !== checkpoint.summaryDigest)
     throw new Error(`Context checkpoint ${checkpointId} failed summary verification`);
+  const notebook = resolveContextNotebook(
+    lineage,
+    Math.max(1, Math.min(MAX_COMPACTION_SUMMARY_TOKENS, Math.floor(contextTokenBudget / 4))),
+  );
+  if (!notebook || notebook.activeCheckpoint.checkpointId !== checkpointId)
+    throw new Error(`Context checkpoint ${checkpointId} did not resolve an active notebook`);
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return Object.freeze({
     checkpointId,
@@ -70,11 +81,30 @@ async function freezeContextCheckpoint(
       table: "context_checkpoints" as const,
       rowId: checkpointId,
     }),
-    summary: checkpoint.summary,
-    summaryDigest: checkpoint.summaryDigest,
-    sourceDigest: checkpoint.sourceDigest,
-    sensitivity: checkpoint.sensitivity,
+    summary: notebook.content,
+    summaryDigest: notebook.contentDigest,
+    sourceDigest: notebook.sourceDigest,
+    sensitivity: notebook.sensitivity,
     createdAt: checkpoint.createdAt,
+    notes: Object.freeze(
+      notebook.selectedCheckpoints.map((note) =>
+        Object.freeze({
+          checkpointId: note.checkpointId,
+          checkpointRef: Object.freeze({
+            kind: "database_row" as const,
+            table: "context_checkpoints" as const,
+            rowId: note.checkpointId,
+          }),
+          summaryKind: note.summaryKind,
+          summary: note.summary,
+          summaryDigest: note.summaryDigest,
+          sourceDigest: note.sourceDigest,
+          sensitivity: note.sensitivity,
+          createdAt: note.createdAt,
+        }),
+      ),
+    ),
+    omittedNoteCount: notebook.omittedCheckpointCount,
   });
 }
 interface ContextDocumentLine {
@@ -466,7 +496,12 @@ export function createTurnIntelligencePlanner(
     if (!activation) throw new Error("A frozen turn plan requires an active genesis baseline");
     const [conversationHistory, contextCheckpoint, contextDocument] = await Promise.all([
       freezeConversationHistory(options.workspace, request.sessionId, request.priorHistory ?? []),
-      freezeContextCheckpoint(options.workspace, request.sessionId, request.contextCheckpointId),
+      freezeContextCheckpoint(
+        options.workspace,
+        request.sessionId,
+        request.contextCheckpointId,
+        request.contextTokenBudget,
+      ),
       freezeContextDocument(options.workspace, request.sessionId),
     ]);
     const resolved: {
