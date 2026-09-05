@@ -417,22 +417,24 @@ describe("codemode runtime", () => {
     });
     expect(result.calls).toBe(3);
   });
-  it("preserves execution results and errors when a console flush fails", async () => {
-    const breakFlush =
-      'process.stdout.write = (_chunk, callback) => { callback(new Error("closed output")); };';
-    await expect(
-      runtime().execute({
-        source: `${breakFlush} return 42;`,
-        sessionId: "flush-result",
-      }),
-    ).resolves.toMatchObject({ value: 42 });
-    await expect(
-      runtime().execute({
-        source: `${breakFlush} throw new Error("original execution failure");`,
-        sessionId: "flush-failure",
-      }),
-    ).rejects.toThrow("original execution failure");
-  });
+  it.each(["stdout", "stderr"])(
+    "preserves execution results and errors when %s flushing fails",
+    async (stream) => {
+      const breakFlush = `process.${stream}.write = (_chunk, callback) => { callback(new Error("closed output")); };`;
+      await expect(
+        runtime().execute({
+          source: `${breakFlush} return 42;`,
+          sessionId: "flush-result",
+        }),
+      ).resolves.toMatchObject({ value: 42, logsTruncated: true });
+      await expect(
+        runtime().execute({
+          source: `${breakFlush} throw new Error("original execution failure");`,
+          sessionId: "flush-failure",
+        }),
+      ).rejects.toThrow("original execution failure");
+    },
+  );
   it("supports Node imports and progress", async () => {
     const events: JsonValue[] = [];
     const result = await runtime().execute(
@@ -732,7 +734,7 @@ describe("codemode runtime", () => {
     await expect(
       runtime().execute({
         source: `
-          process.send({ type: "result", value: "x".repeat(2 * 1024 * 1024), storeMutations: [] });
+          process.send({ type: "result", value: "x".repeat(2 * 1024 * 1024), logsTruncated: false, storeMutations: [] });
           await new Promise(() => undefined);
         `,
         sessionId: "raw-result",

@@ -56,6 +56,7 @@ const childMessageSchema = z.union([
   z.strictObject({
     type: z.literal("result"),
     value: JsonValueSchema,
+    logsTruncated: z.boolean(),
     storeMutations: z.array(z.tuple([z.string(), JsonValueSchema])),
   }),
   z.strictObject({
@@ -626,6 +627,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               if (recordProgress(message.value))
                 notify({ type: "progress", executionId, value: message.value });
             } else if (message.type === "result") {
+              logsTruncated ||= message.logsTruncated;
               if (message.storeMutations.length > DEFAULT_MAX_STORE_ENTRIES) {
                 finishFailure(
                   new Error(`Codemode store mutations exceed ${String(DEFAULT_MAX_STORE_ENTRIES)} entries`),

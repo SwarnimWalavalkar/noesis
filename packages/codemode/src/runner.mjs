@@ -65,12 +65,13 @@ function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value === undefined ? null : value));
 }
 async function flushOutput() {
-  await Promise.allSettled(
+  const flushed = await Promise.allSettled(
     [process.stdout, process.stderr].map(
       (stream) =>
         new Promise((resolve, reject) => stream.write("", (error) => (error ? reject(error) : resolve()))),
     ),
   );
+  return flushed.every((result) => result.status === "fulfilled");
 }
 function sourceWithLastExpressionCompletion(source) {
   const prefix = "async function __noesis_execute__() {\n";
@@ -336,10 +337,11 @@ process.on("message", async (message) => {
       context,
       agents,
     );
-    await flushOutput();
+    const logsComplete = await flushOutput();
     send({
       type: "result",
       value: jsonSafe(value),
+      logsTruncated: !logsComplete,
       storeMutations: [...storeMutations.entries()],
     });
   } catch (error) {
