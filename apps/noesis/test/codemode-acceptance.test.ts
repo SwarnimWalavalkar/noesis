@@ -40,22 +40,24 @@ describe("production codemode journey", () => {
       ...resolved,
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
+    let visibleValue: unknown;
     const controlled = createControlledPiModels({
       respond: ({ context }) => {
         const last = context.messages.at(-1);
         if (last?.role === "toolResult") {
-          expect(last.content).toEqual([
-            expect.objectContaining({
-              type: "text",
-              text: expect.stringContaining('"stdout":"skill loaded\\n"'),
-            }),
-          ]);
-          expect(last.content).toEqual([
-            expect.objectContaining({
-              type: "text",
-              text: expect.stringContaining('"value":'),
-            }),
-          ]);
+          expect(last.content).toHaveLength(1);
+          const content = last.content[0];
+          if (content?.type !== "text") throw new Error("Expected the Code Mode text result");
+          const result: unknown = JSON.parse(content.text);
+          visibleValue = z.object({ value: z.unknown() }).parse(result).value;
+          expect(result).toMatchObject({
+            value: {
+              name: "execute",
+              content: expect.stringContaining("# Execute Code Mode"),
+              contentDigest: expect.any(String),
+            },
+            stdout: "skill loaded\n",
+          });
           return "The frozen execute skill is loaded.";
         }
         return controlledToolCallResponse(
@@ -106,6 +108,7 @@ describe("production codemode journey", () => {
         contentDigest: expect.any(String),
       },
     });
+    expect(visibleValue).toEqual(z.object({ output: z.unknown() }).parse(calls.at(-1)?.response).output);
     await runtime.shutdown();
   });
 

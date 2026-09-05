@@ -225,17 +225,20 @@ export async function startNoesisTui(
       removeSubAgentListener();
       tui.requestRender();
       await new Promise<void>((resolve) => setTimeout(resolve, TUI_TIMINGS.closingFeedbackMs));
-      selection.dispose();
-      learning.dispose();
-      await mcp.dispose();
-      streamDeltas.clear();
-      reasoningDeltas.clear();
+      const shutdownFailures: unknown[] = [];
+      const attemptCleanup = async (cleanup: () => void | Promise<void>): Promise<void> => {
+        try {
+          await cleanup();
+        } catch (error) {
+          shutdownFailures.push(error);
+        }
+      };
       try {
-        let shutdownFailure:
-          | {
-              readonly error: unknown;
-            }
-          | undefined;
+        await attemptCleanup(() => selection.dispose());
+        await attemptCleanup(() => learning.dispose());
+        await attemptCleanup(() => mcp.dispose());
+        streamDeltas.clear();
+        reasoningDeltas.clear();
         if (abortAndSettle) {
           let graceTimer: NodeJS.Timeout | undefined;
           const settlement = await Promise.race<ShutdownSettlement>([
@@ -246,30 +249,29 @@ export async function startNoesisTui(
             }),
           ]);
           if (graceTimer) clearTimeout(graceTimer);
-          if (settlement.status === "rejected") shutdownFailure = { error: settlement.error };
+          if (settlement.status === "rejected") shutdownFailures.push(settlement.error);
           if (settlement.status === "timed-out") void abortAndSettle;
         }
         if (exclusiveCommand) {
-          try {
-            await exclusiveCommand;
-          } catch (error) {
-            shutdownFailure ??= { error };
-          }
+          await attemptCleanup(() => exclusiveCommand);
         }
-        if (!shutdownFailure && trailId) await runtime.discardTrailIfEmpty(trailId);
-        await options.onShutdown?.();
-        if (shutdownFailure) throw shutdownFailure.error;
+        if (shutdownFailures.length === 0 && trailId) await runtime.discardTrailIfEmpty(trailId);
+      } catch (error) {
+        shutdownFailures.push(error);
       } finally {
+        await attemptCleanup(() => options.onShutdown?.());
         try {
-          await terminal.drainInput(1000);
+          await attemptCleanup(() => terminal.drainInput(1000));
         } finally {
           stopWorkingAnimation();
           if (!terminalStopped) {
             terminalStopped = true;
-            tui.stop();
+            await attemptCleanup(() => tui.stop());
           }
         }
       }
+      if (shutdownFailures.length === 1) throw shutdownFailures[0];
+      if (shutdownFailures.length > 1) throw new AggregateError(shutdownFailures, "Session cleanup failed");
     })();
     shutdownPromise.then(resolveShutdown, rejectShutdown);
     return shutdownPromise;

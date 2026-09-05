@@ -2533,6 +2533,73 @@ describe("Noesis TUI lifecycle", () => {
     },
   );
 
+  test.each([false, true])(
+    "runs application cleanup after trail discard fails (additional failures: %s)",
+    async (additionalFailures) => {
+      const base = await createRuntime({
+        name: "cleanup-failure-scripted",
+        async run() {
+          throw new Error("No foreground turn expected");
+        },
+        steer: consumeSteer,
+        async abort() {},
+      });
+      const trail = await base.startTrail({ title: "Empty cleanup test" });
+      const discardFailure = new Error("trail discard failed");
+      const applicationFailure = new Error("application cleanup failed");
+      const drainFailure = new Error("terminal drain failed");
+      const runtime = {
+        ...base,
+        discardTrailIfEmpty: vi.fn(async () => {
+          throw discardFailure;
+        }),
+      };
+      const terminal = createTestTerminal();
+      if (additionalFailures)
+        Object.defineProperty(terminal, "drainInput", {
+          value: async () => {
+            throw drainFailure;
+          },
+        });
+      let release: (() => void) | undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const onShutdown = vi.fn(async () => {
+        await gate;
+        if (additionalFailures) throw applicationFailure;
+      });
+      const running = startNoesisTui(
+        runtime,
+        {
+          session: { mode: "resume", trailId: trail.trailId },
+          onShutdown,
+        },
+        terminal,
+      );
+      // BOUNDARY: Promise rejection values are unknown until asserted below.
+      const outcome = running.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+      terminal.type("\u0003");
+      await vi.waitFor(() => expect(onShutdown).toHaveBeenCalledOnce());
+      expect(runtime.discardTrailIfEmpty).toHaveBeenCalledWith(trail.trailId);
+      const before = terminal.output.length;
+      await new Promise<void>((resolve) => setTimeout(resolve, 150));
+      expect(terminal.output.length).toBeGreaterThan(before);
+      expect(terminal.stops).toBe(0);
+      release?.();
+      if (additionalFailures)
+        expect(await outcome).toMatchObject({
+          errors: [discardFailure, applicationFailure, drainFailure],
+        });
+      else expect(await outcome).toBe(discardFailure);
+      expect(terminal.stops).toBe(1);
+    },
+  );
+
   test("Ctrl+C aborts an active turn before startNoesisTui returns", async () => {
     let finishTurn: (() => void) | undefined;
     let markStarted: (() => void) | undefined;

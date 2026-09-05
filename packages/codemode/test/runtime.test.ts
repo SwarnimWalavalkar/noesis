@@ -62,6 +62,7 @@ function runtime(
     readonly overrideInvocationResult?: ToolInvocationResult;
     readonly runAgent?: (input: ControlledAgentRunInput) => Promise<string>;
     readonly observeContext?: (context: ToolExecutionContext) => void;
+    readonly additionalToolNames?: readonly string[];
   } = {},
 ) {
   const runAgent = options.runAgent;
@@ -75,20 +76,22 @@ function runtime(
         credentialRefs: Object.freeze([]),
       }),
       definitions: [
-        defineTool({
-          name: "math.double",
-          label: "Double",
-          description: "Double a number",
-          inputSchema: z.strictObject({ value: z.number() }),
-          outputSchema: z.strictObject({ value: z.number() }),
-          effect: () => ({ effect: "read", resource: "math:double", estimatedCost: 0 }),
-          execute: async ({ value }, context) => {
-            options.observeContext?.(context);
-            await options.beforeDouble?.();
-            if (options.doubleProgress !== undefined) context.emitUpdate?.(options.doubleProgress);
-            return { value: value * 2 };
-          },
-        }),
+        ...["math.double", ...(options.additionalToolNames ?? [])].map((name) =>
+          defineTool({
+            name,
+            label: "Double",
+            description: "Double a number",
+            inputSchema: z.strictObject({ value: z.number() }),
+            outputSchema: z.strictObject({ value: z.number() }),
+            effect: () => ({ effect: "read", resource: "math:double", estimatedCost: 0 }),
+            execute: async ({ value }, context) => {
+              options.observeContext?.(context);
+              await options.beforeDouble?.();
+              if (options.doubleProgress !== undefined) context.emitUpdate?.(options.doubleProgress);
+              return { value: value * 2 };
+            },
+          }),
+        ),
         ...(runAgent
           ? [
               defineTool({
@@ -393,6 +396,42 @@ describe("codemode runtime", () => {
     });
     expect(large.value).toBe(42);
     expect(large.logsTruncated).toBe(true);
+  });
+  it("supports bare tools alongside a namespace with the same name", async () => {
+    const result = await runtime({ additionalToolNames: ["foo", "foo.name", "mcp.server.double"] }).execute({
+      source: `return {
+        names: Object.keys(tools).sort(),
+        members: Object.keys(tools.foo),
+        bare: await tools.foo({ value: 2 }),
+        named: await tools.foo.name({ value: 3 }),
+        mcp: await tools.mcp["server.double"]({ value: 4 }),
+      };`,
+      sessionId: "bare-catalog-names",
+    });
+    expect(result.value).toEqual({
+      names: ["foo", "math", "mcp"],
+      members: ["name"],
+      bare: { value: 4 },
+      named: { value: 6 },
+      mcp: { value: 8 },
+    });
+    expect(result.calls).toBe(3);
+  });
+  it("preserves execution results and errors when a console flush fails", async () => {
+    const breakFlush =
+      'process.stdout.write = (_chunk, callback) => { callback(new Error("closed output")); };';
+    await expect(
+      runtime().execute({
+        source: `${breakFlush} return 42;`,
+        sessionId: "flush-result",
+      }),
+    ).resolves.toMatchObject({ value: 42 });
+    await expect(
+      runtime().execute({
+        source: `${breakFlush} throw new Error("original execution failure");`,
+        sessionId: "flush-failure",
+      }),
+    ).rejects.toThrow("original execution failure");
   });
   it("supports Node imports and progress", async () => {
     const events: JsonValue[] = [];

@@ -65,7 +65,7 @@ function jsonSafe(value) {
   return JSON.parse(JSON.stringify(value === undefined ? null : value));
 }
 async function flushOutput() {
-  await Promise.all(
+  await Promise.allSettled(
     [process.stdout, process.stderr].map(
       (stream) =>
         new Promise((resolve, reject) => stream.write("", (error) => (error ? reject(error) : resolve()))),
@@ -123,16 +123,29 @@ function delegate(kind, payload) {
 }
 function createTools(names) {
   const families = new Map();
+  const tools = new Map();
   for (const name of names) {
+    const invoke = (input = {}) => delegate("invoke", { name, input });
     const separator = name.indexOf(".");
+    if (separator < 0) {
+      tools.set(name, invoke);
+      continue;
+    }
     const family = name.slice(0, separator);
     const operation = name.slice(separator + 1);
     const members = families.get(family) ?? [];
-    members.push([operation, (input = {}) => delegate("invoke", { name, input })]);
+    members.push([operation, invoke]);
     families.set(family, members);
   }
-  const namespace = (entries) => Object.freeze(Object.setPrototypeOf(Object.fromEntries(entries), null));
-  return namespace([...families].map(([family, members]) => [family, namespace(members)]));
+  const namespace = (entries, target = Object.create(null)) =>
+    Object.freeze(
+      Object.defineProperties(
+        Object.setPrototypeOf(target, null),
+        Object.fromEntries([...entries].map(([name, value]) => [name, { value, enumerable: true }])),
+      ),
+    );
+  for (const [family, members] of families) tools.set(family, namespace(members, tools.get(family)));
+  return namespace(tools);
 }
 const noesis = Object.freeze({
   search: (query, limit) =>
