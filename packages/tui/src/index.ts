@@ -23,6 +23,7 @@ import { editTextInExternalEditor } from "./external-editor.ts";
 import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
 import { boundedInspectorText, TUI_TIMINGS, type ShutdownSettlement } from "./lifecycle-utils.ts";
 import { createTuiInspectorOrchestration } from "./inspector-orchestration.ts";
+import { createContextInspector } from "./context-inspector.ts";
 import { createTuiLearningOrchestration } from "./learning.ts";
 import { createTuiMcpOrchestration } from "./mcp.ts";
 import { createOptimisticPromptEcho } from "./optimistic-prompt.ts";
@@ -129,6 +130,12 @@ export async function startNoesisTui(
       } as const)
       .finish(),
   );
+  const contextInspector = createContextInspector({
+    runtime,
+    tui,
+    colorEnabled: view.state.colorEnabled,
+    height: () => terminal.rows,
+  });
   const learning = createTuiLearningOrchestration({
     runtime,
     tui,
@@ -236,6 +243,7 @@ export async function startNoesisTui(
       try {
         await attemptCleanup(() => selection.dispose());
         await attemptCleanup(() => learning.dispose());
+        await attemptCleanup(() => contextInspector.dispose());
         await attemptCleanup(() => mcp.dispose());
         streamDeltas.clear();
         reasoningDeltas.clear();
@@ -505,7 +513,12 @@ export async function startNoesisTui(
       return undefined;
     }
     escapeRouting.observeInput(data);
-    if (mcp.ownsKeyboardFocus() || learning.ownsKeyboardFocus() || selection.ownsKeyboardFocus()) {
+    if (
+      mcp.ownsKeyboardFocus() ||
+      learning.ownsKeyboardFocus() ||
+      contextInspector.ownsKeyboardFocus() ||
+      selection.ownsKeyboardFocus()
+    ) {
       if (matchesKey(data, "ctrl+c")) {
         void shutdown();
         return { consume: true };
@@ -636,6 +649,7 @@ export async function startNoesisTui(
               if (isCurrentSubmission()) tui.requestRender();
             },
             openMcpManager: mcp.openManager,
+            openContextInspector: () => contextInspector.open(submittedTrailId),
             selectRoute: selection.selectRoute,
             selectProvider: selection.selectProvider,
             ensureProviderAuthenticated: selection.ensureProviderAuthenticated,
@@ -644,7 +658,7 @@ export async function startNoesisTui(
             .addOptional(
               runtime.inspectLearningAudit
                 ? {
-                    openLearningAudit: () => learning.open(submittedTrailId),
+                    openLearningAudit: (activeOnly?: boolean) => learning.open(submittedTrailId, activeOnly),
                   }
                 : undefined,
             )

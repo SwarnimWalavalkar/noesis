@@ -71,7 +71,9 @@ function jsonSchemaType(schema: JsonValue, depth = 0): string | undefined {
   }
   return "JsonValue";
 }
-function shellOutputContract(catalog: PiFrozenToolCatalog): string {
+function shellOutputContract(catalog: {
+  readonly tools: readonly Pick<PiFrozenToolCatalog["tools"][number], "name" | "outputSchema">[];
+}): string {
   const descriptor = catalog.tools.find((tool) => tool.name === "shell.run");
   if (!descriptor) return 'Before depending on shell.run result fields, use noesis.describe("shell.run").';
   const outputType = jsonSchemaType(descriptor.outputSchema);
@@ -185,6 +187,14 @@ export type PiExecuteToolDetails =
       readonly executionId: string;
       readonly calls: number;
     };
+export function piExecuteToolDefinition(catalog: Parameters<typeof shellOutputContract>[0]) {
+  return {
+    name: "execute",
+    label: "Execute JavaScript",
+    description: `${EXECUTE_DESCRIPTION} ${shellOutputContract(catalog)}`,
+    parameters: executeParametersJsonSchema,
+  };
+}
 export function createPiExecuteTool(input: {
   readonly prepared: PreparedPiCodeExecution;
   readonly turnId: string;
@@ -192,10 +202,7 @@ export function createPiExecuteTool(input: {
   readonly emit: (event: PiCodeExecutionEvent, parentToolCallId: string, recordedByBroker?: boolean) => void;
 }): AgentHarnessTool<undefined, typeof executeParametersJsonSchema, PiExecuteToolDetails> {
   const tool: AgentHarnessTool<undefined, typeof executeParametersJsonSchema, PiExecuteToolDetails> = {
-    name: "execute",
-    label: "Execute JavaScript",
-    description: `${EXECUTE_DESCRIPTION} ${shellOutputContract(input.prepared.catalog)}`,
-    parameters: executeParametersJsonSchema,
+    ...piExecuteToolDefinition(input.prepared.catalog),
     executionMode: "sequential",
     execute: async (toolCallId, rawInput, onUpdate, _toolContext, _invocation, context) => {
       const params = executeParameters.parse(rawInput);

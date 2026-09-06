@@ -3,7 +3,7 @@ import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { createLearningAuditOverlay, type LearningAuditOverlay } from "./learning-audit.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
 export interface TuiLearningOrchestration {
-  readonly open: (sessionId: string) => void;
+  readonly open: (sessionId: string, activeOnly?: boolean) => void;
   readonly rememberFocus: (recordId: string) => void;
   readonly ownsKeyboardFocus: () => boolean;
   readonly dispose: () => void;
@@ -26,8 +26,8 @@ export function createTuiLearningOrchestration(options: {
     options.tui.requestRender();
   };
   return Object.freeze({
-    open(sessionId: string) {
-      const focusRecordId = rememberedFocusId;
+    open(sessionId: string, activeOnly = false) {
+      const focusRecordId = activeOnly ? undefined : rememberedFocusId;
       rememberedFocusId = undefined;
       if (handle && overlay) {
         if (focusRecordId) overlay.focusRecord(focusRecordId);
@@ -55,6 +55,7 @@ export function createTuiLearningOrchestration(options: {
             )
             .finish(),
           sessionId,
+          activeOnly,
           colorEnabled: options.colorEnabled,
           height: options.height,
           requestRender: () => options.tui.requestRender(),

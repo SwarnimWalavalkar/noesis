@@ -4,6 +4,7 @@ import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-a
 import {
   type AgentAssistantMessageBoundary,
   type AgentContextUsage,
+  type AgentContextInspection,
   type AgentRuntimeEvent,
   type AgentRuntimeRequest,
   type AgentRuntimeResult,
@@ -14,6 +15,7 @@ import {
   validateFrozenTurnPlan,
 } from "@noesis/agent-types";
 import { toAgentActionPayload } from "./action-payload.ts";
+import { inspectCacheUsage, requestContextComponents } from "./context-inspection.ts";
 import { createPiRequestBudgetProjector, createPiRequestGuardedModels } from "./context-budget.ts";
 import {
   createPiExecuteTool,
@@ -57,6 +59,7 @@ export type {
 } from "./frozen-session-tools.ts";
 export { frozenPlanMaterialUses, resolveFrozenSessionToolDefinitions } from "./frozen-session-tools.ts";
 export * from "./broker-tools.ts";
+export { foregroundToolContext } from "./context-inspection.ts";
 export * from "./model-catalog.ts";
 export * from "./model-selection.ts";
 export * from "./mcp-sampling.ts";
@@ -111,7 +114,10 @@ function escapeSkillPromptXml(value: string): string {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&apos;");
 }
-function formatSkillsForNoesisPrompt(skills: readonly Skill[], canLoad: boolean): string {
+export function formatSkillsForNoesisPrompt(
+  skills: readonly Pick<Skill, "name" | "description" | "disableModelInvocation">[],
+  canLoad: boolean,
+): string {
   const visible = skills.filter((skill) => !skill.disableModelInvocation);
   if (!canLoad || visible.length === 0) return "";
   return [
@@ -375,6 +381,7 @@ export function createPiAgentRuntime(
     for (const receipt of pending) receipt.resolve(result);
   };
   const active = new Map<string, ActivePiExecution>();
+  const contextInspections = new Map<string, AgentContextInspection>();
   const run = async (
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,
@@ -658,6 +665,26 @@ export function createPiAgentRuntime(
                   planId: requestBudget.planId,
                 });
                 requestBudgetFailure = undefined;
+                contextInspections.set(request.trailId, {
+                  source: "request",
+                  capturedAt: now(),
+                  provider: model.provider,
+                  model: model.id,
+                  contextWindow: model.contextWindow,
+                  inputBudget: requestBudget.tokens,
+                  outputReserve: model.maxTokens,
+                  components: requestContextComponents({
+                    systemPrompt: request.systemPrompt,
+                    skillsPrompt: skillsSystemPrompt,
+                    tools: activeToolMaterial,
+                    messages: projection.messages,
+                  }),
+                  note: "Last model request, after tool-result projection. Component tokens are estimates, not provider billing. Provider framing and image token costs may differ. The response generated afterward is not included.",
+                });
+                if (contextInspections.size > 32) {
+                  const oldest = contextInspections.keys().next().value;
+                  if (oldest) contextInspections.delete(oldest);
+                }
                 return { messages: projection.messages };
               } catch (cause) {
                 requestBudgetFailure = cause instanceof Error ? cause : new Error(String(cause));
@@ -725,6 +752,16 @@ export function createPiAgentRuntime(
           if (event.message.role !== "assistant") return;
           terminalAssistant = event.message;
           if (execution.controller.signal.aborted) return;
+          const inspection = contextInspections.get(request.trailId);
+          const cache = inspectCacheUsage(event.message.usage);
+          if (
+            inspection &&
+            cache &&
+            event.message.stopReason !== "error" &&
+            event.message.stopReason !== "aborted"
+          ) {
+            contextInspections.set(request.trailId, { ...inspection, cache });
+          }
           const reasoning = assistantReasoning(event.message);
           if (reasoning.length > 0)
             emit({
@@ -955,5 +992,11 @@ export function createPiAgentRuntime(
     await execution.requestHarnessAbort?.();
     if (execution.abortError) throw execution.abortError;
   };
-  return Object.freeze({ name: "pi-agent-harness-0.85.0", run, steer, abort });
+  return Object.freeze({
+    name: "pi-agent-harness-0.85.0",
+    run,
+    steer,
+    abort,
+    inspectContext: (trailId: string) => contextInspections.get(trailId),
+  });
 }

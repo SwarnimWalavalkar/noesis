@@ -341,6 +341,43 @@ function createHarness(focusRecordId?: string) {
   };
 }
 describe("learning audit overlay", () => {
+  test("active-only entry filters paused Capabilities while all activity remains accessible", async () => {
+    const component = createLearningAuditOverlay({
+      runtime: {
+        inspectLearningAudit: async () => ({
+          ...snapshot,
+          primitives: [
+            record({
+              id: "active",
+              kind: "capability",
+              group: "capabilities",
+              title: "Active example",
+              capabilityState: "active",
+            }),
+            record({
+              id: "paused",
+              kind: "capability",
+              group: "capabilities",
+              title: "Paused example",
+              capabilityState: "paused",
+            }),
+          ],
+        }),
+      },
+      sessionId: "session-1",
+      colorEnabled: false,
+      height: () => 32,
+      requestRender: () => undefined,
+      close: () => undefined,
+      activeOnly: true,
+    });
+    await vi.waitFor(() => expect(component.render(100).join("\n")).toContain("Active example"));
+    expect(component.render(100).join("\n")).not.toContain("Paused example");
+    expect(component.render(100).join("\n")).toContain("active only");
+    component.handleInput?.("a");
+    expect(component.render(100).join("\n")).toContain("Paused example");
+    component.dispose();
+  });
   test("opens from /learning as a focused Pi TUI overlay", async () => {
     const controlled = createControlledPiModels();
     const agent = createPiAgentRuntime(process.cwd(), controlled.models);

@@ -108,6 +108,8 @@ import {
 } from "@noesis/runtime";
 import {
   createRestrictedRoleContextPolicy,
+  formatSkillsForNoesisPrompt,
+  foregroundToolContext,
   createStructuredInferencePort,
   type FrozenSessionToolResolver,
   frozenPlanMaterialUses,
@@ -126,6 +128,7 @@ import {
 import {
   createFileMutationCoordinator,
   createLocalWorkTools,
+  LOCAL_WORK_TOOL_CONTRACTS,
   createToolBroker,
   defineTool,
   type ToolBroker,
@@ -6004,6 +6007,59 @@ export async function createApplicationRuntimeComposition(
       ),
     );
   };
+  const inspectContext: NonNullable<NoesisTuiRuntime["inspectContext"]> = async (sessionId) => {
+    const trail = getTrail(sessionId);
+    const captured = agent.inspectContext?.(sessionId);
+    if (captured) return captured;
+    const limits = modelContextLimits(trail);
+    const skills = await listSkills();
+    const checkpoint = await workspace.operational.contextCheckpoints.getActive(sessionId);
+    const history = await contextVisibleHistoryMessages(workspace, sessionId);
+    const resolved = resolvedSessionContext(
+      contextMessages(history),
+      checkpoint,
+      effectiveHistoryBudget(trail, ""),
+    );
+    const component = (label: string, content: string) => ({
+      label,
+      tokens: content ? estimateContextTokens(content) : 0,
+      content:
+        content.length > 16000
+          ? `${content.slice(0, 16000)}\n[Preview truncated; count includes full content.]`
+          : content,
+    });
+    return {
+      source: "preview",
+      capturedAt: new Date().toISOString(),
+      provider: trail.provider,
+      model: trail.model,
+      contextWindow: limits.contextWindow,
+      inputBudget: effectiveContextBudget(trail),
+      outputReserve: limits.maxOutputTokens,
+      components: [
+        component("Base system instructions", BASE_SYSTEM_PROMPT),
+        component("Skill catalog", formatSkillsForNoesisPrompt(skills, true)),
+        component(
+          "Tools",
+          foregroundToolContext(
+            Object.values(LOCAL_WORK_TOOL_CONTRACTS).map((tool) => ({
+              name: tool.name,
+              label: tool.label,
+              description: tool.description,
+              inputSchema: toJsonValue(z.toJSONSchema(tool.inputSchema, { unrepresentable: "any" })),
+              outputSchema: toJsonValue(z.toJSONSchema(tool.outputSchema, { unrepresentable: "any" })),
+            })),
+          ),
+        ),
+        component("Context checkpoint", checkpoint?.summary ?? ""),
+        component(
+          "Retained conversation",
+          resolved.messages.map(renderFrozenConversationHistoryContent).join("\n\n"),
+        ),
+      ],
+      note: "Startup / resumed-session preview, not a sent request. Tool definitions match the fixed foreground tool set. Capability selection resolves at admission. Skill bodies load only on demand. Archived history and the lazy codemode document are not injected. All token counts are estimates.",
+    };
+  };
   const inspectSkill: NonNullable<NoesisTuiRuntime["inspectSkill"]> = async (name) => {
     if (!options.skills) return undefined;
     const skill = (await options.skills.snapshot()).skills.find(
@@ -6545,6 +6601,7 @@ export async function createApplicationRuntimeComposition(
       subscribeSubAgents: (listener: Parameters<SubAgentSupervisor["subscribe"]>[0]) =>
         subAgentSupervisor?.subscribe(listener) ?? (() => undefined),
       listSkills,
+      inspectContext,
       inspectSkill,
       listModelRoutes: () => options.listModelRoutes?.() ?? Object.freeze([]),
       setTrailThinkingLevel,

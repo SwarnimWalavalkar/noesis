@@ -19,6 +19,118 @@ const exactReplacementSchema = z.strictObject({
   newText: textBound,
   expectedOccurrences: z.number().int().positive().optional(),
 });
+/** Shared declarative contracts; inspection never constructs executable tool handlers. */
+export const LOCAL_WORK_TOOL_CONTRACTS = Object.freeze({
+  read: Object.freeze({
+    name: "files.read",
+    label: "Read file",
+    description: "Read a UTF-8 file, optionally selecting a bounded line range.",
+    inputSchema: z.strictObject({
+      path: pathSchema,
+      startLine: z.number().int().positive().optional(),
+      endLine: z.number().int().positive().optional(),
+    }),
+    outputSchema: z.strictObject({
+      path: z.string(),
+      content: textBound,
+      startLine: z.number().int().positive(),
+      endLine: z.number().int().nonnegative(),
+      totalLines: z.number().int().nonnegative(),
+      contentDigest: z.string(),
+      truncated: z.boolean(),
+    }),
+  }),
+  write: Object.freeze({
+    name: "files.write",
+    label: "Write file",
+    description:
+      "Write a complete UTF-8 file or make exact targeted replacements. Write mode creates or completely replaces the file and creates parent directories by default. Replace mode applies one or more non-overlapping edits only when every expected occurrence count matches.",
+    inputSchema: z.union([
+      z.strictObject({
+        mode: z
+          .literal("write")
+          .optional()
+          .describe("Complete file write. Omit mode for compatibility; omitted mode defaults to write."),
+        path: pathSchema,
+        content: textBound,
+        createParents: z.boolean().optional(),
+      }),
+      z.strictObject({
+        mode: z.literal("replace"),
+        path: pathSchema,
+        edits: z.array(exactReplacementSchema).min(1),
+      }),
+    ]),
+    outputSchema: z.union([
+      z.strictObject({
+        mode: z.literal("write"),
+        path: z.string(),
+        bytes: z.number().int().nonnegative(),
+        contentDigest: z.string(),
+      }),
+      z.strictObject({
+        mode: z.literal("replace"),
+        path: z.string(),
+        bytes: z.number().int().nonnegative(),
+        replacements: z.number().int().positive(),
+        contentDigest: z.string(),
+      }),
+    ]),
+  }),
+  shell: Object.freeze({
+    name: "shell.run",
+    label: "Run shell command",
+    description:
+      "Run a shell command locally with bounded tail output, optional timeout, and cancellation. truncated reports preview completeness. When fullOutputPath is present, fullOutputComplete reports whether that retained artifact is complete.",
+    inputSchema: z.strictObject({
+      command: z.string().trim().min(1).max(32768),
+      cwd: pathSchema.optional(),
+      timeoutMs: z.number().int().min(100).max(2_147_483_647).optional(),
+    }),
+    outputSchema: z.union([
+      z.strictObject({
+        exitCode: z.number().int().nullable(),
+        signal: z.string().nullable(),
+        output: textBound,
+        fullOutputLength: z
+          .number()
+          .int()
+          .nonnegative()
+          .describe("Decoded character length observed from the process."),
+        truncated: z.literal(false),
+        fullOutputComplete: z.literal(true),
+      }),
+      z.strictObject({
+        exitCode: z.number().int().nullable(),
+        signal: z.string().nullable(),
+        output: textBound,
+        fullOutputLength: z
+          .number()
+          .int()
+          .nonnegative()
+          .describe("Decoded character length observed from the process."),
+        truncated: z.literal(false),
+        fullOutputPath: z.string().describe("Absolute path to the retained combined process output."),
+        fullOutputComplete: z.literal(false),
+      }),
+      z.strictObject({
+        exitCode: z.number().int().nullable(),
+        signal: z.string().nullable(),
+        output: textBound,
+        fullOutputLength: z
+          .number()
+          .int()
+          .nonnegative()
+          .describe("Decoded character length observed from the process."),
+        truncated: z.literal(true),
+        fullOutputPath: z.string().describe("Absolute path to the retained combined process output."),
+        fullOutputComplete: z
+          .boolean()
+          .describe("Whether fullOutputPath contains every decoded character observed from the process."),
+      }),
+    ]),
+  }),
+});
 const PROCESS_TERMINATION_GRACE_MS = 500;
 export const DEFAULT_MAX_SHELL_OUTPUT_ARTIFACT_BYTES = 1024 * 1024 * 1024;
 const FALLBACK_SEARCH_MAX_FILES = 10000;
@@ -781,24 +893,8 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
       });
     });
   const read = defineTool({
-    name: "files.read",
-    label: "Read file",
-    description: "Read a UTF-8 file, optionally selecting a bounded line range.",
+    ...LOCAL_WORK_TOOL_CONTRACTS.read,
     identityMaterial: identity("files.read"),
-    inputSchema: z.strictObject({
-      path: pathSchema,
-      startLine: z.number().int().positive().optional(),
-      endLine: z.number().int().positive().optional(),
-    }),
-    outputSchema: z.strictObject({
-      path: z.string(),
-      content: textBound,
-      startLine: z.number().int().positive(),
-      endLine: z.number().int().nonnegative(),
-      totalLines: z.number().int().nonnegative(),
-      contentDigest: z.string(),
-      truncated: z.boolean(),
-    }),
     effect: ({ path }) => ({
       effect: "read",
       resource: `file-read:${resolvedPath(cwd, path)}`,
@@ -947,42 +1043,8 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     },
   });
   const write = defineTool({
-    name: "files.write",
-    label: "Write file",
-    description:
-      "Write a complete UTF-8 file or make exact targeted replacements. Write mode creates or completely replaces the file and creates parent directories by default. Replace mode applies one or more non-overlapping edits only when every expected occurrence count matches.",
+    ...LOCAL_WORK_TOOL_CONTRACTS.write,
     identityMaterial: identity("files.write", { contractRevision: "write-or-replace-v2" }),
-    inputSchema: z.union([
-      z.strictObject({
-        mode: z
-          .literal("write")
-          .optional()
-          .describe("Complete file write. Omit mode for compatibility; omitted mode defaults to write."),
-        path: pathSchema,
-        content: textBound,
-        createParents: z.boolean().optional(),
-      }),
-      z.strictObject({
-        mode: z.literal("replace"),
-        path: pathSchema,
-        edits: z.array(exactReplacementSchema).min(1),
-      }),
-    ]),
-    outputSchema: z.union([
-      z.strictObject({
-        mode: z.literal("write"),
-        path: z.string(),
-        bytes: z.number().int().nonnegative(),
-        contentDigest: z.string(),
-      }),
-      z.strictObject({
-        mode: z.literal("replace"),
-        path: z.string(),
-        bytes: z.number().int().nonnegative(),
-        replacements: z.number().int().positive(),
-        contentDigest: z.string(),
-      }),
-    ]),
     effect: ({ path }) => ({
       effect: "write",
       resource: `file:${projectPath(projectRoot, path)}`,
@@ -1018,62 +1080,12 @@ export function createLocalWorkTools(options: CreateLocalWorkToolsOptions): read
     },
   });
   const shell = defineTool({
-    name: "shell.run",
-    label: "Run shell command",
-    description:
-      "Run a shell command locally with bounded tail output, optional timeout, and cancellation. truncated reports preview completeness. When fullOutputPath is present, fullOutputComplete reports whether that retained artifact is complete.",
+    ...LOCAL_WORK_TOOL_CONTRACTS.shell,
     identityMaterial: identity("shell.run", {
       shellPath,
       maxShellOutputArtifactBytes,
       importArtifact: importArtifact.toString(),
     }),
-    inputSchema: z.strictObject({
-      command: z.string().trim().min(1).max(32768),
-      cwd: pathSchema.optional(),
-      timeoutMs: z.number().int().min(100).max(2_147_483_647).optional(),
-    }),
-    outputSchema: z.union([
-      z.strictObject({
-        exitCode: z.number().int().nullable(),
-        signal: z.string().nullable(),
-        output: textBound,
-        fullOutputLength: z
-          .number()
-          .int()
-          .nonnegative()
-          .describe("Decoded character length observed from the process."),
-        truncated: z.literal(false),
-        fullOutputComplete: z.literal(true),
-      }),
-      z.strictObject({
-        exitCode: z.number().int().nullable(),
-        signal: z.string().nullable(),
-        output: textBound,
-        fullOutputLength: z
-          .number()
-          .int()
-          .nonnegative()
-          .describe("Decoded character length observed from the process."),
-        truncated: z.literal(false),
-        fullOutputPath: z.string().describe("Absolute path to the retained combined process output."),
-        fullOutputComplete: z.literal(false),
-      }),
-      z.strictObject({
-        exitCode: z.number().int().nullable(),
-        signal: z.string().nullable(),
-        output: textBound,
-        fullOutputLength: z
-          .number()
-          .int()
-          .nonnegative()
-          .describe("Decoded character length observed from the process."),
-        truncated: z.literal(true),
-        fullOutputPath: z.string().describe("Absolute path to the retained combined process output."),
-        fullOutputComplete: z
-          .boolean()
-          .describe("Whether fullOutputPath contains every decoded character observed from the process."),
-      }),
-    ]),
     effect: ({ command, cwd: requestedCwd = "." }) => ({
       effect: "execute",
       resource: `shell:${resolvedPath(cwd, requestedCwd)}:${sha256(command)}`,

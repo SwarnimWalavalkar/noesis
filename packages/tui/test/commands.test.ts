@@ -34,6 +34,38 @@ const agent: NoesisAgentRuntime = {
 };
 
 describe("Noesis slash commands", () => {
+  test("opens context and active capabilities instead of silently selecting empty panes", async () => {
+    let contextOpened = 0;
+    const filters: (boolean | undefined)[] = [];
+    const published: string[] = [];
+    const commandContext = {
+      runtime: createInMemoryTestRuntime(agent),
+      trailId: "session",
+      publishInspector: (text: string) => published.push(text),
+      dispatch: () => {
+        throw new Error("Must not select the legacy pane");
+      },
+      requestRender: () => undefined,
+    };
+    await runSlashCommand("/context", {
+      ...commandContext,
+      openContextInspector: () => {
+        contextOpened += 1;
+      },
+    });
+    await runSlashCommand("/capabilities", {
+      ...commandContext,
+      openLearningAudit: (activeOnly) => {
+        filters.push(activeOnly);
+      },
+    });
+    expect(contextOpened).toBe(1);
+    expect(filters).toEqual([true]);
+    await runSlashCommand("/context", commandContext);
+    await runSlashCommand("/capabilities", commandContext);
+    expect(published).toHaveLength(2);
+    expect(published.every((text) => text.includes("unavailable"))).toBe(true);
+  });
   test("routes learning only from column zero", () => {
     expect(isSlashCommandSubmission("/learning")).toBe(true);
     expect(isSlashCommandSubmission("  /learning")).toBe(false);

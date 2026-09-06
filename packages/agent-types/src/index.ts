@@ -392,6 +392,28 @@ export interface AgentContextUsage {
   readonly contextWindow: number;
   readonly accuracy: "reported" | "estimated";
 }
+/** Disposable inspection projection, never an authority for request construction. */
+export interface AgentContextComponent {
+  readonly label: string;
+  readonly tokens: number;
+  readonly content: string;
+}
+export interface AgentContextInspection {
+  readonly source: "request" | "preview";
+  readonly capturedAt: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly contextWindow: number;
+  readonly inputBudget: number;
+  readonly outputReserve: number;
+  readonly components: readonly AgentContextComponent[];
+  readonly cache?: {
+    readonly inputTokens: number;
+    readonly readTokens: number;
+    readonly writeTokens: number;
+  };
+  readonly note: string;
+}
 export type AgentCompletedStopReason = "stop" | "length" | "toolUse";
 export type FrozenBaselineRef =
   | {
@@ -1021,6 +1043,7 @@ export type AgentSteerResult =
     };
 export interface NoesisAgentRuntime {
   readonly name: string;
+  readonly inspectContext?: (trailId: string) => AgentContextInspection | undefined;
   readonly run: (
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,

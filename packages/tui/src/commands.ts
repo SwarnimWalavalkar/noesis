@@ -42,7 +42,8 @@ export interface SlashCommandContext {
   readonly prepareTrailSelection?: (trailId: string) => Promise<void>;
   readonly requestRender: () => void;
   readonly openMcpManager?: () => void;
-  readonly openLearningAudit?: () => void;
+  readonly openLearningAudit?: (activeOnly?: boolean) => void;
+  readonly openContextInspector?: () => void;
   readonly selectRoute?: (intent: TuiRoutePickerIntent) => Promise<TuiRoutePickerSelection | undefined>;
   readonly selectProvider?: (
     intent: TuiProviderPickerIntent,
@@ -354,12 +355,14 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (command === "/context" || command === "/capabilities") {
-    dispatch({
-      type: "pane-selected",
-      pane: command === "/context" ? "context" : "capabilities",
-    });
-    requestRender();
+  if (command === "/context") {
+    if (context.openContextInspector) context.openContextInspector();
+    else publishInspector("Context inspection is unavailable in this runtime.");
+    return true;
+  }
+  if (command === "/capabilities") {
+    if (context.openLearningAudit) context.openLearningAudit(true);
+    else publishInspector("Capability inspection is unavailable in this runtime.");
     return true;
   }
 

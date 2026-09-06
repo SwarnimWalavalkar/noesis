@@ -74,6 +74,19 @@ export interface PiBrokerToolDetails {
   readonly callId: string;
 }
 
+export function piBrokerToolDefinition(
+  descriptor: Pick<PiFrozenToolCatalog["tools"][number], "name" | "label" | "description" | "inputSchema">,
+  alias: string,
+  descriptionSuffix?: string,
+) {
+  return {
+    name: alias,
+    label: descriptor.label,
+    description: `${descriptor.description} ${descriptionSuffix ?? `Direct access to ${descriptor.name}.`}`,
+    parameters: jsonSchema(descriptor.inputSchema),
+  };
+}
+
 /**
  * Adapt frozen Broker tools to Pi without creating another invocation path.
  * Foreground callers pass the fixed direct names; subagents pass their frozen delegated catalog.
@@ -103,7 +116,8 @@ export function createPiBrokerTools(input: {
     descriptors.map((descriptor) => {
       const alias = aliases.get(descriptor.name);
       if (!alias) throw new Error(`Frozen tool catalog has no Pi alias for ${descriptor.name}`);
-      const parameters = jsonSchema(descriptor.inputSchema);
+      const definition = piBrokerToolDefinition(descriptor, alias, input.descriptionSuffix);
+      const parameters = definition.parameters;
       let localInputSchema: z.ZodType<unknown> | undefined;
       try {
         localInputSchema = z.fromJSONSchema(parameters);
@@ -111,10 +125,7 @@ export function createPiBrokerTools(input: {
         localInputSchema = undefined;
       }
       const tool: AgentHarnessTool<undefined, typeof parameters, PiBrokerToolDetails> = {
-        name: alias,
-        label: descriptor.label,
-        description: `${descriptor.description} ${input.descriptionSuffix ?? `Direct access to ${descriptor.name}.`}`,
-        parameters,
+        ...definition,
         executionMode: "sequential",
         execute: async (toolCallId, rawInput, _onUpdate, _toolContext, _invocation, context) => {
           callCount += 1;

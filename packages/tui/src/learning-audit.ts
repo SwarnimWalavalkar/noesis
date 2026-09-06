@@ -89,6 +89,7 @@ export interface CreateLearningAuditOverlayOptions {
   readonly requestRender: () => void;
   readonly close: () => void;
   readonly focusRecordId?: string;
+  readonly activeOnly?: boolean;
   readonly now?: () => Date;
 }
 
@@ -131,7 +132,11 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     const scoped = scopedRecords();
     if (filter === "noteworthy") return scoped.filter(isNoteworthy);
     if (filter === "all") return scoped;
-    return scoped.filter((record) => record.group === filter);
+    return scoped.filter(
+      (record) =>
+        record.group === filter &&
+        !(options.activeOnly && filter === "capabilities" && record.capabilityState !== "active"),
+    );
   };
 
   const failedCount = (): number =>
@@ -607,7 +612,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
             styled(
               options.colorEnabled,
               ANSI.dim,
-              `${currentSessionOnly ? "current session" : "all sessions"} · ${String(records.length)} visible${updated ? ` · updated ${updated}` : ""}`,
+              `${currentSessionOnly ? "current session" : "all sessions"}${options.activeOnly && filter === "capabilities" ? " · active only" : ""} · ${String(records.length)} visible${updated ? ` · updated ${updated}` : ""}`,
             ),
             "",
           ],
@@ -617,7 +622,10 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
           const paneRows = Math.max(1, bodyRows - overview.length);
           const leftWidth = Math.min(52, Math.max(36, Math.floor(width * 0.38)));
           const rightWidth = Math.max(24, width - leftWidth - 3);
-          const empty = emptyListMessage(filter, records.length, scoped.length, routineCount, failedCount());
+          const empty =
+            options.activeOnly && filter === "capabilities" && records.length === 0
+              ? "No active Capabilities. Press a to inspect all activity."
+              : emptyListMessage(filter, records.length, scoped.length, routineCount, failedCount());
           const leftPrefix = [
             paneRule(
               filter === "capabilities" ? "capabilities" : "activity",
@@ -690,7 +698,10 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
             ...joinColumns(left, right, leftWidth, rightWidth, paneRows, options.colorEnabled),
           ];
         } else if (screen.kind === "list") {
-          const empty = emptyListMessage(filter, records.length, scoped.length, routineCount, failedCount());
+          const empty =
+            options.activeOnly && filter === "capabilities" && records.length === 0
+              ? "No active Capabilities. Press a to inspect all activity."
+              : emptyListMessage(filter, records.length, scoped.length, routineCount, failedCount());
           body = [
             ...overview,
             ...((filter === "capabilities" || filter === "noteworthy") && routineCount > 0

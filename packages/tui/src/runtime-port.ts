@@ -555,6 +555,9 @@ export type NoesisTuiRuntime = Pick<
   | "subscribeSubAgents"
 > & {
   readonly home?: string;
+  readonly inspectContext?: (
+    sessionId: string,
+  ) => Promise<import("@noesis/agent-types").AgentContextInspection>;
   readonly agentName?: string;
   readonly listSkills?: () => Promise<readonly TuiSkillSummary[]>;
   readonly inspectSkill?: (name: string) => Promise<TuiSkillDetail | undefined>;
