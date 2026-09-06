@@ -6,6 +6,7 @@ import {
   type NoesisTuiAction,
   type NoesisTuiState,
   reduceTui,
+  hasSessionSubagents,
   type TuiContextUsage,
 } from "./state.ts";
 import { ANSI, brandGradient, elideText, NOESIS_WORDMARK, safeTerminalText, styled } from "./theme.ts";
@@ -281,7 +282,7 @@ const subagentStatusColor = (status: NoesisTuiState["subAgents"][number]["status
 export function renderSubagents(state: NoesisTuiState, width: number, height = 30): readonly string[] {
   const safeWidth = Math.max(0, Math.floor(width));
   const subagents = state.subAgents;
-  if (safeWidth <= 0 || subagents.length === 0 || height < 10) return [];
+  if (safeWidth <= 0 || !hasSessionSubagents(state) || height < 10) return [];
   const running = subagents.filter((agent) => agent.status === "running" || agent.status === "starting");
   const idle = subagents.filter((agent) => agent.status === "idle");
   const stopped = subagents.filter((agent) => agent.status === "suspended" || agent.status === "closed");

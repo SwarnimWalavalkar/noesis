@@ -1,5 +1,6 @@
 import { matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { NoesisView } from "./rendering.ts";
+import { hasSessionSubagents } from "./state.ts";
 
 const INSPECTOR_PAGE_ROWS = 10;
 
@@ -90,7 +91,7 @@ export function createTranscriptInputHandler(options: {
 
     if (!matchesKey(data, "ctrl+o")) return false;
     options.view.dispatch(
-      state.subAgents.length > 0
+      hasSessionSubagents(state)
         ? { type: "subagent-cursor-moved", direction: "previous" }
         : { type: "action-cursor-moved", direction: "previous" },
     );

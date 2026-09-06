@@ -383,8 +383,13 @@ function moveCursor(state: NoesisTuiState, direction: "previous" | "next"): Noes
   const next = actions[nextIndex];
   return next ? { ...state, actionCursor: next.actionId } : state;
 }
+export function hasSessionSubagents(state: NoesisTuiState): boolean {
+  return (
+    state.trailId !== undefined && state.subAgents.some((agent) => agent.originSessionId === state.trailId)
+  );
+}
 function moveSubAgentCursor(state: NoesisTuiState, direction: "previous" | "next"): NoesisTuiState {
-  if (state.subAgents.length === 0) return state;
+  if (!hasSessionSubagents(state)) return state;
   const currentIndex = state.subAgents.findIndex((agent) => agent.agentId === state.subAgentCursor);
   if (currentIndex < 0) {
     const active = [...state.subAgents]
@@ -613,7 +618,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         const { subAgentCursor: _subAgentCursor, ...rest } = state;
         return moveCursor(rest, "previous");
       }
-      if (state.subAgents.length > 0) {
+      if (hasSessionSubagents(state)) {
         const { actionCursor: _actionCursor, ...rest } = state;
         return moveSubAgentCursor(rest, "previous");
       }

@@ -1,6 +1,7 @@
 import { type Terminal, TuiMainScreen, visibleWidth } from "@earendil-works/pi-tui";
 import type { SubAgentSummary } from "@noesis/agent-types";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { reduceTui } from "../src/state.ts";
 import {
   createSafeEditor,
   createTranscriptRenderer,
@@ -552,6 +553,42 @@ describe("Noesis transcript rendering", () => {
     expect(summary).toMatchObject({ outcome: "2 items" });
   });
 
+  test("hides historical subagents until the selected session has spawned one", () => {
+    const historical = subAgentSummary("old-agent", "suspended", "Previous session work");
+    const fresh: NoesisTuiState = {
+      ...initialTuiState("fake"),
+      trailId: "fresh-session",
+      subAgents: [historical],
+    };
+    expect(renderSubagents(fresh, 120, 30)).toEqual([]);
+    expect(
+      reduceTui(fresh, { type: "subagent-cursor-moved", direction: "previous" }).subAgentCursor,
+    ).toBeUndefined();
+    expect(reduceTui(fresh, { type: "inspection-navigation-toggled" }).subAgentCursor).toBeUndefined();
+
+    const active = reduceTui(fresh, {
+      type: "subagents-hydrated",
+      subAgents: [
+        historical,
+        { ...subAgentSummary("new-agent", "running", "Current work"), originSessionId: "fresh-session" },
+      ],
+    });
+    expect(renderSubagents(active, 120, 30).join("\n")).toContain("SUBAGENTS · 2");
+    const inspecting = reduceTui(
+      reduceTui(active, { type: "subagent-cursor-moved", direction: "previous" }),
+      { type: "subagent-cursor-moved", direction: "previous" },
+    );
+    expect(inspecting.subAgentCursor).toBe("old-agent");
+    expect(renderSubagents(inspecting, 120, 30).join("\n")).toContain("Previous session work");
+    expect(renderSubagents({ ...active, trailId: "another-session" }, 120, 30)).toEqual([]);
+    const settled = {
+      ...active,
+      subAgents: active.subAgents.map((agent) => ({ ...agent, status: "suspended" as const })),
+    };
+    expect(renderSubagents(settled, 120, 30).join("\n")).toContain("SUBAGENTS · 2");
+    expect(active.subAgents).toHaveLength(2);
+  });
+
   test("keeps process subagents fixed near the composer and their child tools out of the transcript", () => {
     const execute = {
       actionId: "execute-1",
@@ -561,6 +598,7 @@ describe("Noesis transcript rendering", () => {
     const state: NoesisTuiState = {
       ...initialTuiState("fake"),
       timeline: [{ kind: "action", ...execute }],
+      trailId: "session-foreground",
       subAgents: [subAgentSummary("agent-inspect", "running", "Inspect the package metadata.")],
     };
     const transcript = stripAnsi(renderTranscriptLines(state, 72).join("\n"));
@@ -587,6 +625,7 @@ describe("Noesis transcript rendering", () => {
     const state: NoesisTuiState = {
       ...initialTuiState("fake"),
       timeline: [{ kind: "action", actionId: "execute-1", name: "execute", status: "running" }],
+      trailId: "session-foreground",
       subAgents: [
         subAgentSummary("agent-running", "running", "Watch the active migration."),
         subAgentSummary("agent-completed", "idle", "Review the finished migration."),
@@ -616,6 +655,7 @@ describe("Noesis transcript rendering", () => {
     const state: NoesisTuiState = {
       ...initialTuiState("fake"),
       subAgents: [subAgentSummary("agent-running", "running", "Inspect active work.")],
+      trailId: "session-foreground",
       subAgentPhases: { "agent-running": "tool · shell.run" },
     };
 
@@ -632,6 +672,7 @@ describe("Noesis transcript rendering", () => {
         { kind: "action", actionId: "execute-latest", name: "execute", status: "completed" },
       ],
       subAgents: [subAgentSummary("agent-earlier", "idle", "Inspect the earlier run.")],
+      trailId: "session-foreground",
     };
 
     expect(stripAnsi(renderSubagents(state, 120, 30).join("\n"))).not.toContain("Inspect the earlier run.");
@@ -660,6 +701,7 @@ describe("Noesis transcript rendering", () => {
         },
       ],
       subAgents: [subAgentSummary("agent-nested", "idle", "Inspect from the saved script.")],
+      trailId: "session-foreground",
       subAgentCursor: "agent-nested",
     };
 
