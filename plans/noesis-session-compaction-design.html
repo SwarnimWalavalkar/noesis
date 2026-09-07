@@ -49,7 +49,7 @@
     <p class="decision">Append immutable context-note checkpoints and keep one active-checkpoint binding per session. Each checkpoint describes only its newly covered work. A bounded session notebook selects exact note deltas for the next turn; original rows remain the full-fidelity retrieval authority.</p>
     <ul>
       <li>Raw transcript rows remain untouched and searchable.</li>
-      <li>Compaction operates only on complete replay-eligible turn groups. It never splits a turn or includes running, aborted, failed, or partial work.</li>
+      <li>Compaction operates on whole settled turn groups. Visible messages from failed and aborted turns retain their unfinished status in compactor input. Running turns and undelivered prompts are excluded.</li>
       <li>Each checkpoint has its own identity and digest, a model-written atomic note delta, its previous checkpoint ID, exact newly covered message references and their aggregate digest, the first retained raw turn, sensitivity, model route, usage, and creation time.</li>
       <li>A future turn freezes the active checkpoint, every exact note delta selected for the bounded notebook, and recent raw-tail references into its <code>FrozenTurnPlan</code>.</li>
       <li>Repeated compaction writes a new note delta from newly covered eligible work only. The compactor receives the prior checkpoint identity for lineage but never its summary bytes.</li>
@@ -65,7 +65,8 @@
   "schemaVersion": 1,
   "agent": {},
   "context": {
-    "tokenBudget": 160000
+    "tokenBudget": 160000,
+    "autoCompact": true
   }
 }</code></pre>
     <ul>
@@ -93,7 +94,8 @@
   <section><h2>Triggers and interaction</h2>
     <ul>
       <li><code>/compact [optional focus]</code> creates a checkpoint even before automatic compaction is required. Optional focus changes what detail the summary preserves; it does not change authority.</li>
-      <li>Automatic compaction runs before a future turn when eligible history would otherwise be omitted by the configured token budget.</li>
+      <li>Automatic compaction is enabled by default through <code>context.autoCompact</code>. It runs before a future turn when eligible history exceeds its allocation. Setting it to <code>false</code> leaves manual <code>/compact</code> available and blocks over-budget turns with guidance instead of dropping history.</li>
+      <li>Manual and automatic triggers use the same immutable notebook compactor. Pi's independent compactor stays disabled. Inspection and turn admission use the same notebook renderer and budget calculation.</li>
       <li>Only one compaction may update a session at a time. A concurrent or stale attempt loses the active-binding compare-and-swap and leaves the winning checkpoint intact.</li>
       <li>The successful TUI confirmation is simply <strong>Context compacted</strong>. Failure messages state that context was not changed.</li>
       <li>If an active tool-heavy turn would exceed the complete-request budget, Noesis first projects older tool results into bounded references containing their tool identity, digest, byte count, and preview. This changes only the next model request. Full tool results remain durable and inspectable.</li>
@@ -108,7 +110,8 @@
 
   <section><h2>Failure semantics</h2>
     <ul>
-      <li>If note extraction, validation, persistence, or compare-and-swap fails, the previous active checkpoint and raw replay behavior remain unchanged.</li>
+      <li>Each checkpoint activates atomically. If extraction, validation, persistence, or compare-and-swap fails, that checkpoint does not replace the active one. Earlier windows successfully activated during the same compaction remain valid; a later attempt continues from their recorded boundary.</li>
+      <li>An immutable note that exceeds a reduced notebook allocation is not rewritten or truncated. Noesis directs the user to increase the configured budget or shorten the new request, subject to the selected model's input capacity.</li>
       <li>No deterministic fallback may drop turns or replace them with “summary unavailable.”</li>
       <li>The first release admits only normal-sensitivity source material. Private or secret material fails closed before any compactor network request until an explicit provider sensitivity policy exists.</li>
       <li>Cancellation propagates through model generation and stops before checkpoint activation.</li>
@@ -140,7 +143,7 @@ resolveSessionContext(sessionId, modelRoute)</code></pre>
     <li>Only complete replay-eligible turns can move behind a checkpoint.</li>
     <li>Every checkpoint note can be inspected. Replacement changes only the active binding and never edits an earlier checkpoint.</li>
     <li>No note can widen permissions or instruction priority.</li>
-    <li>A failed or cancelled compaction preserves the previous context selection exactly.</li>
+    <li>A failed or cancelled checkpoint attempt preserves the last successfully activated context selection.</li>
     <li>Repeated compaction consumes only newly covered work. Prior note bytes remain independently addressable and are never recursively summarized.</li>
     <li>When an earlier note window is omitted from the working set, current-session search can retrieve its original messages or tool traces with exact citations.</li>
   </ul></section>

@@ -61,7 +61,9 @@ Provider-reported usage is authoritative after a successful response. Before a r
 
 If tool results make an active turn exceed its budget, only the next model request can replace older results with bounded references. Each reference has a digest, byte count, and preview. The durable transcript keeps the complete result.
 
-`/compact [optional focus]` creates a checkpoint note delta from newly covered work. Noesis also compacts before a future turn when eligible history exceeds its allocation. A failed or cancelled compaction leaves the active context unchanged.
+`/compact [optional focus]` creates a checkpoint note delta from newly covered work. Automatic compaction is enabled by default through `context.autoCompact`. It uses the same notebook compactor before a future turn when eligible history exceeds its allocation. Setting this option to `false` leaves manual compaction available and rejects over-budget turns without dropping history. Pi's independent compactor stays disabled.
+
+Each checkpoint activates atomically. If extraction or activation fails, that checkpoint does not replace the active one. A compaction that needs several source windows may already have activated earlier windows before a later failure. Those notes remain valid and later attempts continue from their recorded boundary.
 
 Codemode has a separate analytical context surface. Each frozen turn plan pins a complete pre-turn session document as immutable JSONL. It contains visible user and assistant messages plus recorded tool calls, code executions, nested model calls, and workflow runs. It excludes the system prompt, current request, credentials, and internal background jobs.
 

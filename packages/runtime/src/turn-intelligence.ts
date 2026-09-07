@@ -30,7 +30,7 @@ import type {
 import { createConditionalObject, canonicalJson, sha256, toJsonValue } from "@noesis/domain";
 import { isCapabilityBindingAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
-import { MAX_COMPACTION_SUMMARY_TOKENS, resolveContextNotebook } from "./session-compaction.ts";
+import { contextNotebookTokenBudget, resolveContextNotebook } from "./session-compaction.ts";
 const decoder = new TextDecoder("utf8", { fatal: true });
 export interface TurnCapabilityResolver {
   readonly resolveCapability: (capabilityId: string) => Promise<Capability | undefined>;
@@ -67,10 +67,7 @@ async function freezeContextCheckpoint(
     throw new Error(`Context checkpoint ${checkpointId} does not belong to session ${sessionId}`);
   if (sha256(checkpoint.summary) !== checkpoint.summaryDigest)
     throw new Error(`Context checkpoint ${checkpointId} failed summary verification`);
-  const notebook = resolveContextNotebook(
-    lineage,
-    Math.max(1, Math.min(MAX_COMPACTION_SUMMARY_TOKENS, Math.floor(contextTokenBudget / 4))),
-  );
+  const notebook = resolveContextNotebook(lineage, contextNotebookTokenBudget(contextTokenBudget));
   if (!notebook || notebook.activeCheckpoint.checkpointId !== checkpointId)
     throw new Error(`Context checkpoint ${checkpointId} did not resolve an active notebook`);
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.

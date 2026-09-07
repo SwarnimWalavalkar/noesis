@@ -19,6 +19,7 @@ const resourceOwners = [
   ),
 ].filter((owner) => owner !== localResourceOwner);
 
+// Noesis owns durable notebook compaction. Pi must not independently rewrite an admitted turn.
 export const NOESIS_PI_COMPACTION_SETTINGS: CompactionSettings = Object.freeze({
   enabled: false,
   reserveTokens: 0,

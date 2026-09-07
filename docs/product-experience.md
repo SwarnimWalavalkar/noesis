@@ -45,6 +45,8 @@ After a request, the inspector shows the last request captured after tool-result
 
 Long sessions may compact older settled turns into independent, immutable continuity notes while keeping recent transcript messages raw. A bounded session notebook keeps the most recent note windows resident; omitted windows remain searchable from the current session through their original messages and tool traces. Repeated compaction never summarizes prior notes again. Compaction never deletes or rewrites the visible transcript. Resume and search still use the complete original conversation. Only future model context becomes smaller.
 
+Automatic compaction is enabled by default. `context.autoCompact: false` disables the automatic trigger, not manual `/compact` or existing notebooks. Over-budget turns then stop with guidance. Startup and resumed-session context previews show the same assembled notebook used for turn admission.
+
 The visible user and assistant messages from a failed or aborted turn remain in later context and are labelled as unfinished. They are not queued again or retried automatically. A later request such as "keep going" can therefore refer to the same current-session history the user sees.
 
 If the user submits a prompt while a turn or a session command is still running, Noesis queues it and delivers it in order. Commands that change the session run one at a time, so later prompts always reach the resulting session.

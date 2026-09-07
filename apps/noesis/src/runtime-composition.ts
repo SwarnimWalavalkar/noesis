@@ -76,6 +76,7 @@ import { createMcpToolDefinitions, type McpHostManager } from "@noesis/mcp";
 import {
   buildContextCheckpointRecord,
   compactionSensitivity,
+  contextNotebookTokenBudget,
   contextCheckpointActivationRequestDigest,
   compareTrailRecency,
   CAPABILITY_REFLECTION_JOB_KIND,
@@ -90,7 +91,6 @@ import {
   DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS,
   estimateContextTokens,
   loadRuntimeTranscript,
-  MAX_COMPACTION_SUMMARY_TOKENS,
   type NoesisRuntime,
   prepareCompactionWindow,
   renderContextCheckpointSummary,
@@ -5289,10 +5289,7 @@ export async function createApplicationRuntimeComposition(
         const lineage = checkpoint
           ? await workspace.operational.contextCheckpoints.lineage(checkpoint.checkpointId)
           : Object.freeze([]);
-        const notebook = resolveContextNotebook(
-          lineage,
-          Math.max(1, Math.min(MAX_COMPACTION_SUMMARY_TOKENS, Math.floor(targetTokenBudget / 4))),
-        );
+        const notebook = resolveContextNotebook(lineage, contextNotebookTokenBudget(targetTokenBudget));
         const current = resolvedSessionContext(messages, checkpoint, targetTokenBudget, notebook);
         if (!current.exceedsBudget) {
           if (mode !== "manual" || compacted) return;
@@ -5507,7 +5504,7 @@ export async function createApplicationRuntimeComposition(
       );
     const contextTokenBudget = effectiveContextBudget(trail);
     const historyTokenBudget = effectiveHistoryBudget(trail, input);
-    await serializeCompaction(trail, "automatic", historyTokenBudget);
+    if (options.config.context.autoCompact) await serializeCompaction(trail, "automatic", historyTokenBudget);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
     const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
@@ -5521,7 +5518,7 @@ export async function createApplicationRuntimeComposition(
         : Object.freeze([]);
       const notebook = resolveContextNotebook(
         checkpointLineage,
-        Math.max(1, Math.min(MAX_COMPACTION_SUMMARY_TOKENS, Math.floor(historyTokenBudget / 4))),
+        contextNotebookTokenBudget(historyTokenBudget),
       );
       const resolvedContext = resolvedSessionContext(
         contextMessages(allContextMessages),
@@ -5529,7 +5526,12 @@ export async function createApplicationRuntimeComposition(
         historyTokenBudget,
         notebook,
       );
-      if (resolvedContext.exceedsBudget) throw new Error("Context remains over budget after compaction.");
+      if (resolvedContext.exceedsBudget)
+        throw new Error(
+          options.config.context.autoCompact
+            ? "Context remains over budget after compaction."
+            : "Context exceeds its budget and automatic compaction is disabled. Run /compact or enable context.autoCompact in config.json and restart Noesis.",
+        );
       const historyById = new Map(allHistoryMessages.map((message) => [message.messageId, message]));
       const historyMessages = Object.freeze(
         resolvedContext.messages.map((message) => {
@@ -6053,10 +6055,16 @@ export async function createApplicationRuntimeComposition(
     const skills = await listSkills();
     const checkpoint = await workspace.operational.contextCheckpoints.getActive(sessionId);
     const history = await contextVisibleHistoryMessages(workspace, sessionId);
+    const historyTokenBudget = effectiveHistoryBudget(trail, "");
+    const notebook = resolveContextNotebook(
+      checkpoint ? await workspace.operational.contextCheckpoints.lineage(checkpoint.checkpointId) : [],
+      contextNotebookTokenBudget(historyTokenBudget),
+    );
     const resolved = resolvedSessionContext(
       contextMessages(history),
       checkpoint,
-      effectiveHistoryBudget(trail, ""),
+      historyTokenBudget,
+      notebook,
     );
     const component = (label: string, content: string) => ({
       label,
@@ -6089,7 +6097,7 @@ export async function createApplicationRuntimeComposition(
             })),
           ),
         ),
-        component("Context checkpoint", checkpoint?.summary ?? ""),
+        component("Session notebook", notebook?.content ?? ""),
         component(
           "Retained conversation",
           resolved.messages.map(renderFrozenConversationHistoryContent).join("\n\n"),

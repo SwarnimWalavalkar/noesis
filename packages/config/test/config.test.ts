@@ -106,10 +106,34 @@ describe("Noesis config", () => {
 
     expect((await resolveNoesisConfig({ home: defaultsHome, env: {} })).context).toEqual({
       tokenBudget: 160_000,
+      autoCompact: true,
     });
     expect((await resolveNoesisConfig({ home: configuredHome, env: {} })).context).toEqual({
       tokenBudget: 96_000,
+      autoCompact: true,
     });
+  });
+
+  test("persists automatic compaction independently of the token budget", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-auto-compact-"));
+    await initializeNoesisConfig(home);
+    await updateUserControlConfig(home, { context: { autoCompact: false } });
+    await updateUserControlConfig(home, { context: { tokenBudget: 96_000 } });
+    expect((await resolveNoesisConfig({ home, env: {} })).context).toEqual({
+      tokenBudget: 96_000,
+      autoCompact: false,
+    });
+    await updateUserControlConfig(home, { context: { autoCompact: true } });
+    expect((await resolveNoesisConfig({ home, env: {} })).context.autoCompact).toBe(true);
+  });
+
+  test.each(["false", 0, null])("rejects a non-boolean autoCompact value %j", async (autoCompact) => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-invalid-auto-compact-"));
+    await writeFile(
+      noesisConfigPath(home),
+      JSON.stringify({ schemaVersion: 1, agent: {}, context: { autoCompact } }),
+    );
+    await expect(resolveNoesisConfig({ home, env: {} })).rejects.toThrow("/context/autoCompact");
   });
 
   test.each(["off", "low"])("preserves explicit %s autonomy with zero-value defaults", async (riskLevel) => {
@@ -183,7 +207,7 @@ describe("Noesis config", () => {
         pins: "respect",
         vetoes: "respect",
       },
-      context: { tokenBudget: 160_000 },
+      context: { tokenBudget: 160_000, autoCompact: true },
       experiments: { maxCases: 8, maxAttemptsPerArm: 1, maxCost: 0 },
     });
   });

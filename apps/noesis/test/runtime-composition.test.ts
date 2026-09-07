@@ -405,7 +405,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const config = Object.freeze({
       ...resolved,
-      context: Object.freeze({ tokenBudget: 50000 }),
+      context: Object.freeze({ ...resolved.context, tokenBudget: 50000 }),
       learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
     const histories: NonNullable<AgentRuntimeRequest["history"]>[] = [];

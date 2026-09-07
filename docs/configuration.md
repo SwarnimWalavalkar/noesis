@@ -29,7 +29,8 @@ Noesis stores local state under `~/.noesis/` by default. Set model options and t
     "thinkingLevel": "medium"
   },
   "context": {
-    "tokenBudget": 160000
+    "tokenBudget": 160000,
+    "autoCompact": true
   }
 }
 ```
@@ -38,7 +39,11 @@ Noesis stores local state under `~/.noesis/` by default. Set model options and t
 
 The default context budget is 160,000 tokens. Set `context.tokenBudget` to another positive value to change it. The budget covers the whole model request, not only the transcript. Noesis keeps it below the selected model's context window and reserves room for the model's maximum output.
 
-Use `/context` to inspect the current session's context. `/compact` writes a summary checkpoint and keeps recent turns unabridged. Noesis also compacts automatically when history would exceed the budget. The visible transcript, resume, and session search retain the original messages.
+Use `/context` to inspect the current session's context. `/compact` appends immutable continuity notes from older settled turns and keeps a recent raw tail. Future turns receive a bounded notebook assembled from those notes. Later compaction never rewrites earlier notes. The visible transcript, resume, and session search retain the original messages and tool traces.
+
+Automatic compaction is enabled by default. Before a new turn, Noesis uses the same notebook compactor if history exceeds its allocation. To disable automatic compaction, set `context.autoCompact` to `false` and restart Noesis. Manual `/compact` remains available. With automation disabled, an over-budget turn stops with guidance instead of silently dropping history.
+
+The notebook uses at most one quarter of the history allocation, capped at 8,000 estimated tokens. If an existing note exceeds a reduced allocation, increase `context.tokenBudget` or shorten the new request. `/compact` cannot shrink an immutable note, and the selected model still limits the available budget.
 
 ## Reopen a session
 

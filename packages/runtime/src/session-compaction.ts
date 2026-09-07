@@ -72,6 +72,9 @@ export interface ContextNotebookView {
 export function estimateContextTokens(text: string): number {
   return estimateInputTokens(text);
 }
+export function contextNotebookTokenBudget(historyTokenBudget: number): number {
+  return Math.max(1, Math.min(MAX_COMPACTION_SUMMARY_TOKENS, Math.floor(historyTokenBudget / 4)));
+}
 function estimateContextMessageTokens(message: SessionContextMessage): number {
   return estimateContextTokens(renderContextMessageContent(message));
 }
@@ -162,9 +165,11 @@ export function resolvedSessionContext(
   readonly estimatedTokens: number;
   readonly exceedsBudget: boolean;
 } {
+  if (checkpoint && notebook?.activeCheckpoint.checkpointId !== checkpoint.checkpointId)
+    throw new Error("A context checkpoint requires its matching assembled notebook");
   const tail = messagesAfterCheckpoint(messages, checkpoint);
   const estimatedTokens =
-    (checkpoint ? estimateContextTokens(notebook?.content ?? checkpoint.summary) : 0) +
+    (notebook ? estimateContextTokens(notebook.content) : 0) +
     tail.reduce((total, message) => total + estimateContextMessageTokens(message), 0);
   const totalCharacters = tail.reduce(
     (total, message) => total + renderContextMessageContent(message).length,
@@ -199,7 +204,7 @@ export function prepareCompactionWindow(
   if (!current.exceedsBudget && options.force !== true) return undefined;
   const groups = turnGroups(current.messages);
   if (groups.length === 0) return undefined;
-  const summaryTokenLimit = Math.max(1, Math.min(MAX_COMPACTION_SUMMARY_TOKENS, Math.floor(tokenBudget / 4)));
+  const summaryTokenLimit = contextNotebookTokenBudget(tokenBudget);
   const rawTailBudget = Math.max(0, tokenBudget - summaryTokenLimit);
   let retainedStart = groups.length;
   let retainedTokens = 0;
@@ -364,7 +369,9 @@ export function resolveContextNotebook(
     selected = candidate;
   }
   if (selected.length === 0)
-    throw new Error(`Context checkpoint ${activeCheckpoint.checkpointId} exceeds the notebook budget`);
+    throw new Error(
+      `Context checkpoint ${activeCheckpoint.checkpointId} exceeds the notebook budget. Increase context.tokenBudget or shorten the current request; /compact cannot shrink immutable notes.`,
+    );
   const omittedCheckpointCount = independent.length - selected.length;
   const content = renderFrozenContextNotebook(selected, omittedCheckpointCount);
   const identity = selected.map((checkpoint) =>

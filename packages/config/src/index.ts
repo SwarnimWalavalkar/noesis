@@ -26,6 +26,7 @@ export const LearningConfigSchema = z.strictObject({
 export type LearningConfig = Readonly<z.infer<typeof LearningConfigSchema>>;
 export const ContextConfigSchema = z.strictObject({
   tokenBudget: z.number().int().positive().max(1000000).optional(),
+  autoCompact: z.boolean().optional(),
 });
 export type ContextConfig = Readonly<z.infer<typeof ContextConfigSchema>>;
 export const AutonomyRiskLevelSchema = z.enum(["off", "low", "medium", "high"]);
@@ -119,6 +120,7 @@ export const BUILT_IN_LEARNING_DEFAULTS: Required<LearningConfig> = {
 };
 export const BUILT_IN_CONTEXT_DEFAULTS: Required<ContextConfig> = {
   tokenBudget: 160000,
+  autoCompact: true,
 };
 export const BUILT_IN_AUTONOMY_DEFAULTS: Required<AutonomyConfig> = {
   riskLevel: "low",
@@ -282,6 +284,7 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
     },
     context: {
       tokenBudget: context.tokenBudget ?? BUILT_IN_CONTEXT_DEFAULTS.tokenBudget,
+      autoCompact: context.autoCompact ?? BUILT_IN_CONTEXT_DEFAULTS.autoCompact,
     },
     autonomy: {
       riskLevel: autonomy.riskLevel ?? BUILT_IN_AUTONOMY_DEFAULTS.riskLevel,

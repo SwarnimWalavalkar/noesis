@@ -148,9 +148,14 @@ describe("session compaction", () => {
       createdAt: "2026-08-13T00:00:00.000Z",
     });
 
-    const current = resolvedSessionContext(messages, checkpoint, 15);
+    const notebook = resolveContextNotebook([checkpoint], 1_000);
+    if (!notebook) throw new Error("Expected a context notebook");
+    expect(() => resolvedSessionContext(messages, checkpoint, 15)).toThrow("matching assembled notebook");
+    expect(() => resolveContextNotebook([checkpoint], 1)).toThrow("/compact cannot shrink immutable notes");
+    const current = resolvedSessionContext(messages, checkpoint, 15, notebook);
     const window = prepareCompactionWindow(messages, checkpoint, 15, {
       compactorInputTokenBudget: 1_000,
+      notebook,
     });
 
     expect(current.messages.map(({ messageId }) => messageId)).toEqual(["3", "4", "5", "6"]);
