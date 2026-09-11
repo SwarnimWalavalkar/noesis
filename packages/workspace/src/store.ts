@@ -4,7 +4,7 @@ import { ComposerAttachmentsSchema, composerContentDigest } from "@noesis/domain
 import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
-import { link, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
+import { link, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
@@ -574,7 +574,11 @@ export async function createWorkspaceStore(
           request?.signal ? { signal: request.signal } : {},
         );
         const after = await source.stat();
+        const selectedPath = await stat(sourcePath);
         if (
+          selectedPath.ino !== before.ino ||
+          selectedPath.dev !== before.dev ||
+          selectedPath.ctimeMs !== before.ctimeMs ||
           after.size !== before.size ||
           after.mtimeMs !== before.mtimeMs ||
           after.ctimeMs !== before.ctimeMs
@@ -598,6 +602,9 @@ export async function createWorkspaceStore(
       } finally {
         await handle.close();
       }
+      request?.signal?.throwIfAborted();
+      // Publication begins a non-cancellable completion boundary: register the
+      // artifact rather than unlinking a path another caller may already reuse.
       try {
         await link(temporary, path);
       } catch (error) {

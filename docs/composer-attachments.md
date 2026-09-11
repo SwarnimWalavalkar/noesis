@@ -46,3 +46,5 @@ Models with image support receive images that fit the inline working-set budget 
 Compaction retains file references and conversation text rather than binary images. Context inspection omits encoded image bytes and does not claim provider-specific image token estimates. Removing a draft item does not delete artifacts from previously admitted messages.
 
 If a later file in a batch fails, earlier successful imports remain registered artifacts with activity provenance and session relationships; they are not silently deleted. Identical retries reuse their identities. Admission does not create a message until the full batch succeeds. Metadata-only restoration checks existence/type/length without rehashing every large generic file; digest verification occurs when an artifact is explicitly read for a bounded inline view.
+
+Import cancellation stops preparation and streaming before publication. Once an immutable file is published, its metadata registration completes before cancellation is observed by the next batch step; this prevents deleting a path another request may reuse. This is a completion boundary, not a claim of filesystem/SQLite crash atomicity.

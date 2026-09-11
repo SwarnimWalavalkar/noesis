@@ -5941,7 +5941,18 @@ export async function createApplicationRuntimeComposition(
                     ),
                   };
                 } catch (error) {
-                  agentOutcome = { status: "failed", error };
+                  const notices = pendingAttachmentNotices
+                    .splice(0)
+                    .flatMap((event) => (event.type === "notice" ? [event.text] : []));
+                  agentOutcome = {
+                    status: "failed",
+                    error: notices.length
+                      ? new Error(
+                          [error instanceof Error ? error.message : String(error), ...notices].join("\n"),
+                          { cause: error },
+                        )
+                      : error,
+                  };
                 }
                 const [, assistantPersistenceResult] = await Promise.allSettled([
                   actionPersistence,

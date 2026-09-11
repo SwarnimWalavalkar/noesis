@@ -68,7 +68,11 @@ export function createAttachmentPreview(
     })
     .catch((cause: unknown) => {
       if (disposed) return;
-      unavailable = `Image preview unavailable; original attached (${safeTerminalText(cause instanceof Error ? cause.message : "preparation failed").slice(0, 120)})`;
+      unavailable = `Image preview unavailable; original attached (${safeTerminalText(
+        cause instanceof Error ? cause.message : "preparation failed",
+      )
+        .replace(/\s+/gu, " ")
+        .slice(0, 120)})`;
       requestRender();
     });
   return {
@@ -78,6 +82,8 @@ export function createAttachmentPreview(
       image = undefined;
     },
     invalidate: () => image?.invalidate(),
-    render: (width) => image?.render(width) ?? (unavailable ? [elideText(unavailable, width)] : []),
+    render: (width) =>
+      image?.render(width) ??
+      (unavailable ? [elideText(width < 40 ? "Original only" : unavailable, width)] : []),
   };
 }

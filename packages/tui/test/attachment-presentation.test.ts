@@ -148,3 +148,25 @@ describe("compact attachment presentation", () => {
     expect(renderQueuedInputs({ ...state, interaction }, 80).join("\n")).toContain("[image: photo.png]");
   });
 });
+
+test("failed previews retain a single bounded row and a useful narrow label", async () => {
+  vi.stubEnv("TERM_PROGRAM", "kitty");
+  vi.stubEnv("TERM", "xterm-256color");
+  vi.stubEnv("TMUX", "");
+  vi.stubEnv("STY", "");
+  vi.stubEnv("PI_IMAGE_PROTOCOL", "");
+  setCapabilities({ images: "kitty", hyperlinks: false, trueColor: false });
+  prepare.mockRejectedValue(new Error("decode\nfailed\tunexpectedly"));
+  const preview = createAttachmentPreview(
+    { name: "bad.png", mimeType: "image/png", data: png },
+    () => {},
+    true,
+    prepare,
+  );
+  await settle();
+  expect(preview?.render(16)).toEqual(["Original only"]);
+  expect(preview?.render(120)).toHaveLength(1);
+  expect(preview?.render(120).join("")).toContain("decode failed unexpectedly");
+  expect(preview?.render(120).join("")).not.toMatch(/[\r\n\t]/u);
+  preview?.dispose?.();
+});

@@ -1,7 +1,7 @@
 import { captureClipboardToFile, disposeAttachmentInput } from "../src/attachment-capture.ts";
 import { Worker, type WorkerOptions } from "node:worker_threads";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile, truncate, readFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, truncate, readFile, chmod } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -38,6 +38,7 @@ async function readClipboardAttachment(...args: Parameters<typeof readClipboardA
 }
 const dirs: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(ownedInputs.splice(0).map(disposeAttachmentInput));
   await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -457,3 +458,33 @@ it("does not prepare an already cancelled /attach", async () => {
   controller.abort();
   await expect(readAttachmentPath("/does-not-exist", controller.signal)).rejects.toThrow("abort");
 });
+
+it.skipIf(process.platform === "win32")(
+  "default clipboard probe runner forwards cancellation to the actual helper",
+  async () => {
+    const dir = await directory();
+    const marker = join(dir, "started");
+    const helper = join(dir, "wl-paste");
+    await writeFile(
+      helper,
+      `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started'); setInterval(()=>{},1000);`,
+    );
+    await chmod(helper, 0o700);
+    vi.stubEnv("PATH", `${dir}:${process.env["PATH"] ?? ""}`);
+    const controller = new AbortController();
+    const pending = readClipboardAttachment({
+      platform: "linux",
+      env: { WAYLAND_DISPLAY: "fixture" },
+      signal: controller.signal,
+    });
+    const rejection = expect(pending).rejects.toThrow();
+    try {
+      await vi.waitFor(async () => expect(await readFile(marker, "utf8")).toBe("started"));
+      controller.abort();
+      await rejection;
+    } finally {
+      controller.abort();
+    }
+  },
+  1000,
+);
