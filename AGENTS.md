@@ -50,6 +50,6 @@
 - Prefer immutable values, pure decision functions, typed results/errors, and dependency injection at I/O boundaries.
 - Do not use `any`. Avoid assertions; validate unknown durable data at the boundary.
 - Read a source file fully before a broad edit. Keep public package APIs narrow and add abstractions only with a consumer in this iteration.
-- Run `pnpm format`, `pnpm lint`, `pnpm typecheck`, and `pnpm test` after code changes. `pnpm check` runs the full set.
+- After code changes, run tests covering the changed behavior and affected consumers, using explicit test paths. Expand only when the change or failures implicate more code; reserve the full suite for explicit requests or changes with repo-wide impact. Report which tests ran. Run formatting, lint, and typechecking as applicable; documentation-only edits need no runtime tests.
 - Use Pi AgentHarness with a credential-free controlled provider for integration and acceptance work. Keep scripted runtime doubles test-only and limited to narrow unit seams. Never require credentials, network access, or paid model calls in CI.
 - Do not edit the local Pi, Hermes, or Codex reference clones. Do not commit unless explicitly asked.

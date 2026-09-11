@@ -2,6 +2,16 @@ import { sha256 } from "@noesis/domain";
 
 export const MODEL_OUTPUT_BYTES = 32 * 1024;
 
+// Keep the existing UTF-16 budgets without cutting a surrogate pair or copying the full result.
+function previewSlice(text: string, start: number, end: number): string {
+  const splitsPair = (index: number) =>
+    text.charCodeAt(index - 1) >= 0xd800 &&
+    text.charCodeAt(index - 1) <= 0xdbff &&
+    text.charCodeAt(index) >= 0xdc00 &&
+    text.charCodeAt(index) <= 0xdfff;
+  return text.slice(splitsPair(start) ? start + 1 : start, splitsPair(end) ? end - 1 : end);
+}
+
 /** Project completed results once; presentation failure must never invite effect retries. */
 export async function presentModelOutput(
   text: string,
@@ -14,8 +24,8 @@ export async function presentModelOutput(
     truncated: true,
     originalBytes: bytes,
     contentDigest: sha256(text),
-    head: text.slice(0, 3000),
-    tail: text.slice(-1000),
+    head: previewSlice(text, 0, 3000),
+    tail: previewSlice(text, text.length - 1000, text.length),
   };
   const unavailable = (reason: "not_configured" | "persistence_failed" | "invalid_recovery_path") =>
     JSON.stringify({
@@ -39,6 +49,6 @@ export async function presentModelOutput(
     recoveryAvailable: true,
     fullOutputPath: path,
     recovery:
-      "Read fullOutputPath with file_read and bounded line ranges, or use shell to extract bounded byte ranges for long JSON lines. This preview is incomplete evidence. Do not repeat the completed tool call to recover output.",
+      "For JSON, use execute: const file = await tools.files.read({ path: fullOutputPath }); const data = JSON.parse(file.content); return only selected fields or a bounded slice of data. Do not return or log the whole file. Direct file_read can truncate a single long JSON line again. For multiline text, use file_read with bounded line ranges, or extract a bounded section with shell. This preview is incomplete evidence. Do not repeat the completed tool call to recover output.",
   });
 }
