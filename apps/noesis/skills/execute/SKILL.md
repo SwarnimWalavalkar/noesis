@@ -32,7 +32,7 @@ return { readme, status };
 - `agents.send({ to, message })` messages a foreground session or retained agent. `agents.list()` gives compact process-wide status; `agents.inspect({ agentId, taskId? })` retrieves bounded details.
 - `agents.wait({ taskId, timeoutMs? })` joins an exact task without owning its lifetime. Use `agents.cancel({ taskId, reason? })` or `agents.close({ agentId, reason? })` only when the task or actor should actually stop. Inside a child, `agents.self` and `agents.parent` identify collaborators.
 - `emit(value)` and `notify(value)` publish JSON-compatible progress updates.
-- `store(key, value)` and `load(key)` manage bounded JSON scratch state for the Code Mode session.
+- `store(key, value)` and `load(key)` manage JSON scratch state for the Code Mode session: at most 65,536 UTF-8 JSON bytes per value, 262,144 bytes for the serialized array of key/value entries, and 256 keys. JSON quoting and escaping count toward these limits. For larger data, write JSON with `tools.files.write` and store only its path. Read and parse it inside `execute`, returning only needed fields. Reuse existing keys when the entry limit is reached.
 - `input` is the validated input inside saved Program source. A foreground `execute` receives `null`.
 
 Code Mode, subagents, and shell commands have no implicit duration or call-count ceiling. Pass an optional `timeoutMs` only when the task itself needs a deadline; the user can cancel active work at any time.
