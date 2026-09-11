@@ -1,3 +1,4 @@
+import { installPromptCacheKey } from "./prompt-cache.ts";
 import { createConditionalObject } from "@noesis/domain";
 import { AgentHarness, TODO_CONTEXT, type AgentLane, type Skill } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
@@ -633,6 +634,7 @@ export function createPiAgentRuntime(
         TODO_CONTEXT,
       );
       execution.harness = harness;
+      installPromptCacheKey(harness, cwd, `foreground:${request.trailId}`);
       const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
       execution.lane = lane;
       const requestBudget =

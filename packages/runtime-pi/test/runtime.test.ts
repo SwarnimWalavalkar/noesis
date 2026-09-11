@@ -2462,3 +2462,96 @@ describe("agent runtime factories", () => {
     expect(controlled.provider.state.callCount).toBe(0);
   });
 });
+
+test("keeps large execute results out of the next provider request with recoverable exact evidence", async () => {
+  const plan = frozenPlan();
+  let saved = "";
+  let calls = 0;
+  const value = "large evidence ".repeat(10_000);
+  const controlled = createControlledPiModels({
+    respond: ({ context }) => {
+      if (calls++ === 0)
+        return controlledToolCallResponse("execute", { source: "return evidence;" }, "large-output");
+      const result = context.messages.find((message) => message.role === "toolResult");
+      expect(result).toBeDefined();
+      const serialized = JSON.stringify(result);
+      expect(serialized.length).toBeLessThan(12_000);
+      expect(serialized).toContain("/tmp/exact-evidence.json");
+      expect(JSON.parse(saved)).toMatchObject({ value });
+      return "Bounded output received.";
+    },
+  });
+  const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+    codeExecution: {
+      prepare: async () => ({
+        catalog: catalogWithTools("large-output", []),
+        invoke: async () => null,
+        execute: async () => ({ executionId: "large-output", value, calls: 0, durationMs: 0 }),
+        saveModelOutput: async (text) => {
+          saved = text;
+          return "/tmp/exact-evidence.json";
+        },
+        close: async () => undefined,
+      }),
+      shutdown: async () => undefined,
+    },
+  });
+  await expect(
+    runtime.run(
+      {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Inspect evidence.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      () => undefined,
+    ),
+  ).resolves.toMatchObject({ outcome: "completed", text: "Bounded output received." });
+});
+
+test("groups enabled cache payloads across foreground turns while keeping Pi sessions distinct", async () => {
+  let inspectPayload = async () => "";
+  const keys: string[] = [];
+  const sessions: (string | undefined)[] = [];
+  const controlled = createControlledPiModels({
+    respond: async () => {
+      keys.push(await inspectPayload());
+      return "done";
+    },
+  });
+  const original = controlled.models.streamSimple.bind(controlled.models);
+  const spy = vi.spyOn(controlled.models, "streamSimple").mockImplementation((model, context, options) => {
+    sessions.push(options?.sessionId);
+    inspectPayload = async () =>
+      JSON.stringify(await options?.onPayload?.({ prompt_cache_key: options.sessionId }, model));
+    return original(model, context, options);
+  });
+  const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+  try {
+    for (const trailId of ["cache-one", "cache-one", "cache-two"]) {
+      await runtime.run(
+        {
+          trailId,
+          provider: CONTROLLED_PI_PROVIDER,
+          model: CONTROLLED_PI_MODEL,
+          thinkingLevel: "off",
+          systemPrompt: "Stable instructions",
+          prompt: "reply",
+          activeCapabilities: [],
+        },
+        () => undefined,
+      );
+    }
+    expect(keys[0]).toContain("prompt_cache_key");
+    expect(keys[0]).toBe(keys[1]);
+    expect(keys[0]).not.toBe(keys[2]);
+    expect(sessions.every((session) => session !== undefined)).toBe(true);
+    expect(new Set(sessions).size).toBe(3);
+  } finally {
+    spy.mockRestore();
+  }
+});

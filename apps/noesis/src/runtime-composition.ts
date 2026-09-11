@@ -4152,6 +4152,16 @@ export async function createApplicationRuntimeComposition(
           ),
         ),
       }),
+      saveModelOutput: async (text: string) => {
+        const artifact = await workspace.artifacts.writeArtifact({
+          path: `model-output/${plan.sessionId}/${plan.turnId}/${sha256(text)}.json`,
+          mediaType: "application/json",
+          bytes: encoder.encode(text),
+          actor: Object.freeze({ actorId: "noesis-model-output", kind: "noesis" }),
+          relationshipRefs: Object.freeze([foregroundEvidence(plan)]),
+        });
+        return resolve(options.config.home, artifact.path);
+      },
       invoke: async (
         name: string,
         input: JsonValue,

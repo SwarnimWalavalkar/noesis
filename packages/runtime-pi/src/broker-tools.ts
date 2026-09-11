@@ -1,6 +1,7 @@
 import type { AgentHarnessTool } from "@earendil-works/pi-agent-core";
 import { createConditionalObject, type JsonValue, JsonValueSchema, sha256 } from "@noesis/domain";
 import { z } from "zod";
+import { presentModelOutput } from "./model-output.ts";
 import type * as ZodCore from "zod/v4/core";
 import type { PiCodeExecutionEvent, PiFrozenToolCatalog, PreparedPiCodeExecution } from "./execute-tool.ts";
 
@@ -216,7 +217,12 @@ export function createPiBrokerTools(input: {
               throw error;
             }
             return {
-              content: [{ type: "text" as const, text: JSON.stringify(value) }],
+              content: [
+                {
+                  type: "text" as const,
+                  text: await presentModelOutput(JSON.stringify(value), input.prepared.saveModelOutput),
+                },
+              ],
               details: Object.freeze({ canonicalName: descriptor.name, callId }),
             };
           } finally {

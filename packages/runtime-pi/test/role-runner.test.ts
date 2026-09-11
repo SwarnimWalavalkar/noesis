@@ -103,9 +103,11 @@ describe("adapter-neutral role runner", () => {
       { text: '```json\n{"answer":"repaired"}\n```', usage: usage(12, 4, 0.02) },
     ];
     const prompts: string[] = [];
+    const systems: string[] = [];
     const runner = createScriptedAgentRoleRunner({
       respond(backendRequest) {
         prompts.push(backendRequest.prompt);
+        systems.push(backendRequest.systemPrompt);
         const response = responses.shift();
         if (!response) throw new Error("Unexpected repair attempt");
         return response;
@@ -125,6 +127,9 @@ describe("adapter-neutral role runner", () => {
     expect(result.capabilityRevisions).toEqual([capabilityRevision]);
     expect(result.trace.capabilityRevisions).toEqual([capabilityRevision]);
     expect(prompts).toHaveLength(2);
+    expect(systems[0]).toBe(systems[1]);
+    expect(systems[0]).toContain("Return JSON only");
+    expect(prompts[0]).not.toContain("runId");
     expect(prompts[1]).toContain("Repair the following malformed model output");
   });
 
@@ -488,9 +493,11 @@ describe("research role isolation", () => {
 
   test("reserves reflector headroom for a large structured-output contract", async () => {
     let capturedPrompt = "";
+    let capturedSystem = "";
     const backend = createScriptedRoleModelBackend({
       respond(backendRequest) {
         capturedPrompt = backendRequest.prompt;
+        capturedSystem = backendRequest.systemPrompt;
         return { text: '{"answer":"ok"}' };
       },
     });
@@ -529,9 +536,10 @@ describe("research role isolation", () => {
     const rendered = z
       .object({ messages: z.array(z.object({ name: z.string(), content: z.string() })) })
       .parse(JSON.parse(capturedPrompt));
-    expect(rendered.messages.at(-2)).toEqual({ name: "evidence", content: evidence });
-    expect(rendered.messages.at(-1)).toMatchObject({ name: "output_contract" });
-    expect(rendered.messages.at(-1)?.content).toContain("Return JSON only");
+    expect(rendered.messages.at(-1)).toEqual({ name: "evidence", content: evidence });
+    expect(rendered.messages.some((message) => message.name === "output_contract")).toBe(false);
+    expect(capturedSystem).toContain("Return JSON only");
+    expect(capturedSystem).toContain("x".repeat(5_000));
   });
 
   test("rejects undeclared revision-author context", async () => {
