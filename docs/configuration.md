@@ -39,7 +39,18 @@ Noesis stores local state under `~/.noesis/` by default. Set model options and t
 
 The default context budget is 160,000 tokens. Set `context.tokenBudget` to another positive value to change it. The budget covers the whole model request, not only the transcript. Noesis keeps it below the selected model's context window and reserves room for the model's maximum output.
 
-Use `/context` to inspect the current session's context. `/compact` appends immutable continuity notes from older settled turns and keeps a recent raw tail. Future turns receive a bounded notebook assembled from those notes. Later compaction never rewrites earlier notes. The visible transcript, resume, and session search retain the original messages and tool traces.
+### Compaction controls
+
+Noesis makes room in long sessions by extracting continuity notes from older settled turns and keeping recent messages in full. Each compaction reads only conversation that has not already been compacted. Earlier notes stay unchanged, and future turns receive a bounded notebook assembled from the newest note windows that fit. The original messages and tool traces remain available for resume and search.
+
+| Action                                  | How to use it                                                                      |
+| --------------------------------------- | ---------------------------------------------------------------------------------- |
+| Inspect context usage and the notebook. | Open `/context` and select a section to preview its contents.                      |
+| Compact older work now.                 | Run `/compact` after the active turn settles.                                      |
+| Guide what the new notes preserve.      | Run `/compact Preserve the migration constraints and remaining verification work.` |
+| Recover an omitted detail.              | Ask Noesis to search this session for the original exchange or tool result.        |
+
+See [long sessions and compaction](session-compaction.md) for the design and its cost tradeoffs.
 
 Automatic compaction is enabled by default. Before a new turn, Noesis uses the same notebook compactor if history exceeds its allocation. To disable automatic compaction, set `context.autoCompact` to `false` and restart Noesis. Manual `/compact` remains available. With automation disabled, an over-budget turn stops with guidance instead of silently dropping history.
 

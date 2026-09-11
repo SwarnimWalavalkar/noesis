@@ -49,9 +49,15 @@ A lower-priority instruction loses only when it conflicts with a higher-priority
 
 ## Context budget and compaction
 
+For a user walkthrough and the cost tradeoffs, see [long sessions and compaction](session-compaction.md).
+
 Long sessions use durable context checkpoints. Every new checkpoint appends independent continuity notes derived only from its newly covered complete turns; repeated compaction never rewrites an earlier note through another summary. The original transcript remains unchanged and continues to power resume, inspection, and search.
 
 Future turns receive a bounded, labelled session notebook assembled from exact immutable checkpoint notes and a recent tail of raw transcript messages. When older note windows fall outside that working set, `history.search_sessions({ scope: "current", ... })` can retrieve the original indexed messages and tool traces with exact citations. Failed and aborted turns keep their unfinished labels. The frozen turn plan pins every selected checkpoint note and message row it used.
+
+The compactor receives the prior checkpoint ID for lineage, but no prior summary text. Each `note_delta` therefore derives from original conversation rather than a summary of earlier summaries. Notebook assembly selects the newest contiguous checkpoint windows that fit, renders them in chronological order, and reports the number omitted. It does not perform semantic retrieval during compaction. Current-session search supplies evidence on demand.
+
+The notebook allocation is at most one quarter of the history budget, capped at 8,000 estimated tokens. Each turn pins the selected checkpoint IDs and content digests, as well as the notebook digest and omission count. Lineage and frozen-plan validation reject inconsistent references. Migrated `legacy_snapshot` checkpoints remain readable; the newest legacy snapshot is the compatibility base, so earlier cumulative snapshots are not repeated alongside it.
 
 The default context budget is 160,000 tokens. Set `context.tokenBudget` in `config.json` to change it. The budget covers the complete model request, including material outside the transcript.
 
