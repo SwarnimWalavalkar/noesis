@@ -419,7 +419,12 @@ export function createStructuredInferencePort(
   }
   const run = async <T>(request: AgentRunRequest, outputSchema: z.ZodType<T>) => {
     const traces: RuntimePiAgentTrace[] = [];
-    const contractedRequest = addOutputContract(request, outputSchema);
+    // Admit the repair slot before the first model call, including for empty requests.
+    const repairableRequest: AgentRunRequest =
+      maxRepairAttempts > 0 && request.messages.length === 0
+        ? { ...request, messages: [{ role: "user", name: "output_repair", content: "" }] }
+        : request;
+    const contractedRequest = addOutputContract(repairableRequest, outputSchema);
     let result = await options.runner.run(contractedRequest);
     traces.push(result.trace);
     let failure: Error;

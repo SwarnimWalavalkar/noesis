@@ -622,3 +622,31 @@ test.each(["foreground", "reflector", "session_compactor"] satisfies AgentRole[]
     expect(received[1]?.prompt).toContain("malformed evidence");
   },
 );
+
+test.each([0, 1])(
+  "admits an empty one-message request only when repairs are disabled (%i)",
+  async (repairs) => {
+    let calls = 0;
+    const base = configuration("reflector", "single-slot");
+    const runner = createScriptedAgentRoleRunner({
+      variants: [
+        { ...base, contextPolicy: createRestrictedRoleContextPolicy("reflector", { maxMessages: 1 }) },
+      ],
+      respond() {
+        calls++;
+        return { text: '{"answer":"ok"}' };
+      },
+    });
+    const result = createStructuredInferencePort({ runner, maxRepairAttempts: repairs }).run(
+      request("reflector", "single-slot", []),
+      z.strictObject({ answer: z.string() }),
+    );
+    if (repairs === 0) {
+      await expect(result).resolves.toMatchObject({ value: { answer: "ok" } });
+      expect(calls).toBe(1);
+    } else {
+      await expect(result).rejects.toThrow("rejects messages beyond its message bound");
+      expect(calls).toBe(0);
+    }
+  },
+);
