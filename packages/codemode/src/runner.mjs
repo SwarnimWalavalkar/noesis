@@ -54,10 +54,15 @@ function sendFailure(error) {
       .finish(),
   );
 }
-function boundedJsonSafe(value, maximum, label) {
+const STORE_RECOVERY =
+  "Write large JSON with tools.files.write, then store its path. Read and parse it inside execute, returning only needed fields.";
+function boundedJsonSafe(value, maximum, label, recovery = "") {
   const serialized = JSON.stringify(value === undefined ? null : value);
-  if (Buffer.byteLength(serialized, "utf8") > maximum) {
-    throw new Error(`${label} exceeds ${maximum} bytes`);
+  const actualBytes = Buffer.byteLength(serialized, "utf8");
+  if (actualBytes > maximum) {
+    throw new Error(
+      `${label} exceeds ${maximum} bytes: received ${actualBytes} bytes.${recovery ? ` ${recovery}` : ""}`,
+    );
   }
   return JSON.parse(serialized);
 }
@@ -268,17 +273,18 @@ process.on("message", async (message) => {
   const notify = emit;
   const store = (key, value) => {
     const normalizedKey = String(key);
-    const safeValue = boundedJsonSafe(value, MAX_STORE_VALUE_BYTES, "Codemode store value");
+    const safeValue = boundedJsonSafe(value, MAX_STORE_VALUE_BYTES, "Codemode store value", STORE_RECOVERY);
     const hadPrevious = sessionStore.has(normalizedKey);
     const previousValue = sessionStore.get(normalizedKey);
     sessionStore.set(normalizedKey, safeValue);
-    if (
-      sessionStore.size > MAX_STORE_ENTRIES ||
-      Buffer.byteLength(JSON.stringify([...sessionStore.entries()]), "utf8") > MAX_STORE_BYTES
-    ) {
+    const actualBytes = Buffer.byteLength(JSON.stringify([...sessionStore.entries()]), "utf8");
+    const actualEntries = sessionStore.size;
+    if (actualEntries > MAX_STORE_ENTRIES || actualBytes > MAX_STORE_BYTES) {
       if (hadPrevious) sessionStore.set(normalizedKey, previousValue);
       else sessionStore.delete(normalizedKey);
-      throw new Error(`Codemode store exceeds ${MAX_STORE_BYTES} bytes or ${MAX_STORE_ENTRIES} entries`);
+      throw new Error(
+        `Codemode store exceeds ${MAX_STORE_BYTES} bytes or ${MAX_STORE_ENTRIES} entries: received ${actualBytes} bytes and ${actualEntries} entries. ${STORE_RECOVERY} Reuse existing keys when the entry limit is reached.`,
+      );
     }
     storeMutations.set(normalizedKey, safeValue);
   };

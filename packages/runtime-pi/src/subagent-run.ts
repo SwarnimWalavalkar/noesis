@@ -1,3 +1,4 @@
+import { installPromptCacheKey } from "./prompt-cache.ts";
 import { AgentHarness, TODO_CONTEXT, type AgentLane } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
 import type {
@@ -337,6 +338,7 @@ export function createPiSubAgentTaskRunner(
         TODO_CONTEXT,
       );
       task.harness = harness;
+      installPromptCacheKey(harness, cwd, `subagent:${request.plan.agentId}`);
       const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
       task.lane = lane;
       const requestAbort = (): Promise<void> => {

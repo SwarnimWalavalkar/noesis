@@ -3,6 +3,7 @@ import type { AgentHarnessTool } from "@earendil-works/pi-agent-core";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { JsonValue } from "@noesis/domain";
 import { z } from "zod";
+import { presentModelOutput } from "./model-output.ts";
 import type { PiSkillResource } from "./skill-library.ts";
 const executeParameters = z.strictObject({
   source: z
@@ -131,6 +132,8 @@ export interface PiFrozenToolCatalog {
   }[];
 }
 export interface PreparedPiCodeExecution {
+  /** Persist oversized model-visible text as a WorkspaceStore artifact, returning its absolute read path. */
+  readonly saveModelOutput?: (text: string) => Promise<string>;
   readonly catalog: PiFrozenToolCatalog;
   readonly mcpServerSummaries?: readonly PiMcpServerSummary[];
   readonly invoke?: (
@@ -248,12 +251,15 @@ export function createPiExecuteTool(input: {
           content: [
             {
               type: "text" as const,
-              text: JSON.stringify(
-                createConditionalObject({ value: result.value })
-                  .addOptional(result.stdout ? { stdout: result.stdout } : undefined)
-                  .addOptional(result.stderr ? { stderr: result.stderr } : undefined)
-                  .addOptional(result.logsTruncated ? { logsTruncated: true } : undefined)
-                  .finish(),
+              text: await presentModelOutput(
+                JSON.stringify(
+                  createConditionalObject({ value: result.value })
+                    .addOptional(result.stdout ? { stdout: result.stdout } : undefined)
+                    .addOptional(result.stderr ? { stderr: result.stderr } : undefined)
+                    .addOptional(result.logsTruncated ? { logsTruncated: true } : undefined)
+                    .finish(),
+                ),
+                input.prepared.saveModelOutput,
               ),
             },
           ],

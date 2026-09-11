@@ -51,7 +51,11 @@ export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPoli
       .addOptional(
         !foreground
           ? {
-              allowedMessageNames: Object.freeze([...isolatedRoleMessageNames[role], "output_contract"]),
+              allowedMessageNames: Object.freeze([
+                ...isolatedRoleMessageNames[role],
+                "output_contract",
+                "output_repair",
+              ]),
             }
           : undefined,
       )
@@ -178,17 +182,12 @@ export function applyRoleContextPolicy(
 }
 export function renderBoundedRolePrompt(input: BoundedRoleInput, policy: RoleContextPolicy): string {
   const visibleCapabilityRevisions = policy.includeCapabilityRevisions ? input.capabilityRevisions : [];
-  return JSON.stringify(
-    {
-      runId: input.runId,
-      role: input.role,
-      variant: input.variant,
-      messages: input.messages,
-      evidenceRefs: input.evidenceRefs,
-      availableTools: input.availableTools,
-      capabilityRevisions: visibleCapabilityRevisions,
-    },
-    null,
-    2,
-  );
+  return JSON.stringify({
+    role: input.role,
+    variant: input.variant,
+    messages: input.messages.filter((message) => message.name !== "output_contract"),
+    evidenceRefs: input.evidenceRefs,
+    availableTools: input.availableTools,
+    capabilityRevisions: visibleCapabilityRevisions,
+  });
 }

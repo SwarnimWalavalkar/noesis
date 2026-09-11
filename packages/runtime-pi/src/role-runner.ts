@@ -217,7 +217,13 @@ export function createAgentRoleRunner(options: CreateAgentRoleRunnerOptions): Ru
         provider: configuration.provider,
         model: configuration.model,
         reasoning: configuration.reasoning,
-        systemPrompt: configuration.systemPrompt,
+        systemPrompt: [
+          configuration.systemPrompt,
+          ...boundedInput.messages
+            .filter((message) => message.name === "output_contract")
+            .map((message) => message.content),
+        ].join("\n\n"),
+        cacheScope: `${request.role}:${request.variant.variantId}`,
         prompt: renderBoundedRolePrompt(boundedInput, configuration.contextPolicy),
       } as const)
         .addOptional(
@@ -355,14 +361,14 @@ function repairRequest(
   error: Error,
   attempt: number,
 ): AgentRunRequest {
-  const messages = request.messages.map((message, index) =>
-    index === request.messages.length - 1
-      ? {
-          ...message,
-          content: `${message.content}\n\nRepair the following malformed model output. Return only corrected JSON.\nValidation failure: ${error.message}\nMalformed output:\n${raw}`,
-        }
-      : message,
-  );
+  const target = request.messages.findLastIndex((entry) => entry.name !== "output_contract");
+  const guidance = `Repair the following malformed model output. Return only corrected JSON.\nValidation failure: ${error.message}\nMalformed output:\n${raw}`;
+  const messages =
+    target < 0
+      ? [...request.messages, { role: "user" as const, name: "output_repair", content: guidance }]
+      : request.messages.map((message, index) =>
+          index === target ? { ...message, content: `${message.content}\n\n${guidance}` } : message,
+        );
   return { ...request, runId: `${request.runId}:repair:${attempt}`, messages };
 }
 function addUsage(left: AgentUsage, right: AgentUsage): AgentUsage {
@@ -413,7 +419,13 @@ export function createStructuredInferencePort(
   }
   const run = async <T>(request: AgentRunRequest, outputSchema: z.ZodType<T>) => {
     const traces: RuntimePiAgentTrace[] = [];
-    let result = await options.runner.run(addOutputContract(request, outputSchema));
+    // Admit the repair slot before the first model call, including for empty requests.
+    const repairableRequest: AgentRunRequest =
+      maxRepairAttempts > 0 && request.messages.length === 0
+        ? { ...request, messages: [{ role: "user", name: "output_repair", content: "" }] }
+        : request;
+    const contractedRequest = addOutputContract(repairableRequest, outputSchema);
+    let result = await options.runner.run(contractedRequest);
     traces.push(result.trace);
     let failure: Error;
     try {
@@ -427,7 +439,7 @@ export function createStructuredInferencePort(
       failure = toError(error);
     }
     for (let attempt = 1; attempt <= maxRepairAttempts; attempt += 1) {
-      result = await options.runner.run(repairRequest(request, result.text, failure, attempt));
+      result = await options.runner.run(repairRequest(contractedRequest, result.text, failure, attempt));
       traces.push(result.trace);
       try {
         const value = decodeStructured(result.text, outputSchema);

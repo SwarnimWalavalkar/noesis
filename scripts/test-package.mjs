@@ -113,6 +113,13 @@ try {
     !JSON.stringify(manifest).includes("workspace:"),
     "Installed manifest contains workspace dependencies",
   );
+  // Verify the SDK consumes the published safe pin, not a separate vulnerable nested copy.
+  const consumerBase = pathToFileURL(join(packageRoot, "package.json")).href;
+  const sdkEntry = resolve("@modelcontextprotocol/sdk/server/index.js", consumerBase);
+  requireCondition(
+    resolve("hono", sdkEntry) === resolve("hono", consumerBase),
+    "Installed MCP SDK does not use the published Hono dependency",
+  );
   const codeModeModule = await import(
     pathToFileURL(join(packageRoot, "dist/packages/codemode/src/index.js")).href
   );

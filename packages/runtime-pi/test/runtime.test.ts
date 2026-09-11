@@ -2462,3 +2462,170 @@ describe("agent runtime factories", () => {
     expect(controlled.provider.state.callCount).toBe(0);
   });
 });
+
+test("keeps large execute results out of the next provider request with recoverable exact evidence", async () => {
+  const plan = frozenPlan();
+  let saved = "";
+  let calls = 0;
+  const value = "large evidence ".repeat(10_000);
+  const controlled = createControlledPiModels({
+    respond: ({ context }) => {
+      if (calls++ === 0)
+        return controlledToolCallResponse("execute", { source: "return evidence;" }, "large-output");
+      const result = context.messages.find((message) => message.role === "toolResult");
+      expect(result).toBeDefined();
+      const serialized = JSON.stringify(result);
+      expect(serialized.length).toBeLessThan(12_000);
+      expect(serialized).toContain("/tmp/exact-evidence.json");
+      expect(JSON.parse(saved)).toMatchObject({ value });
+      return "Bounded output received.";
+    },
+  });
+  const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+    codeExecution: {
+      prepare: async () => ({
+        catalog: catalogWithTools("large-output", []),
+        invoke: async () => null,
+        execute: async () => ({ executionId: "large-output", value, calls: 0, durationMs: 0 }),
+        saveModelOutput: async (text) => {
+          saved = text;
+          return "/tmp/exact-evidence.json";
+        },
+        close: async () => undefined,
+      }),
+      shutdown: async () => undefined,
+    },
+  });
+  await expect(
+    runtime.run(
+      {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Inspect evidence.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      () => undefined,
+    ),
+  ).resolves.toMatchObject({ outcome: "completed", text: "Bounded output received." });
+});
+
+test("groups enabled cache payloads across foreground turns while keeping Pi sessions distinct", async () => {
+  let inspectPayload = async () => "";
+  const keys: string[] = [];
+  const sessions: (string | undefined)[] = [];
+  const controlled = createControlledPiModels({
+    respond: async () => {
+      keys.push(await inspectPayload());
+      return "done";
+    },
+  });
+  const original = controlled.models.streamSimple.bind(controlled.models);
+  const spy = vi.spyOn(controlled.models, "streamSimple").mockImplementation((model, context, options) => {
+    sessions.push(options?.sessionId);
+    inspectPayload = async () =>
+      JSON.stringify(await options?.onPayload?.({ prompt_cache_key: options.sessionId }, model));
+    return original(model, context, options);
+  });
+  const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+  try {
+    for (const trailId of ["cache-one", "cache-one", "cache-two"]) {
+      await runtime.run(
+        {
+          trailId,
+          provider: CONTROLLED_PI_PROVIDER,
+          model: CONTROLLED_PI_MODEL,
+          thinkingLevel: "off",
+          systemPrompt: "Stable instructions",
+          prompt: "reply",
+          activeCapabilities: [],
+        },
+        () => undefined,
+      );
+    }
+    expect(keys[0]).toContain("prompt_cache_key");
+    expect(keys[0]).toBe(keys[1]);
+    expect(keys[0]).not.toBe(keys[2]);
+    expect(sessions.every((session) => session !== undefined)).toBe(true);
+    expect(new Set(sessions).size).toBe(3);
+  } finally {
+    spy.mockRestore();
+  }
+});
+
+test.each([
+  ["execute", "missing"],
+  ["execute", "failed"],
+  ["shell", "missing"],
+  ["shell", "failed"],
+] as const)("preserves completed %s effects when output persistence is %s", async (tool, persistence) => {
+  const plan = frozenPlan();
+  let effects = 0;
+  let rounds = 0;
+  const value = "completed effect evidence ".repeat(10_000);
+  const controlled = createControlledPiModels({
+    respond: ({ context }) => {
+      if (rounds++ === 0)
+        return controlledToolCallResponse(
+          tool,
+          tool === "execute" ? { source: "return effect();" } : {},
+          "effect-once",
+        );
+      const result = context.messages.find((message) => message.role === "toolResult");
+      expect(result).toMatchObject({ isError: false });
+      const serialized = JSON.stringify(result);
+      expect(serialized.length).toBeLessThan(12_000);
+      expect(serialized).toContain("Do not repeat");
+      expect(serialized).toContain(persistence === "missing" ? "not_configured" : "persistence_failed");
+      expect(serialized).not.toContain("fullOutputPath");
+      expect(effects).toBe(1);
+      return "Effect completed; exact recovery unavailable.";
+    },
+  });
+  const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+    codeExecution: {
+      prepare: async () => {
+        const prepared: PreparedPiCodeExecution = {
+          catalog: catalogWithTools("output-persistence-failure", []),
+          invoke: async () => {
+            effects++;
+            return value;
+          },
+          execute: async () => {
+            effects++;
+            return { executionId: "effect-once", value, calls: 0, durationMs: 0 };
+          },
+          close: async () => undefined,
+        };
+        return persistence === "failed"
+          ? {
+              ...prepared,
+              saveModelOutput: async () => {
+                throw new Error("disk full");
+              },
+            }
+          : prepared;
+      },
+      shutdown: async () => undefined,
+    },
+  });
+  await expect(
+    runtime.run(
+      {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Perform the effect once.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      () => undefined,
+    ),
+  ).resolves.toMatchObject({ outcome: "completed" });
+  expect(effects).toBe(1);
+});

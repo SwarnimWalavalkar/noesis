@@ -1,3 +1,4 @@
+import { installPromptCacheKey } from "./prompt-cache.ts";
 import { createConditionalObject } from "@noesis/domain";
 import { AgentHarness, TODO_CONTEXT, type AgentLane } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Models } from "@earendil-works/pi-ai";
@@ -98,6 +99,7 @@ export function createPiRoleModelBackend(cwd: string, models: Models): RoleModel
         TODO_CONTEXT,
       );
       execution.harness = harness;
+      installPromptCacheKey(harness, cwd, `role:${request.cacheScope ?? request.systemPrompt}`);
       const lane = await harness.lane(NOESIS_PI_LANE_NAME, TODO_CONTEXT);
       execution.lane = lane;
       let terminalAssistant: AssistantMessage | undefined;

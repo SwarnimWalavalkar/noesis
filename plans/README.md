@@ -6,7 +6,9 @@ For current behavior, start with [the product documentation](../docs/README.md),
 
 ## Active implementation plans
 
-No active implementation plans.
+- [Prompt cache and token efficiency implementation](noesis-token-efficiency-implementation.md) — active; implementation and review fixes in PR #43.
+- [Prompt caching and token efficiency audit](noesis-prompt-cache-token-efficiency-audit.md) — active design evidence for PR #43 and deferred measurement work.
+- [Pi and OpenCode caching comparison](noesis-pi-opencode-cache-comparison.md) — active research record supporting the token-efficiency implementation.
 
 ## Shipped implementation records
 

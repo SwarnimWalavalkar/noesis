@@ -777,6 +777,38 @@ describe("codemode runtime", () => {
       }),
     ).rejects.toThrow("Codemode IPC frame exceeds");
   });
+  it("reports scratch byte limits and preserves the previous value after rejection", async () => {
+    const result = await runtime().execute({
+      source: `
+        store("saved", "x".repeat(65534));
+        let error;
+        try { store("saved", "😀".repeat(16384)); } catch (caught) { error = caught.message; }
+        return { error, length: load("saved").length };
+      `,
+      sessionId: "scratch-value-limit",
+    });
+    expect(result.value).toEqual({
+      error:
+        "Codemode store value exceeds 65536 bytes: received 65538 bytes. Write large JSON with tools.files.write, then store its path. Read and parse it inside execute, returning only needed fields.",
+      length: 65534,
+    });
+  });
+  it("reports aggregate scratch bytes including entry overhead and rolls back the rejected key", async () => {
+    const result = await runtime().execute({
+      source: `
+        for (let index = 0; index < 3; index += 1) store(String(index), "x".repeat(65534));
+        let error;
+        try { store("3", "x".repeat(65534)); } catch (caught) { error = caught.message; }
+        return { error, rejectedKeyAbsent: load("3") === undefined };
+      `,
+      sessionId: "scratch-total-limit",
+    });
+    expect(result.value).toEqual({
+      error:
+        "Codemode store exceeds 262144 bytes or 256 entries: received 262173 bytes and 4 entries. Write large JSON with tools.files.write, then store its path. Read and parse it inside execute, returning only needed fields. Reuse existing keys when the entry limit is reached.",
+      rejectedKeyAbsent: true,
+    });
+  });
   it("bounds aggregate store state in the child before returning it", async () => {
     await expect(
       runtime().execute({

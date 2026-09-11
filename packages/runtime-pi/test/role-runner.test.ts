@@ -103,9 +103,11 @@ describe("adapter-neutral role runner", () => {
       { text: '```json\n{"answer":"repaired"}\n```', usage: usage(12, 4, 0.02) },
     ];
     const prompts: string[] = [];
+    const systems: string[] = [];
     const runner = createScriptedAgentRoleRunner({
       respond(backendRequest) {
         prompts.push(backendRequest.prompt);
+        systems.push(backendRequest.systemPrompt);
         const response = responses.shift();
         if (!response) throw new Error("Unexpected repair attempt");
         return response;
@@ -125,6 +127,9 @@ describe("adapter-neutral role runner", () => {
     expect(result.capabilityRevisions).toEqual([capabilityRevision]);
     expect(result.trace.capabilityRevisions).toEqual([capabilityRevision]);
     expect(prompts).toHaveLength(2);
+    expect(systems[0]).toBe(systems[1]);
+    expect(systems[0]).toContain("Return JSON only");
+    expect(prompts[0]).not.toContain("runId");
     expect(prompts[1]).toContain("Repair the following malformed model output");
   });
 
@@ -366,7 +371,12 @@ describe("research role isolation", () => {
   test("restricts capability routing to the current turn payload", () => {
     const policy = createRestrictedRoleContextPolicy("capability_router");
 
-    expect(policy.allowedMessageNames).toEqual(["turn", "prior_conversation", "output_contract"]);
+    expect(policy.allowedMessageNames).toEqual([
+      "turn",
+      "prior_conversation",
+      "output_contract",
+      "output_repair",
+    ]);
     expect(policy.maxTools).toBe(0);
   });
 
@@ -382,6 +392,7 @@ describe("research role isolation", () => {
       "arm_B",
       "relevant_traces",
       "output_contract",
+      "output_repair",
     ]);
     expect(policy.includeCapabilityRevisions).toBe(false);
     expect(policy.maxMessages).toBe(12);
@@ -488,9 +499,11 @@ describe("research role isolation", () => {
 
   test("reserves reflector headroom for a large structured-output contract", async () => {
     let capturedPrompt = "";
+    let capturedSystem = "";
     const backend = createScriptedRoleModelBackend({
       respond(backendRequest) {
         capturedPrompt = backendRequest.prompt;
+        capturedSystem = backendRequest.systemPrompt;
         return { text: '{"answer":"ok"}' };
       },
     });
@@ -529,9 +542,10 @@ describe("research role isolation", () => {
     const rendered = z
       .object({ messages: z.array(z.object({ name: z.string(), content: z.string() })) })
       .parse(JSON.parse(capturedPrompt));
-    expect(rendered.messages.at(-2)).toEqual({ name: "evidence", content: evidence });
-    expect(rendered.messages.at(-1)).toMatchObject({ name: "output_contract" });
-    expect(rendered.messages.at(-1)?.content).toContain("Return JSON only");
+    expect(rendered.messages.at(-1)).toEqual({ name: "evidence", content: evidence });
+    expect(rendered.messages.some((message) => message.name === "output_contract")).toBe(false);
+    expect(capturedSystem).toContain("Return JSON only");
+    expect(capturedSystem).toContain("x".repeat(5_000));
   });
 
   test("rejects undeclared revision-author context", async () => {
@@ -584,3 +598,55 @@ describe("research role isolation", () => {
     expect(result.capabilityRevisions).toEqual([capabilityRevision]);
   });
 });
+
+test.each(["foreground", "reflector", "session_compactor"] satisfies AgentRole[])(
+  "repairs an empty %s request without changing its schema prefix",
+  async (role) => {
+    const received: RoleBackendRequest[] = [];
+    const runner = createScriptedAgentRoleRunner({
+      variants: [configuration(role, "empty-repair")],
+      respond(input) {
+        received.push(input);
+        return { text: received.length === 1 ? "malformed evidence" : '{"answer":"fixed"}' };
+      },
+    });
+    const result = await createStructuredInferencePort({ runner }).run(
+      request(role, "empty-repair", []),
+      z.strictObject({ answer: z.string() }),
+    );
+    expect(result.value).toEqual({ answer: "fixed" });
+    expect(received).toHaveLength(2);
+    expect(received[0]?.systemPrompt).toBe(received[1]?.systemPrompt);
+    expect(received[1]?.prompt).toContain("output_repair");
+    expect(received[1]?.prompt).toContain("Validation failure:");
+    expect(received[1]?.prompt).toContain("malformed evidence");
+  },
+);
+
+test.each([0, 1])(
+  "admits an empty one-message request only when repairs are disabled (%i)",
+  async (repairs) => {
+    let calls = 0;
+    const base = configuration("reflector", "single-slot");
+    const runner = createScriptedAgentRoleRunner({
+      variants: [
+        { ...base, contextPolicy: createRestrictedRoleContextPolicy("reflector", { maxMessages: 1 }) },
+      ],
+      respond() {
+        calls++;
+        return { text: '{"answer":"ok"}' };
+      },
+    });
+    const result = createStructuredInferencePort({ runner, maxRepairAttempts: repairs }).run(
+      request("reflector", "single-slot", []),
+      z.strictObject({ answer: z.string() }),
+    );
+    if (repairs === 0) {
+      await expect(result).resolves.toMatchObject({ value: { answer: "ok" } });
+      expect(calls).toBe(1);
+    } else {
+      await expect(result).rejects.toThrow("rejects messages beyond its message bound");
+      expect(calls).toBe(0);
+    }
+  },
+);

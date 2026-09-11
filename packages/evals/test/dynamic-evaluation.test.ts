@@ -970,8 +970,12 @@ describe("AC-06 dynamic evaluation laboratory", () => {
       expect(request.prompt).not.toContain(candidateRef.bundleDigest);
       expect(request.prompt).not.toContain('"baseline"');
       expect(request.prompt).not.toContain('"candidate"');
-      expect(request.prompt).toContain('"name": "arm_A"');
-      expect(request.prompt).toContain('"name": "arm_B"');
+      expect(JSON.parse(request.prompt)).toMatchObject({
+        messages: expect.arrayContaining([expect.objectContaining({ name: "arm_A" })]),
+      });
+      expect(JSON.parse(request.prompt)).toMatchObject({
+        messages: expect.arrayContaining([expect.objectContaining({ name: "arm_B" })]),
+      });
     }
   });
   test("swaps generator, judge, and aggregation strategies into a comparable research run", async () => {

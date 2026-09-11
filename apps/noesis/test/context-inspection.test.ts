@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test } from "vitest";
@@ -34,10 +34,19 @@ test("inspects startup context and the actual Pi request without invoking a mode
     env: {},
     cli: { provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL },
   });
+  const fixtureSkill = join(home, "inspection-fixture.md");
+  await writeFile(
+    fixtureSkill,
+    "---\nname: inspection-fixture\ndescription: Inspect controlled context.\n---\nUse exact evidence.",
+    "utf8",
+  );
   const skills = createPiSkillLibrary({
     cwd: home,
     agentDirectory: join(home, "agent"),
     workspaceTrusted: true,
+    builtInSkills: [
+      { name: "inspection-fixture", description: "Inspect controlled context.", filePath: fixtureSkill },
+    ],
   });
   const runtime = await createApplicationRuntimeComposition({
     config: { ...config, learning: { ...config.learning, enabled: false } },
@@ -56,6 +65,9 @@ test("inspects startup context and the actual Pi request without invoking a mode
     expect(preview.cache).toBeUndefined();
     expect(preview.components[0]?.tokens).toBeGreaterThan(0);
     expect(preview.components.find((part) => part.label === "Skill catalog")?.tokens).toBeGreaterThan(0);
+    expect(preview.components.find((part) => part.label === "Skill catalog")?.content).toContain(
+      "inspection-fixture",
+    );
     const previewTools = preview.components.find((part) => part.label === "Tools");
     expect(previewTools?.tokens).toBeGreaterThan(0);
     expect(previewTools?.tokens).toBeLessThan(4096);

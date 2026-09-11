@@ -51,6 +51,7 @@ export interface BoundedRoleInput {
 }
 
 export interface RoleBackendRequest {
+  readonly cacheScope?: string;
   readonly runId: string;
   readonly provider: string;
   readonly model: string;
