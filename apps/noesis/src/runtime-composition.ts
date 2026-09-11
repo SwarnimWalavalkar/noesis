@@ -45,7 +45,6 @@ import {
   type CapabilityRevision,
   type CapabilityRevisionRef,
   type ComposerAttachment,
-  COMPOSER_IMAGE_PROJECTION_LIMITS,
   canonicalJson,
   capabilityRevisionRef,
   createId,
@@ -5879,10 +5878,6 @@ export async function createApplicationRuntimeComposition(
                       readonly error: unknown;
                     };
                 try {
-                  const budget = {
-                    remainingBytes: COMPOSER_IMAGE_PROJECTION_LIMITS.totalBytes,
-                    remainingTokens: Math.max(0, contextTokenBudget - estimatedCompleteRequestTokens - 1024),
-                  };
                   const validateImages = (images: readonly { mimeType: string; data: string }[]) => {
                     if (!agent.validateImages) throw new Error("This runtime does not support inline images");
                     agent.validateImages(plan.provider, plan.model, images);
@@ -5890,30 +5885,11 @@ export async function createApplicationRuntimeComposition(
                   const projection = await projectComposerAttachmentImages(
                     workspace,
                     attachments,
-                    budget,
                     validateImages,
                   );
                   const publishNotice = (text: string) => emit({ type: "notice", text });
-                  if (projection.notice) publishNotice(projection.notice);
-                  const history = await resolveAttachmentHistory(
-                    workspace,
-                    plan,
-                    budget,
-                    validateImages,
-                    publishNotice,
-                  );
-                  const projectedImageTokens =
-                    Math.max(0, contextTokenBudget - estimatedCompleteRequestTokens - 1024) -
-                    budget.remainingTokens;
-                  if (
-                    estimatedCompleteRequestTokens +
-                      projectedImageTokens +
-                      (projection.notice ? estimateContextTokens(projection.notice) : 0) >
-                    contextTokenBudget
-                  )
-                    throw new Error(
-                      "The complete turn request exceeds the selected context token budget after image projection.",
-                    );
+                  if (projection.userNotice) publishNotice(projection.userNotice);
+                  const history = await resolveAttachmentHistory(workspace, plan, validateImages);
                   agentOutcome = {
                     status: "completed",
                     result: await agent.run(
@@ -6084,15 +6060,10 @@ export async function createApplicationRuntimeComposition(
     },
     steer: async (sessionId, text, attachments = []) => {
       const trail = getTrail(sessionId);
-      const projection = await projectComposerAttachmentImages(
-        workspace,
-        attachments,
-        undefined,
-        (images) => {
-          if (!agent.validateImages) throw new Error("This runtime does not support inline images");
-          agent.validateImages(trail.provider, trail.model, images);
-        },
-      );
+      const projection = await projectComposerAttachmentImages(workspace, attachments, (images) => {
+        if (!agent.validateImages) throw new Error("This runtime does not support inline images");
+        agent.validateImages(trail.provider, trail.model, images);
+      });
       return await agent.steer(
         sessionId,
         renderComposerAttachmentText(

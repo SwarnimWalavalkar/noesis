@@ -1,8 +1,6 @@
 import path from "node:path";
 import { z } from "zod";
 import {
-  COMPOSER_IMAGE_PROJECTION_LIMITS,
-  imageProjectionTokens,
   ComposerAttachmentInputSchema,
   ComposerFileInputSchema,
   ComposerAttachmentSchema,
@@ -60,24 +58,18 @@ export async function persistComposerAttachments(
   return Object.freeze(result);
 }
 
-export interface ComposerImageProjectionBudget {
-  remainingBytes: number;
-  remainingTokens?: number;
-  remainingImages?: number;
-}
 export interface ComposerImageProjection {
   readonly images: readonly { mimeType: string; data: string }[];
   readonly omittedArtifactIds: readonly string[];
   readonly notice: string;
+  readonly userNotice: string;
 }
 /** Storage admission is independent of optional provider image projection. */
 export async function projectComposerAttachmentImages(
   workspace: NoesisWorkspaceStore,
   refs: readonly ComposerAttachment[],
-  budget: ComposerImageProjectionBudget = { remainingBytes: COMPOSER_IMAGE_PROJECTION_LIMITS.totalBytes },
   validateImages?: (images: readonly { mimeType: string; data: string }[]) => void,
 ): Promise<ComposerImageProjection> {
-  budget.remainingImages ??= COMPOSER_IMAGE_PROJECTION_LIMITS.imageCount;
   const images: { mimeType: string; data: string }[] = [];
   const omittedArtifactIds: string[] = [];
   const reasons: string[] = [];
@@ -90,40 +82,19 @@ export async function projectComposerAttachmentImages(
   for (const ref of ComposerAttachmentsSchema.parse(refs)) {
     if (ref.mimeType !== ref.artifact.mediaType) throw new Error("Attachment MIME differs from artifact");
     if (!ref.mimeType.startsWith("image/")) continue;
-    const allowanceReason = unavailable.has(ref.artifact.artifactId)
-      ? "image projection already unavailable"
-      : budget.remainingImages <= 0
-        ? "inline image block allowance exceeded"
-        : budget.remainingTokens !== undefined && budget.remainingTokens < 1025
-          ? "inline image context allowance exceeded"
-          : undefined;
-    if (allowanceReason) {
-      omit(ref, allowanceReason);
+    if (unavailable.has(ref.artifact.artifactId)) {
+      omit(ref, "image projection already unavailable");
       continue;
     }
     // Availability and integrity failures are not optional view failures. Keep
     // authoritative reads outside the decode/model-compatibility fallback.
     const metadata = await workspace.reads.inspectArtifact(ref.artifact);
-    if (
-      metadata.byteLength > Math.min(COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes, budget.remainingBytes)
-    ) {
-      omit(ref, "inline image working-set budget exceeded");
-      continue;
-    }
-    const bytes = await workspace.reads.readArtifact(
-      ref.artifact,
-      COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes,
-    );
+    // Bound this immutable read to its recorded extent, not an application size cap.
+    const bytes = await workspace.reads.readArtifact(ref.artifact, metadata.byteLength);
     try {
       const image = { mimeType: ref.mimeType, data: Buffer.from(bytes).toString("base64") };
-      const tokens = imageProjectionTokens({ name: ref.name, ...image });
-      if (budget.remainingTokens !== undefined && tokens > budget.remainingTokens)
-        throw new Error("inline image context allowance exceeded");
       validateImages?.([image]);
       images.push(image);
-      budget.remainingBytes -= bytes.length;
-      budget.remainingImages -= 1;
-      if (budget.remainingTokens !== undefined) budget.remainingTokens -= tokens;
     } catch (error) {
       omit(ref, error instanceof Error ? error.message : "image unavailable");
     }
@@ -131,8 +102,11 @@ export async function projectComposerAttachmentImages(
   return {
     images,
     omittedArtifactIds,
+    userNotice: omittedArtifactIds.length
+      ? `${omittedArtifactIds.length} ${omittedArtifactIds.length === 1 ? "image couldn't" : "images couldn't"} be shown to the model. ${omittedArtifactIds.length === 1 ? "The file is" : "The files are"} still attached.`
+      : "",
     notice: omittedArtifactIds.length
-      ? `${omittedArtifactIds.length} image(s) not inlined. Original artifact references remain attached through their paths/manifest. Non-inlined original contents are not verified by this projection; use bounded file tools to inspect or prepare suitable views. ${reasons.join("; ")}`
+      ? `Some attached images are not visible to you. Their contents have not been checked. Use bounded file tools to inspect them. ${reasons.join("; ")}`
       : "",
   };
 }

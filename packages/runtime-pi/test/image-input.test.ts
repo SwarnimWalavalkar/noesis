@@ -242,7 +242,7 @@ describe("Pi image input", () => {
     expect(await running).toMatchObject({ outcome: "completed", text: "Text only" });
   });
 
-  test("redacts bytes from inspections while reserving dimension-aware image context", () => {
+  test("redacts bytes without imposing a provider-neutral image token allowance", () => {
     const message = { role: "user" as const, content: [{ type: "image" as const, ...image }], timestamp: 0 };
     const larger = {
       ...message,
@@ -270,8 +270,8 @@ describe("Pi image input", () => {
           { ...message, content: [{ type: "image", ...image, data: highResolution.toString("base64") }] },
         ],
       }),
-    ).toThrow();
-    expect(smallProjection.estimatedTokens).toBeGreaterThan(1024);
+    ).not.toThrow();
+    expect(smallProjection.estimatedTokens).toBeLessThan(1024);
     const components = requestContextComponents({
       systemPrompt: "",
       skillsPrompt: "",
@@ -313,4 +313,16 @@ test.each([1, 2])("repeated frozen image references support %i occurrence omissi
     () => {},
   );
   expect(result.outcome).toBe("completed");
+});
+
+test("model input does not inherit thumbnail byte or dimension bounds", () => {
+  const runtime = createPiAgentRuntime(process.cwd(), createControlledPiModels({ imageInput: true }).models);
+  // Header-only transport fixtures. Format/decode acceptance belongs to the provider.
+  const bytes = Buffer.alloc(11 * 1024 * 1024);
+  Buffer.from(image.data, "base64").copy(bytes);
+  bytes.writeUInt32BE(20_000, 16);
+  bytes.writeUInt32BE(20_000, 20);
+  expect(() =>
+    runtime.validateImages?.(request.provider, request.model, [{ ...image, data: bytes.toString("base64") }]),
+  ).not.toThrow();
 });

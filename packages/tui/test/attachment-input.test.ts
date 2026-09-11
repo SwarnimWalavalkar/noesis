@@ -6,7 +6,6 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PhotonImage } from "@silvia-odwyer/photon-node";
-import { COMPOSER_IMAGE_PROJECTION_LIMITS } from "@noesis/domain";
 import {
   attachmentImageDimensions,
   attachmentPath,
@@ -84,7 +83,7 @@ describe("explicit clipboard access", () => {
     expect(run).toHaveBeenCalledTimes(3);
   });
   it("reports empty or oversized clipboard output with /attach fallback", async () => {
-    for (const bytes of [Buffer.alloc(0), Buffer.alloc(COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes + 1)]) {
+    for (const bytes of [Buffer.alloc(0), Buffer.alloc(10 * 1024 * 1024 + 1)]) {
       await expect(
         readClipboardAttachment({ platform: "darwin", env: {}, run: async () => bytes }),
       ).rejects.toThrow("/attach");
@@ -201,9 +200,9 @@ describe("attachment files", () => {
     const path = join(dir, "file");
     await writeFile(path, "");
     await expect(readAttachmentPath(path)).resolves.toMatchObject({ sourceSize: 0 });
-    await truncate(path, COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes + 1);
+    await truncate(path, 10 * 1024 * 1024 + 1);
     await expect(readAttachmentPath(path)).resolves.toMatchObject({
-      sourceSize: COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes + 1,
+      sourceSize: 10 * 1024 * 1024 + 1,
     });
     await expect(readAttachmentPath(dir)).rejects.toThrow("regular file");
     await expect(readAttachmentPath(join(dir, "missing"))).rejects.toThrow();

@@ -1,4 +1,3 @@
-import { imageProjectionTokens } from "@noesis/domain";
 import { imageSafeJson } from "./image-input.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { calculateContextTokens } from "@earendil-works/pi-coding-agent";
@@ -221,26 +220,10 @@ function applyProjection(messages: readonly AgentMessage[], projected: ReadonlyS
 }
 
 function estimateMessageTokens(message: AgentMessage): number {
-  let imageTokens = 0;
-  if ("content" in message && Array.isArray(message.content)) {
-    for (const block of message.content) {
-      if (block && typeof block === "object" && "type" in block && block.type === "image") {
-        if (
-          !("data" in block) ||
-          typeof block.data !== "string" ||
-          !("mimeType" in block) ||
-          typeof block.mimeType !== "string"
-        )
-          throw new Error("Invalid image block at request budget boundary");
-        imageTokens += imageProjectionTokens({
-          name: "model-image",
-          mimeType: block.mimeType,
-          data: block.data,
-        });
-      }
-    }
-  }
-  return estimateInputTokens(imageSafeJson(message)) + imageTokens;
+  // Image token costs depend on the provider's resizing/detail rules. Do not
+  // reject images using a made-up universal estimate. Reported usage below
+  // includes their actual cost once the provider has processed the request.
+  return estimateInputTokens(imageSafeJson(message));
 }
 
 function heuristicMessageTokens(messages: readonly AgentMessage[]): number {

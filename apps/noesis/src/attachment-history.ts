@@ -1,6 +1,6 @@
 import type { AgentRuntimeRequest, FrozenTurnPlan } from "@noesis/agent-types";
 import { renderFrozenConversationHistoryContent } from "@noesis/agent-types";
-import { COMPOSER_IMAGE_PROJECTION_LIMITS, createConditionalObject } from "@noesis/domain";
+import { createConditionalObject } from "@noesis/domain";
 import { projectComposerAttachmentImages } from "@noesis/runtime";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
 
@@ -8,11 +8,8 @@ import type { NoesisWorkspaceStore } from "@noesis/workspace";
 export async function resolveAttachmentHistory(
   workspace: NoesisWorkspaceStore,
   plan: FrozenTurnPlan,
-  budget?: import("@noesis/runtime").ComposerImageProjectionBudget,
   validateImages?: (images: readonly { mimeType: string; data: string }[]) => void,
-  notice?: (text: string) => void,
 ): Promise<NonNullable<AgentRuntimeRequest["history"]>> {
-  budget ??= { remainingBytes: COMPOSER_IMAGE_PROJECTION_LIMITS.totalBytes };
   const history: NonNullable<AgentRuntimeRequest["history"]>[number][] = [];
   if (plan.contextCheckpoint)
     history.push({
@@ -22,8 +19,7 @@ export async function resolveAttachmentHistory(
     });
   for (const entry of plan.conversationHistory ?? []) {
     const attachments = entry.attachments ?? [];
-    const projection = await projectComposerAttachmentImages(workspace, attachments, budget, validateImages);
-    if (projection.notice) notice?.(projection.notice);
+    const projection = await projectComposerAttachmentImages(workspace, attachments, validateImages);
     history.push(
       createConditionalObject({
         role: entry.role,

@@ -1,19 +1,8 @@
-export {
-  imageProjectionTokens,
-  attachmentImageDimensions,
-  MAX_IMAGE_DIMENSION,
-  MAX_IMAGE_PIXELS,
-} from "./image-dimensions.ts";
+export { attachmentImageDimensions, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS } from "./image-dimensions.ts";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ArtifactFileRefSchema } from "./storage-schemas.ts";
 
-/** Working-set bounds for optional inline image projection, never storage admission. */
-export const COMPOSER_IMAGE_PROJECTION_LIMITS = Object.freeze({
-  perImageBytes: 10 * 1024 * 1024,
-  imageCount: 8,
-  totalBytes: 20 * 1024 * 1024,
-});
 export const COMPOSER_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
 const nameSchema = z
   .string()

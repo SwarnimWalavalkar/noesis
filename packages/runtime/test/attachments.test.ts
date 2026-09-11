@@ -3,11 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, test, vi } from "vitest";
-import {
-  COMPOSER_IMAGE_PROJECTION_LIMITS,
-  composerContentDigest,
-  validateComposerAttachmentInputs,
-} from "@noesis/domain";
+import { composerContentDigest, validateComposerAttachmentInputs } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import {
   createTurnInteractionController,
@@ -56,7 +52,7 @@ test("validates canonical base64 and safe names without count/byte admission cap
   expect(validateComposerAttachmentInputs(Array.from({ length: 9 }, () => input))).toHaveLength(9);
   const nearLimit = {
     ...input,
-    data: Buffer.alloc(COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes).toString("base64"),
+    data: Buffer.alloc(10 * 1024 * 1024).toString("base64"),
   };
   expect(validateComposerAttachmentInputs([nearLimit])).toHaveLength(1);
   expect(validateComposerAttachmentInputs([nearLimit, nearLimit, input])).toHaveLength(3);
@@ -160,10 +156,7 @@ test("image resolution never reads generic artifacts, but validates MIME referen
       { mimeType: png.mimeType, data: png.data },
     ]);
     expect(readArtifact).toHaveBeenCalledTimes(1);
-    expect(readArtifact).toHaveBeenCalledWith(
-      refs[1]?.artifact,
-      COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes,
-    );
+    expect(readArtifact).toHaveBeenCalledWith(refs[1]?.artifact, Buffer.byteLength(png.data, "base64"));
     const generic = refs[0];
     if (!generic) throw new Error("Missing generic fixture");
     await expect(
@@ -196,7 +189,7 @@ test("attachment digests cannot collide with literal serialization in text-only 
   }
 });
 
-test("tiny image lists retain all originals while bounding image blocks before artifact reads", async () => {
+test("projects every image without an application count limit", async () => {
   const { workspace } = await setup();
   try {
     const refs = await persistComposerAttachments(
@@ -208,9 +201,10 @@ test("tiny image lists retain all originals while bounding image blocks before a
     const instrumented = { ...workspace, reads: { ...workspace.reads, readArtifact } };
     const projection = await projectComposerAttachmentImages(instrumented, refs);
     expect(refs).toHaveLength(20);
-    expect(projection.images).toHaveLength(COMPOSER_IMAGE_PROJECTION_LIMITS.imageCount);
-    expect(projection.notice).toContain("Non-inlined original contents are not verified");
-    expect(readArtifact).toHaveBeenCalledTimes(COMPOSER_IMAGE_PROJECTION_LIMITS.imageCount);
+    expect(projection.images).toHaveLength(20);
+    expect(projection.notice).toBe("");
+    expect(projection.userNotice).toBe("");
+    expect(readArtifact).toHaveBeenCalledTimes(20);
   } finally {
     await workspace.close();
   }
@@ -233,3 +227,22 @@ test.each(["missing", "same-length corruption"])(
     }
   },
 );
+
+test("image projection has no per-file or shared byte cap", async () => {
+  const { workspace } = await setup();
+  try {
+    // Transport fixture, not a claim that providers accept padded PNGs.
+    const data = Buffer.concat([Buffer.from(png.data, "base64"), Buffer.alloc(11 * 1024 * 1024)]).toString(
+      "base64",
+    );
+    const refs = await persistComposerAttachments(workspace, "source", [
+      { ...png, data },
+      { ...png, name: "second.png", data },
+    ]);
+    const projection = await projectComposerAttachmentImages(workspace, refs);
+    expect(projection.images.map((image) => image.data)).toEqual([data, data]);
+    expect(projection.omittedArtifactIds).toEqual([]);
+  } finally {
+    await workspace.close();
+  }
+});

@@ -160,15 +160,14 @@ test("generic file queue restoration retains exact references and exposes readab
     await runtime.shutdown();
   }
 });
-test.each([false, true])(
-  "original images remain attached when model support/safe decode is unavailable (%s)",
+test.each([false])(
+  "original images remain attached when model support is unavailable (%s)",
   async (supportsImages) => {
     const { open, prompts } = await fixture(supportsImages);
     const runtime = await open();
     try {
       const trail = await runtime.startTrail({ title: "Original image retained" });
       const bytes = Buffer.from(image.data, "base64");
-      if (supportsImages) bytes.writeUInt32BE(100_000, 16);
       const events: string[] = [];
       const order: string[] = [];
       const result = await runtime.interact(
@@ -190,7 +189,7 @@ test.each([false, true])(
       );
       expect(result.effect).toBe("queued");
       await vi.waitFor(() => expect(runtime.getTrail(trail.trailId).turns).toHaveLength(1));
-      expect(events.join("\n")).toContain("not inlined");
+      expect(events).toEqual(["1 image couldn't be shown to the model. The file is still attached."]);
       expect(order).toEqual(["started", "notice"]);
       const user = (await runtime.debug.workspace.operational.messages.listForSession(trail.trailId)).find(
         (message) => message.role === "user",
@@ -205,7 +204,19 @@ test.each([false, true])(
         .filter((message) => message.role === "user")
         .flatMap((message) => (typeof message.content === "string" ? [] : message.content));
       expect(blocks.some((block) => block.type === "image")).toBe(false);
-      expect(JSON.stringify(blocks)).toContain("not inlined");
+      expect(JSON.stringify(blocks)).toContain("Some attached images are not visible to you");
+      events.length = 0;
+      await runtime.interact(
+        trail.trailId,
+        { type: "submit", text: "A follow-up without attachments" },
+        {
+          onEvent: (event) => {
+            if (event.type === "agent" && event.event.type === "notice") events.push(event.event.text);
+          },
+        },
+      );
+      await vi.waitFor(() => expect(runtime.getTrail(trail.trailId).turns).toHaveLength(2));
+      expect(events).toEqual([]);
     } finally {
       await runtime.shutdown();
     }
@@ -250,6 +261,21 @@ test("steering commits original text and image references only after Pi consumes
     expect(ComposerAttachmentsSchema.parse(message?.metadata["attachments"])).toHaveLength(1);
   } finally {
     release.resolve();
+    await runtime.shutdown();
+  }
+});
+
+test("current and replay images do not share an application count allowance", async () => {
+  const { prompts, open } = await fixture(true);
+  const runtime = await open();
+  try {
+    const trail = await runtime.startTrail({ title: "Many images" });
+    const images = Array.from({ length: 12 }, (_, index) => ({ ...image, name: `${index}.png` }));
+    await send(runtime, trail.trailId, "Inspect these", images);
+    expect(imagesIn(prompts.at(-1))).toEqual(images.map((item) => item.data));
+    await send(runtime, trail.trailId, "And this one", [image]);
+    expect(imagesIn(prompts.at(-1))).toHaveLength(13);
+  } finally {
     await runtime.shutdown();
   }
 });

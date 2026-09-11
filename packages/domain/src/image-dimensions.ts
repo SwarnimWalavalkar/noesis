@@ -74,11 +74,3 @@ export function validateImageDimensions(bytes: Buffer, mimeType: string): Dimens
 export function attachmentImageDimensions(input: ComposerAttachmentInput): Dimensions {
   return validateImageDimensions(Buffer.from(input.data, "base64"), input.mimeType);
 }
-
-/** Conservative provider-neutral projection allowance, not a claim of provider billing. */
-export function imageProjectionTokens(input: ComposerAttachmentInput): number {
-  if (Buffer.byteLength(input.data, "base64") > 10 * 1024 * 1024)
-    throw new Error("Inline image exceeds the bounded projection working set.");
-  const { width, height } = attachmentImageDimensions(input);
-  return 1024 + Math.ceil((width * height) / 64);
-}

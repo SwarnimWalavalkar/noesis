@@ -4,12 +4,14 @@ import { createRequire } from "node:module";
 import { Worker, type WorkerOptions } from "node:worker_threads";
 import { type } from "arktype";
 import {
-  COMPOSER_IMAGE_PROJECTION_LIMITS,
   validateComposerAttachmentInputs,
   type ComposerAttachmentInput,
   type ComposerFileInput,
 } from "@noesis/domain";
 import { attachmentImageDimensions } from "./attachment-input.ts";
+
+// Local preview decoder safety only. Does not limit model input or storage.
+const MAX_THUMBNAIL_SOURCE_BYTES = 10 * 1024 * 1024;
 
 export type AttachmentThumbnail = Readonly<{
   data: string;
@@ -157,7 +159,7 @@ async function readPreviewInput(
   input: ComposerFileInput,
   signal?: AbortSignal,
 ): Promise<ComposerAttachmentInput> {
-  if (input.sourceSize > COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes)
+  if (input.sourceSize > MAX_THUMBNAIL_SOURCE_BYTES)
     throw new Error("Original retained; preview working-set budget exceeded.");
   signal?.throwIfAborted();
   const file = await open(input.sourcePath, constants.O_RDONLY | constants.O_NONBLOCK);
