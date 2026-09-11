@@ -144,12 +144,25 @@ test("streamed import cancellation terminates before a large file is read and re
       [await selected(path)],
       controller.signal,
     );
-    const timer = setTimeout(() => controller.abort(), 2);
+    let observedPartial = false;
+    const timer = setInterval(() => {
+      void (async () => {
+        for (const entry of await readdir(workspace.paths.artifacts, { recursive: true })) {
+          if (!entry.endsWith(".tmp")) continue;
+          const info = await stat(join(workspace.paths.artifacts, entry)).catch(() => undefined);
+          if (info && info.size > 0) {
+            observedPartial = true;
+            controller.abort();
+          }
+        }
+      })();
+    }, 1);
     try {
       await expect(pending).rejects.toThrow();
     } finally {
-      clearTimeout(timer);
+      clearInterval(timer);
     }
+    expect(observedPartial).toBe(true);
     const paths = await readdir(workspace.paths.artifacts, { recursive: true });
     expect(paths.some((path) => path.endsWith(".tmp") || path.endsWith("large.bin"))).toBe(false);
   } finally {

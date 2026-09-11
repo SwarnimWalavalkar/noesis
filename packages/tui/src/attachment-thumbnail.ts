@@ -163,7 +163,14 @@ async function readPreviewInput(
   const file = await open(input.sourcePath, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const before = await file.stat();
-    if (!before.isFile() || before.size !== input.sourceSize || before.mtimeMs !== input.sourceMtimeMs)
+    if (
+      !before.isFile() ||
+      before.size !== input.sourceSize ||
+      before.mtimeMs !== input.sourceMtimeMs ||
+      before.ctimeMs !== input.sourceCtimeMs ||
+      before.ino !== input.sourceIno ||
+      before.dev !== input.sourceDev
+    )
       throw new Error("Preview source changed.");
     const bytes = Buffer.alloc(before.size + 1);
     let length = 0;

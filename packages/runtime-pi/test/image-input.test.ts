@@ -282,3 +282,35 @@ describe("Pi image input", () => {
     expect(JSON.stringify(components)).toContain("image tokens not estimated");
   });
 });
+
+test.each([1, 2])("repeated frozen image references support %i occurrence omissions", async (count) => {
+  const controlled = createControlledPiModels({ imageInput: true });
+  const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+  const { canonicalDigest: _digest, ...base } = plan();
+  const unsigned = {
+    ...base,
+    conversationHistory: (base.conversationHistory ?? []).map((entry) => ({
+      ...entry,
+      attachments: [attachment, attachment],
+    })),
+  };
+  const frozen = { ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) };
+  const result = await runtime.run(
+    {
+      ...request,
+      frozenTurnPlan: frozen,
+      history: [
+        {
+          role: "user",
+          content: "Previous image\nAttached file: /workspace/.noesis/artifacts/pixel.png",
+          createdAt: frozen.createdAt,
+          attachments: [attachment, attachment],
+          images: count === 1 ? [image] : [],
+          omittedImageArtifactIds: Array.from({ length: count }, () => attachment.artifact.artifactId),
+        },
+      ],
+    },
+    () => {},
+  );
+  expect(result.outcome).toBe("completed");
+});

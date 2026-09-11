@@ -141,6 +141,7 @@ test("generic file queue restoration retains exact references and exposes readab
       { type: "resume-queue" },
       {
         onEvent: (event) => {
+          if (event.type === "interaction-failed") settled.reject(new Error(event.error));
           if (event.type === "turn-settled") {
             if (event.outcome === "failed") settled.reject(new Error(event.error));
             else settled.resolve();

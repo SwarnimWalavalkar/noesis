@@ -708,7 +708,7 @@ export function createTurnInteractionController(
     if (command.type === "steer" && command.text === undefined && command.attachments?.length)
       command = { ...command, text: "" };
     const state = stateFor(sessionId);
-    if (command.type === "interrupt") state.preparation?.abort();
+    if (command.type === "interrupt" || command.type === "pause-queue") state.preparation?.abort();
     if (dispatchOptions.onEvent) {
       if (observedSessionId && observedSessionId !== sessionId) delete stateFor(observedSessionId).observer;
       observedSessionId = sessionId;

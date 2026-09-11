@@ -81,7 +81,7 @@ function estimateContextMessageTokens(message: SessionContextMessage): number {
   return estimateContextTokens(renderContextMessageContent(message));
 }
 function renderContextMessageContent(message: SessionContextMessage): string {
-  return [renderFrozenConversationHistoryContent(message), message.attachmentText].filter(Boolean).join("\n");
+  return renderFrozenConversationHistoryContent(message);
 }
 export function resolveContextTokenBudget(configured: number, limits: ModelContextLimits): number {
   if (!Number.isSafeInteger(configured) || configured <= 0)

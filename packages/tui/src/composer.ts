@@ -20,7 +20,7 @@ export interface ComposerOptions {
   readonly editor: SafeEditor;
   readonly requestRender: () => void;
   readonly notice: (text: string) => void;
-  readonly readPath: (path: string) => Promise<ComposerDraftAttachment>;
+  readonly readPath: (path: string, signal?: AbortSignal) => Promise<ComposerDraftAttachment>;
   readonly readClipboard: (
     signal?: AbortSignal,
   ) => Promise<ComposerDraftAttachment | readonly ComposerDraftAttachment[] | undefined>;
@@ -147,7 +147,7 @@ export function createComposer(options: ComposerOptions) {
         const path = command.slice(7).trim();
         if (!path)
           notice("Use /attach <path> (one file, quotes optional), or Ctrl+V for copied files or an image.");
-        else add(path, () => options.readPath(path));
+        else add(path, (signal) => options.readPath(path, signal));
         return true;
       }
       if (command === "/attachments" || command.startsWith("/attachments ")) {

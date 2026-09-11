@@ -207,7 +207,6 @@ export async function readClipboardAttachment(
         `Could not inspect clipboard files: ${error instanceof Error ? error.message : "unknown error"} ${fallback}`,
       );
     }
-    let selectedFileRepresentation = requireFiles;
     try {
       let paths: readonly string[];
       if (command.command === "osascript" || command.command === "powershell.exe")
@@ -219,7 +218,6 @@ export async function readClipboardAttachment(
         );
         if (type) {
           requireFiles = true;
-          selectedFileRepresentation = true;
           let references: Buffer;
           try {
             references = await run({
@@ -240,12 +238,11 @@ export async function readClipboardAttachment(
         } else paths = [];
       }
       if (paths.length) {
-        selectedFileRepresentation = true;
         const inputs: ComposerFileInput[] = [];
         for (const path of paths) {
           try {
             options.signal?.throwIfAborted();
-            inputs.push(await readAttachmentFile(path));
+            inputs.push(await readAttachmentFile(path, options.signal));
           } catch (error) {
             options.signal?.throwIfAborted();
             throw new Error(
@@ -256,20 +253,28 @@ export async function readClipboardAttachment(
         return inputs;
       }
       if (requireFiles) throw new Error("Clipboard file references could not be read from any backend.");
-      const capturedPath = await captureClipboardToFile(
-        command,
-        options.signal,
-        options.run ? await run(command) : undefined,
-      );
-      const input = await readAttachmentFile(capturedPath);
-      if (input.mimeType !== "image/png") {
-        await disposeAttachmentInput(input);
-        throw new Error("Clipboard did not contain PNG image data.");
+      let capturedPath: string;
+      try {
+        capturedPath = await captureClipboardToFile(
+          command,
+          options.signal,
+          options.run ? await run(command) : undefined,
+        );
+      } catch (error) {
+        options.signal?.throwIfAborted();
+        if (command !== commands.at(-1)) continue;
+        throw error;
       }
-      return [input];
+      try {
+        const input = await readAttachmentFile(capturedPath, options.signal);
+        if (input.mimeType !== "image/png") throw new Error("Clipboard did not contain PNG image data.");
+        return [input];
+      } catch (error) {
+        await disposeAttachmentInput({ sourcePath: capturedPath });
+        throw error;
+      }
     } catch (error) {
       options.signal?.throwIfAborted();
-      if (!selectedFileRepresentation && command !== commands.at(-1)) continue;
       throw new Error(
         `Could not read clipboard attachment: ${error instanceof Error ? error.message : "unknown error"} ${fallback}`,
       );
@@ -290,11 +295,12 @@ export function attachmentPath(value: string): string {
   return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
-export async function readAttachmentPath(value: string): Promise<ComposerFileInput> {
-  return readAttachmentFile(attachmentPath(value));
+export async function readAttachmentPath(value: string, signal?: AbortSignal): Promise<ComposerFileInput> {
+  return readAttachmentFile(attachmentPath(value), signal);
 }
 
-async function readAttachmentFile(path: string): Promise<ComposerFileInput> {
+async function readAttachmentFile(path: string, signal?: AbortSignal): Promise<ComposerFileInput> {
+  signal?.throwIfAborted();
   // O_NONBLOCK prevents FIFO open hangs; fstat checks the opened object, not a racy pathname.
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
@@ -302,11 +308,18 @@ async function readAttachmentFile(path: string): Promise<ComposerFileInput> {
     if (!stat.isFile()) throw new Error("Attachment must be a regular file.");
     // Only sniff a small header; source bytes stay on disk until streamed admission.
     const header = Buffer.alloc(Math.min(stat.size, 64 * 1024));
-    const read = await file.read(header, 0, header.length, 0);
+    let length = 0;
+    while (length < header.length) {
+      signal?.throwIfAborted();
+      const read = await file.read(header, length, header.length - length, length);
+      if (!read.bytesRead) break;
+      length += read.bytesRead;
+    }
+    signal?.throwIfAborted();
     const name = basename(path);
     return {
       name,
-      mimeType: attachmentMimeType(name, header.subarray(0, read.bytesRead)),
+      mimeType: attachmentMimeType(name, header.subarray(0, length)),
       sourcePath: path,
       sourceSize: stat.size,
       sourceMtimeMs: stat.mtimeMs,

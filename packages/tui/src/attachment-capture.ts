@@ -10,7 +10,9 @@ import type { ClipboardCommand } from "./attachment-input.ts";
 
 const owned = new Map<string, string>();
 let capturing = false;
-export async function disposeAttachmentInput(input: ComposerDraftAttachment): Promise<void> {
+export async function disposeAttachmentInput(
+  input: ComposerDraftAttachment | { readonly sourcePath: string },
+): Promise<void> {
   if (!("sourcePath" in input)) return;
   const directory = owned.get(input.sourcePath);
   if (!directory) return;

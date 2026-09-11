@@ -81,10 +81,12 @@ export async function projectComposerAttachmentImages(
   const images: { mimeType: string; data: string }[] = [];
   const omittedArtifactIds: string[] = [];
   const reasons: string[] = [];
+  const unavailable = new Set<string>();
   for (const ref of ComposerAttachmentsSchema.parse(refs)) {
     if (ref.mimeType !== ref.artifact.mediaType) throw new Error("Attachment MIME differs from artifact");
     if (!ref.mimeType.startsWith("image/")) continue;
     try {
+      if (unavailable.has(ref.artifact.artifactId)) throw new Error("image projection already unavailable");
       if (budget.remainingImages <= 0) throw new Error("inline image block allowance exceeded");
       if (budget.remainingTokens !== undefined && budget.remainingTokens < 1025)
         throw new Error("inline image context allowance exceeded");
@@ -107,6 +109,7 @@ export async function projectComposerAttachmentImages(
       budget.remainingImages -= 1;
       if (budget.remainingTokens !== undefined) budget.remainingTokens -= tokens;
     } catch (error) {
+      unavailable.add(ref.artifact.artifactId);
       omittedArtifactIds.push(ref.artifact.artifactId);
       if (reasons.length < 4)
         reasons.push(

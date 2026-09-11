@@ -13,7 +13,7 @@ import {
   clipboardCommands,
   clipboardFileCommand,
   readAttachmentPath,
-  readClipboardAttachment,
+  readClipboardAttachment as readClipboardAttachmentUntracked,
   runClipboardCommand,
 } from "../src/attachment-input.ts";
 import { createAttachmentThumbnail } from "../src/attachment-thumbnail.ts";
@@ -30,8 +30,15 @@ function image(width = 2, height = 1, jpeg = false) {
     decoded.free();
   }
 }
+const ownedInputs: Awaited<ReturnType<typeof readClipboardAttachmentUntracked>>[number][] = [];
+async function readClipboardAttachment(...args: Parameters<typeof readClipboardAttachmentUntracked>) {
+  const inputs = await readClipboardAttachmentUntracked(...args);
+  ownedInputs.push(...inputs);
+  return inputs;
+}
 const dirs: string[] = [];
 afterEach(async () => {
+  await Promise.all(ownedInputs.splice(0).map(disposeAttachmentInput));
   await Promise.all(dirs.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 async function directory() {
@@ -435,3 +442,18 @@ it("aborts an in-flight file-reference probe without waiting for its helper dead
   }
   expect(run).toHaveBeenCalledOnce();
 }, 1000);
+
+it("rejects preview replacement with matching size and mtime", async () => {
+  const path = join(await directory(), "selected.png");
+  await writeFile(path, Buffer.from(image().data, "base64"));
+  const input = await readAttachmentPath(path);
+  await expect(createAttachmentThumbnail({ ...input, sourceIno: input.sourceIno + 1 })).rejects.toThrow(
+    "source changed",
+  );
+});
+
+it("does not prepare an already cancelled /attach", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await expect(readAttachmentPath("/does-not-exist", controller.signal)).rejects.toThrow("abort");
+});

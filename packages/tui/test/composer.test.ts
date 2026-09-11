@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { captureClipboardToFile } from "../src/attachment-capture.ts";
+import { captureClipboardToFile, disposeAttachmentInput } from "../src/attachment-capture.ts";
 import { readAttachmentPath } from "../src/attachment-input.ts";
 import { TuiMainScreen } from "@earendil-works/pi-tui";
 import type { ComposerAttachmentInput } from "@noesis/domain";
@@ -83,7 +83,7 @@ describe("attachment composer", () => {
     expect(f.ordinary).toHaveBeenCalledWith("/tmp/notes.txt");
     f.enter("/attach /tmp/notes.txt");
     await settle();
-    expect(read).toHaveBeenCalledWith("/tmp/notes.txt");
+    expect(read).toHaveBeenCalledWith("/tmp/notes.txt", expect.any(AbortSignal));
     expect(f.composer.render(80).join("\n")).toContain("1 notes.txt");
     f.enter("");
     await settle();
@@ -250,24 +250,29 @@ test("disposing composer preserves submitted clipboard sources until admission s
     undefined,
     Buffer.from("owned"),
   );
-  const attachment = await readAttachmentPath(path);
   const admission = Promise.withResolvers<void>();
-  const f = fixture(undefined, async () => admission.promise);
-  f.composer.restore([attachment]);
-  f.enter("send original");
-  f.composer.dispose();
-  expect(await readFile(path, "utf8")).toBe("owned");
-  admission.resolve();
-  await expect
-    .poll(async () => {
-      try {
-        await readFile(path);
-        return false;
-      } catch {
-        return true;
-      }
-    })
-    .toBe(true);
+  try {
+    const attachment = await readAttachmentPath(path);
+    const f = fixture(undefined, async () => admission.promise);
+    f.composer.restore([attachment]);
+    f.enter("send original");
+    f.composer.dispose();
+    expect(await readFile(path, "utf8")).toBe("owned");
+    admission.resolve();
+    await expect
+      .poll(async () => {
+        try {
+          await readFile(path);
+          return false;
+        } catch {
+          return true;
+        }
+      })
+      .toBe(true);
+  } finally {
+    admission.resolve();
+    await disposeAttachmentInput({ sourcePath: path });
+  }
 });
 
 test("clipboard and path attachment requests explain pending admission instead of disappearing", () => {

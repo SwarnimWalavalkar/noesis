@@ -8,6 +8,7 @@ import {
   type FrozenRevisionMaterial,
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
+  renderFrozenConversationHistoryContent,
   MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
   MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES,
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
@@ -433,6 +434,13 @@ async function freezeConversationHistory(
       if (!turn || turn.sessionId !== sessionId || turn.status !== message.turnStatus)
         throw new Error(`Turn history message ${message.messageId} has a stale terminal turn status`);
     }
+    const attachmentText = renderComposerAttachmentText("", attachments, workspace.paths.root);
+    const renderedLength = renderFrozenConversationHistoryContent({ ...message, attachmentText }).length;
+    totalCharacters += renderedLength - message.content.length;
+    if (renderedLength > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS)
+      throw new Error(`Turn history message ${message.messageId} exceeds the per-entry character bound`);
+    if (totalCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS)
+      throw new Error("Turn history exceeds the total character bound");
     const imageDigests = [];
     for (const attachment of attachments)
       if (attachment.mimeType.startsWith("image/")) {
@@ -462,7 +470,7 @@ async function freezeConversationHistory(
             attachments.length > 0
               ? {
                   attachments,
-                  attachmentText: renderComposerAttachmentText("", attachments, workspace.paths.root),
+                  attachmentText,
                   imageDigests,
                 }
               : undefined,

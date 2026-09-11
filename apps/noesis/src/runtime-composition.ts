@@ -5902,6 +5902,18 @@ export async function createApplicationRuntimeComposition(
                     validateImages,
                     publishNotice,
                   );
+                  const projectedImageTokens =
+                    Math.max(0, contextTokenBudget - estimatedCompleteRequestTokens - 1024) -
+                    budget.remainingTokens;
+                  if (
+                    estimatedCompleteRequestTokens +
+                      projectedImageTokens +
+                      estimateContextTokens(projection.notice) >
+                    contextTokenBudget
+                  )
+                    throw new Error(
+                      "The complete turn request exceeds the selected context token budget after image projection.",
+                    );
                   agentOutcome = {
                     status: "completed",
                     result: await agent.run(

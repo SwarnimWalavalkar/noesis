@@ -255,12 +255,22 @@ function historyForRequest(
     const imageRefs = (entry.attachments ?? []).filter((attachment) =>
       attachment.mimeType.startsWith("image/"),
     );
-    if (
-      new Set(omitted).size !== omitted.length ||
-      omitted.some((id) => !imageRefs.some((ref) => ref.artifact.artifactId === id))
-    )
+    const omissionCounts = new Map<string, number>();
+    for (const id of omitted) omissionCounts.set(id, (omissionCounts.get(id) ?? 0) + 1);
+    // References may repeat. Each omission accounts for one occurrence, not every
+    // occurrence of an artifact that may also have an admitted image block.
+    const expected = [...imageRefs]
+      .reverse()
+      .filter((attachment) => {
+        const id = attachment.artifact.artifactId;
+        const count = omissionCounts.get(id) ?? 0;
+        if (!count) return true;
+        omissionCounts.set(id, count - 1);
+        return false;
+      })
+      .reverse();
+    if ([...omissionCounts.values()].some((count) => count !== 0))
       throw new Error(`Runtime history omissions do not match frozen turn plan ${plan.planId}`);
-    const expected = imageRefs.filter((attachment) => !omitted.includes(attachment.artifact.artifactId));
     const plannedEntry = plan.conversationHistory?.[index - (plan.contextCheckpoint ? 1 : 0)];
     if (
       images.length !== expected.length ||
