@@ -31,6 +31,7 @@ If a problem is unclear, Noesis thinks with you. If the outcome is clear, it doe
 
 - Work with local files and the shell, with streaming responses and visible tool activity.
 - Continue, resume, or fork sessions. Search earlier conversations with citations.
+- Keep long sessions going with automatic compaction into continuity notes. Inspect them with `/context`.
 - Combine tools in JavaScript with `execute`, delegate to subagents, and save reusable scripts and workflows.
 - Connect local and remote MCP servers, including OAuth, from `/mcp`.
 - Inspect what Noesis learned with `/learning`, pause a Capability, or restore an earlier version.
@@ -56,6 +57,14 @@ return await agents.wait({ taskId: child.taskId });
 Useful procedures can become saved project Programs: scripts to run again, or workflows that can resume from recorded progress. Their exact revisions can also become part of a learned Capability.
 
 See [codemode, context, and subagents](docs/codemode.md) for the APIs and inspection controls.
+
+## Continue long sessions with a bounded notebook
+
+As a conversation grows, Noesis keeps recent messages in full and extracts continuity notes from older turns. Each compaction reads only conversation that has not already been compacted. Earlier notes stay unchanged, so there are no repeated summary rewrites.
+
+Future model requests receive a bounded notebook of those notes alongside recent messages. This reduces how much history you send on each turn and avoids repeatedly processing earlier notes during compaction. When a detail is missing, Noesis can search the original messages and tool traces with citations.
+
+Automatic compaction is on by default. Use `/compact [FOCUS]` to compact manually and `/context` to inspect the notebook and context usage. See [long sessions and compaction](docs/session-compaction.md) for how it works, when it helps, and the tradeoffs behind potential cost savings.
 
 ## How learning works
 
@@ -105,6 +114,7 @@ Report bugs and beta feedback through [GitHub Issues](https://github.com/Swarnim
 Noesis keeps local state in `~/.noesis/` by default. Its default context budget is 160,000 tokens. Automatic compaction preserves the original transcript for resume and session search.
 
 - [Configuration and everyday use](docs/configuration.md) covers models, provider keys, context budgets, sessions, MCP servers, upgrades, and uninstalling.
+- [Long sessions and compaction](docs/session-compaction.md) explains continuity notes, retrieval, and the cost tradeoffs.
 - [Codemode, context, and subagents](docs/codemode.md) describes tool composition, the context API, agent lifecycle, and inspection.
 
 ## Develop Noesis

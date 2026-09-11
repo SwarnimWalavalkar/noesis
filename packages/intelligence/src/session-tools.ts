@@ -186,13 +186,22 @@ export const SESSION_RETRIEVAL_STRATEGIES = Object.freeze({
   }),
 } as const satisfies Readonly<Record<string, RetrievalStrategyVariant>>);
 const requestedStrategySchema = z.union([RetrievalStrategyIdSchema, z.literal("automatic")]);
-export const SearchSessionsInputSchema = z.strictObject({
-  query: querySchema,
-  sessionId: identifierSchema.optional(),
-  maxResults: z.number().int().min(1).max(20).optional(),
-  strategy: requestedStrategySchema.optional(),
-  includePrivate: z.boolean().optional(),
-});
+export const SearchSessionsInputSchema = z
+  .strictObject({
+    query: querySchema,
+    sessionId: identifierSchema.optional(),
+    scope: z.enum(["current", "previous", "all"]).optional(),
+    maxResults: z.number().int().min(1).max(20).optional(),
+    strategy: requestedStrategySchema.optional(),
+    includePrivate: z.boolean().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.sessionId !== undefined && value.scope !== undefined)
+      context.addIssue({
+        code: "custom",
+        message: "Choose either an exact sessionId or a session scope, not both",
+      });
+  });
 export const OpenSessionEvidenceInputSchema = z.strictObject({
   citation: SessionEvidenceCitationSchema,
   beforeChars: z.number().int().min(0).max(2048).optional(),
@@ -899,6 +908,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
   const runSearch = async (request: {
     readonly query: string;
     readonly sessionId?: string;
+    readonly scope?: "current" | "previous" | "all";
     readonly maxResults: number;
     readonly requestedStrategy?: z.infer<typeof requestedStrategySchema>;
     readonly includePrivate: boolean;
@@ -940,12 +950,19 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     try {
       ensureNotCancelled(request.signal);
       const refreshedDocuments = await ensureFresh(request.signal);
-      const privateResult = authorizePrivateSearch(request.includePrivate, request.sessionId);
+      const exactSessionId =
+        request.sessionId ??
+        (request.scope === "current" ? options.authorization.currentSessionId : undefined);
+      const privateResult = authorizePrivateSearch(request.includePrivate, exactSessionId);
       if (!privateResult.ok) return privateResult;
-      const sessionScope: SearchSessionScope =
-        request.sessionId === undefined
-          ? { kind: "previous", currentSessionId: options.authorization.currentSessionId }
-          : { kind: "exact", sessionId: request.sessionId };
+      const sessionScope: SearchSessionScope | undefined =
+        request.sessionId !== undefined
+          ? { kind: "exact", sessionId: request.sessionId }
+          : request.scope === "current"
+            ? { kind: "exact", sessionId: options.authorization.currentSessionId }
+            : request.scope === "all"
+              ? undefined
+              : { kind: "previous", currentSessionId: options.authorization.currentSessionId };
       let candidateCount = 0;
       let ranked: readonly (RankedCitation | undefined)[];
       if (routed.strategy.mode === "fts_only") {
@@ -956,8 +973,8 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
           createConditionalObject({
             query: request.query,
             limit: Math.min(limits.maxCandidates, configuration.lexicalLimit),
-            sessionScope,
           } as const)
+            .addOptional(!(sessionScope === undefined) ? { sessionScope } : undefined)
             .addOptional(
               !(request.sourceScope === undefined) ? { sourceScope: request.sourceScope } : undefined,
             )
@@ -976,8 +993,8 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         const result = await options.history.search(
           createConditionalObject({
             query: request.query,
-            sessionScope,
           } as const)
+            .addOptional(!(sessionScope === undefined) ? { sessionScope } : undefined)
             .addOptional(
               !(request.sourceScope === undefined) ? { sourceScope: request.sourceScope } : undefined,
             )
@@ -1009,10 +1026,14 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         const metadata = await resolveSourceMetadata(item.citation.source, request.signal);
         const matchesSessionScope =
           metadata !== undefined &&
-          (request.sessionId === undefined
-            ? metadata.sessionIds.length > 0 &&
-              !metadata.sessionIds.includes(options.authorization.currentSessionId)
-            : metadata.sessionIds.includes(request.sessionId));
+          (request.sessionId !== undefined
+            ? metadata.sessionIds.includes(request.sessionId)
+            : request.scope === "current"
+              ? metadata.sessionIds.includes(options.authorization.currentSessionId)
+              : request.scope === "all"
+                ? metadata.sessionIds.length > 0
+                : metadata.sessionIds.length > 0 &&
+                  !metadata.sessionIds.includes(options.authorization.currentSessionId));
         if (metadata && matchesSessionScope && (await request.accept(metadata))) accepted.push(item);
         if (accepted.length >= request.maxResults) break;
       }
@@ -1075,6 +1096,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         .addOptional(
           !(parsed.data.sessionId === undefined) ? { sessionId: parsed.data.sessionId } : undefined,
         )
+        .addOptional(!(parsed.data.scope === undefined) ? { scope: parsed.data.scope } : undefined)
         .add({
           maxResults: Math.min(parsed.data.maxResults ?? limits.maxResults, limits.maxResults),
         } as const)
@@ -1399,7 +1421,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       name: "search_sessions",
       label: "Search sessions",
       description:
-        "Run hybrid lexical and semantic retrieval with reranking over this installation's previous sessions and return bounded evidence with exact citations. One precise query normally suffices; an empty or irrelevant result means only that this bounded search found no relevant evidence. Normal cross-session search needs no private flag; private retrieval requires one exact authorized sessionId.",
+        "Run hybrid lexical and semantic retrieval with reranking over the current compacted session, previous sessions, all sessions, or one exact sessionId, and return bounded evidence with exact citations. The default scope is previous sessions; use scope=current when older context from this session may have been compacted. One precise query normally suffices; an empty or irrelevant result means only that this bounded search found no relevant evidence. Normal cross-session search needs no private flag; private retrieval accepts either one exact authorized sessionId or scope=current for the current authorized session.",
       inputSchema: SearchSessionsInputSchema,
       execute: searchSessions,
     }),

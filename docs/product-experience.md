@@ -35,6 +35,8 @@ The approach can change during a session. A build can expose something the user 
 
 ### Session continuity
 
+You can continue a long conversation without carrying its full transcript into every model request. Noesis records notes from older work once, keeps recent messages in full, and retrieves original evidence when needed. This avoids repeatedly rewriting earlier notes and limits how much history each future request includes. The [compaction guide](session-compaction.md) explains the user controls and cost tradeoffs.
+
 `/context` opens a compact inspector with one input-budget bar, estimated usage, and a token count for each section. Empty sections start collapsed. Enter opens a section's content preview. The `?` view shows the model window, input budget, output reserve, and accounting details.
 
 The header also shows the last request's cache hit rate, calculated as cache-read tokens divided by total input tokens. Cache writes count toward input but not hits. Output tokens do not enter the calculation. This uses Pi's normalized usage accounting, independently of the component estimates. With valid nonzero input usage, zero cache reads displays `0%`. Missing or invalid input usage displays `—`. Pi normalizes omitted cache counters to zero, so this metric describes cache reads reported through Pi. A new request clears the previous cache report until its response arrives.
@@ -43,7 +45,9 @@ After a request, the inspector shows the last request captured after tool-result
 
 `/capabilities` opens the existing `/learning` explorer filtered to active Capabilities. The all-activity filter still provides access to paused Capabilities and historical records.
 
-Long sessions may compact older settled turns into a continuation checkpoint while keeping recent transcript messages raw. Compaction never deletes or rewrites the visible transcript. Resume and search still use the complete original conversation. Only future model context becomes smaller.
+Long sessions may compact older settled turns into independent, immutable continuity notes while keeping recent transcript messages raw. A bounded session notebook keeps the most recent note windows resident; omitted windows remain searchable from the current session through their original messages and tool traces. Repeated compaction never summarizes prior notes again. Compaction never deletes or rewrites the visible transcript. Resume and search still use the complete original conversation. Only future model context becomes smaller.
+
+Automatic compaction is enabled by default. `context.autoCompact: false` disables the automatic trigger, not manual `/compact` or existing notebooks. Over-budget turns then stop with guidance. Startup and resumed-session context previews show the same assembled notebook used for turn admission.
 
 The visible user and assistant messages from a failed or aborted turn remain in later context and are labelled as unfinished. They are not queued again or retried automatically. A later request such as "keep going" can therefore refer to the same current-session history the user sees.
 

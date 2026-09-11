@@ -1923,6 +1923,7 @@ function createOperationalRepositories(
       } as const)
         .addOptional(!(previousCheckpointId === undefined) ? { previousCheckpointId } : undefined)
         .add({
+          summaryKind: z.enum(["legacy_snapshot", "note_delta"]).parse(requiredString(row, "summary_kind")),
           summary: requiredString(row, "summary"),
           summaryDigest: requiredString(row, "summary_digest"),
           sourceDigest: requiredString(row, "source_digest"),
@@ -1983,11 +1984,29 @@ function createOperationalRepositories(
       .get(sessionId);
     return row === undefined ? undefined : decodeContextCheckpoint(row);
   };
+  const getContextCheckpointLineage = async (
+    checkpointId: string,
+  ): Promise<readonly ContextCheckpointRecord[]> => {
+    const lineage: ContextCheckpointRecord[] = [];
+    const seen = new Set<string>();
+    let currentId: string | undefined = checkpointId;
+    while (currentId !== undefined) {
+      if (seen.has(currentId)) throw new Error(`Context checkpoint lineage contains a cycle at ${currentId}`);
+      if (lineage.length >= 4096) throw new Error("Context checkpoint lineage exceeds its safety bound");
+      seen.add(currentId);
+      const checkpoint = await getContextCheckpoint(currentId);
+      if (!checkpoint) throw new Error(`Context checkpoint lineage is missing ${currentId}`);
+      lineage.push(checkpoint);
+      currentId = checkpoint.previousCheckpointId;
+    }
+    return Object.freeze(lineage.reverse());
+  };
   const activateContextCheckpoint: NoesisWorkspaceStore["operational"]["contextCheckpoints"]["activate"] =
     async ({ checkpoint, expectedActiveCheckpointId, expectedContextMessageIds }) =>
       database.transaction(() => {
         z.string().min(1).parse(checkpoint.checkpointId);
         z.string().min(1).parse(checkpoint.sessionId);
+        z.enum(["legacy_snapshot", "note_delta"]).parse(checkpoint.summaryKind);
         z.string().min(1).max(32000).parse(checkpoint.summary);
         z.string()
           .regex(/^[a-f0-9]{64}$/u)
@@ -2078,14 +2097,15 @@ function createOperationalRepositories(
               );
           }
           db.prepare(`INSERT INTO context_checkpoints(
-              checkpoint_id, session_id, previous_checkpoint_id, summary, summary_digest,
+              checkpoint_id, session_id, previous_checkpoint_id, summary_kind, summary, summary_digest,
               source_digest, first_retained_message_id, last_covered_message_id, token_budget,
               estimated_summary_tokens, sensitivity, provider, model, thinking_level, usage_json,
               created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
             checkpoint.checkpointId,
             checkpoint.sessionId,
             checkpoint.previousCheckpointId ?? null,
+            checkpoint.summaryKind,
             checkpoint.summary,
             checkpoint.summaryDigest,
             checkpoint.sourceDigest,
@@ -4193,6 +4213,7 @@ function createOperationalRepositories(
     contextCheckpoints: Object.freeze({
       get: getContextCheckpoint,
       getActive: getActiveContextCheckpoint,
+      lineage: getContextCheckpointLineage,
       activate: activateContextCheckpoint,
     }),
     foregroundTurns: Object.freeze({

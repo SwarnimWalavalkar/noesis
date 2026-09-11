@@ -26,6 +26,22 @@ return await agents.wait({ taskId: child.taskId });
 
 Saved workflows keep the context document and model route from the run that started them, including after resume.
 
+### Retrieve older session details
+
+[Session compaction](session-compaction.md) reduces the history included in the foreground model request. The `context` document still contains the complete recorded session before the current turn. Reading a slice lets the agent examine a particular part without loading the whole document. Passing that text to a model still uses input tokens.
+
+For a detail whose location is unknown, the agent can discover `history.search_sessions` through `execute` and search with `scope: "current"`. The tool accepts a query such as the following:
+
+```json
+{
+  "query": "original migration error and rollback decision",
+  "scope": "current",
+  "maxResults": 3
+}
+```
+
+Results contain bounded evidence with exact citations. The agent can use `history.open_session_evidence` to open a bounded window around a returned citation. Search defaults to previous sessions when scope is omitted. Use `"all"` to include both current and previous sessions, or supply an exact `sessionId` instead of `scope`.
+
 ## Subagent lifecycle
 
 `agents.spawn({ name?, systemPrompt?, prompt, tools?, thinkingLevel? })` records a subagent task and immediately returns stable `agentId` and `taskId` handles. Agents live within the Noesis process rather than one foreground turn or session.

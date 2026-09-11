@@ -79,6 +79,8 @@ export interface ContextCheckpointRecord {
   readonly checkpointId: string;
   readonly sessionId: string;
   readonly previousCheckpointId?: string;
+  /** Legacy checkpoints recursively summarize prior checkpoints; note deltas describe only their own sources. */
+  readonly summaryKind: "legacy_snapshot" | "note_delta";
   readonly summary: string;
   readonly summaryDigest: string;
   readonly sourceDigest: string;
@@ -724,6 +726,8 @@ export interface OperationalRepositories {
   readonly contextCheckpoints: {
     readonly get: (checkpointId: string) => Promise<ContextCheckpointRecord | undefined>;
     readonly getActive: (sessionId: string) => Promise<ContextCheckpointRecord | undefined>;
+    /** Immutable ancestry ordered from the oldest retained checkpoint to the requested checkpoint. */
+    readonly lineage: (checkpointId: string) => Promise<readonly ContextCheckpointRecord[]>;
     readonly activate: (request: {
       readonly checkpoint: ContextCheckpointRecord;
       readonly expectedActiveCheckpointId?: string;
