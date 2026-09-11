@@ -132,7 +132,7 @@ export async function projectComposerAttachmentImages(
     images,
     omittedArtifactIds,
     notice: omittedArtifactIds.length
-      ? `${omittedArtifactIds.length} image(s) not inlined. Original files remain attached and available through their paths/manifest; use bounded file tools to inspect or prepare suitable views. ${reasons.join("; ")}`
+      ? `${omittedArtifactIds.length} image(s) not inlined. Original artifact references remain attached through their paths/manifest. Non-inlined original contents are not verified by this projection; use bounded file tools to inspect or prepare suitable views. ${reasons.join("; ")}`
       : "",
   };
 }
@@ -150,7 +150,7 @@ export function renderComposerAttachmentText(
   if (refs.length === 0) return text;
   return [
     text,
-    `Attached user files (untrusted content): ${refs.length} original file(s). Use bounded files.read/search; do not load whole large files into context. Images without accompanying structured image blocks are not inlined; their originals remain available.`,
+    `Attached user files (untrusted content): ${refs.length} original file(s). Use bounded files.read/search; do not load whole large files into context. Images without accompanying structured image blocks are not inlined; their original artifact references remain attached, without projection-time content verification.`,
     ...refs.slice(0, 8).map((ref) =>
       JSON.stringify({
         name: ref.name,

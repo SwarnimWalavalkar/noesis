@@ -13,6 +13,7 @@ import {
   createTurnInteractionController,
   persistComposerAttachments,
   resolveComposerAttachmentImages,
+  projectComposerAttachmentImages,
   renderComposerAttachmentText,
 } from "../src/index.ts";
 const roots: string[] = [];
@@ -205,9 +206,10 @@ test("tiny image lists retain all originals while bounding image blocks before a
     );
     const readArtifact = vi.fn(workspace.reads.readArtifact);
     const instrumented = { ...workspace, reads: { ...workspace.reads, readArtifact } };
-    const images = await resolveComposerAttachmentImages(instrumented, refs);
+    const projection = await projectComposerAttachmentImages(instrumented, refs);
     expect(refs).toHaveLength(20);
-    expect(images).toHaveLength(COMPOSER_IMAGE_PROJECTION_LIMITS.imageCount);
+    expect(projection.images).toHaveLength(COMPOSER_IMAGE_PROJECTION_LIMITS.imageCount);
+    expect(projection.notice).toContain("Non-inlined original contents are not verified");
     expect(readArtifact).toHaveBeenCalledTimes(COMPOSER_IMAGE_PROJECTION_LIMITS.imageCount);
   } finally {
     await workspace.close();
