@@ -82,23 +82,39 @@ export async function projectComposerAttachmentImages(
   const omittedArtifactIds: string[] = [];
   const reasons: string[] = [];
   const unavailable = new Set<string>();
+  const omit = (ref: ComposerAttachment, reason: string): void => {
+    unavailable.add(ref.artifact.artifactId);
+    omittedArtifactIds.push(ref.artifact.artifactId);
+    if (reasons.length < 4) reasons.push(`${JSON.stringify(ref.name)}: ${reason.slice(0, 200)}`);
+  };
   for (const ref of ComposerAttachmentsSchema.parse(refs)) {
     if (ref.mimeType !== ref.artifact.mediaType) throw new Error("Attachment MIME differs from artifact");
     if (!ref.mimeType.startsWith("image/")) continue;
+    const allowanceReason = unavailable.has(ref.artifact.artifactId)
+      ? "image projection already unavailable"
+      : budget.remainingImages <= 0
+        ? "inline image block allowance exceeded"
+        : budget.remainingTokens !== undefined && budget.remainingTokens < 1025
+          ? "inline image context allowance exceeded"
+          : undefined;
+    if (allowanceReason) {
+      omit(ref, allowanceReason);
+      continue;
+    }
+    // Availability and integrity failures are not optional view failures. Keep
+    // authoritative reads outside the decode/model-compatibility fallback.
+    const metadata = await workspace.reads.inspectArtifact(ref.artifact);
+    if (
+      metadata.byteLength > Math.min(COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes, budget.remainingBytes)
+    ) {
+      omit(ref, "inline image working-set budget exceeded");
+      continue;
+    }
+    const bytes = await workspace.reads.readArtifact(
+      ref.artifact,
+      COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes,
+    );
     try {
-      if (unavailable.has(ref.artifact.artifactId)) throw new Error("image projection already unavailable");
-      if (budget.remainingImages <= 0) throw new Error("inline image block allowance exceeded");
-      if (budget.remainingTokens !== undefined && budget.remainingTokens < 1025)
-        throw new Error("inline image context allowance exceeded");
-      const metadata = await workspace.reads.inspectArtifact(ref.artifact);
-      if (
-        metadata.byteLength > Math.min(COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes, budget.remainingBytes)
-      )
-        throw new Error("inline image working-set budget exceeded");
-      const bytes = await workspace.reads.readArtifact(
-        ref.artifact,
-        COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes,
-      );
       const image = { mimeType: ref.mimeType, data: Buffer.from(bytes).toString("base64") };
       const tokens = imageProjectionTokens({ name: ref.name, ...image });
       if (budget.remainingTokens !== undefined && tokens > budget.remainingTokens)
@@ -109,12 +125,7 @@ export async function projectComposerAttachmentImages(
       budget.remainingImages -= 1;
       if (budget.remainingTokens !== undefined) budget.remainingTokens -= tokens;
     } catch (error) {
-      unavailable.add(ref.artifact.artifactId);
-      omittedArtifactIds.push(ref.artifact.artifactId);
-      if (reasons.length < 4)
-        reasons.push(
-          `${JSON.stringify(ref.name)}: ${error instanceof Error ? error.message.slice(0, 200) : "image unavailable"}`,
-        );
+      omit(ref, error instanceof Error ? error.message : "image unavailable");
     }
   }
   return {

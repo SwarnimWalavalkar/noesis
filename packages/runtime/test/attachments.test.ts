@@ -213,3 +213,21 @@ test("tiny image lists retain all originals while bounding image blocks before a
     await workspace.close();
   }
 });
+
+test.each(["missing", "same-length corruption"])(
+  "image projection rejects artifact %s instead of claiming an available original",
+  async (failure) => {
+    const { workspace } = await setup();
+    try {
+      const refs = await persistComposerAttachments(workspace, "source", [png]);
+      const ref = refs[0];
+      if (!ref) throw new Error("Missing fixture reference");
+      const path = join(workspace.paths.root, ref.artifact.path);
+      if (failure === "missing") await rm(path);
+      else await writeFile(path, Buffer.alloc(Buffer.byteLength(png.data, "base64")));
+      await expect(resolveComposerAttachmentImages(workspace, refs)).rejects.toThrow();
+    } finally {
+      await workspace.close();
+    }
+  },
+);
