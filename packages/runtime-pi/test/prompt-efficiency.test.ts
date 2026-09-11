@@ -42,11 +42,17 @@ describe("prompt efficiency boundaries", () => {
           throw new Error("must not persist");
         }),
       ).toHaveLength(MODEL_OUTPUT_BYTES);
-      await expect(
-        presentModelOutput(original, async () => {
-          throw new Error("disk full");
-        }),
-      ).rejects.toThrow("disk full");
+      const failed = await presentModelOutput(original, async () => {
+        throw new Error("disk full");
+      });
+      const missing = await presentModelOutput(original, undefined);
+      const invalid = await presentModelOutput(original, async () => "x".repeat(40_000));
+      for (const result of [failed, missing, invalid]) {
+        expect(Buffer.byteLength(result)).toBeLessThan(MODEL_OUTPUT_BYTES);
+        expect(JSON.parse(result)).toMatchObject({ executionCompleted: true, recoveryAvailable: false });
+        expect(JSON.parse(result)).not.toHaveProperty("fullOutputPath");
+        expect(result).toContain("Do not repeat");
+      }
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

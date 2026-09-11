@@ -371,7 +371,12 @@ describe("research role isolation", () => {
   test("restricts capability routing to the current turn payload", () => {
     const policy = createRestrictedRoleContextPolicy("capability_router");
 
-    expect(policy.allowedMessageNames).toEqual(["turn", "prior_conversation", "output_contract"]);
+    expect(policy.allowedMessageNames).toEqual([
+      "turn",
+      "prior_conversation",
+      "output_contract",
+      "output_repair",
+    ]);
     expect(policy.maxTools).toBe(0);
   });
 
@@ -387,6 +392,7 @@ describe("research role isolation", () => {
       "arm_B",
       "relevant_traces",
       "output_contract",
+      "output_repair",
     ]);
     expect(policy.includeCapabilityRevisions).toBe(false);
     expect(policy.maxMessages).toBe(12);
@@ -592,3 +598,27 @@ describe("research role isolation", () => {
     expect(result.capabilityRevisions).toEqual([capabilityRevision]);
   });
 });
+
+test.each(["foreground", "reflector", "session_compactor"] satisfies AgentRole[])(
+  "repairs an empty %s request without changing its schema prefix",
+  async (role) => {
+    const received: RoleBackendRequest[] = [];
+    const runner = createScriptedAgentRoleRunner({
+      variants: [configuration(role, "empty-repair")],
+      respond(input) {
+        received.push(input);
+        return { text: received.length === 1 ? "malformed evidence" : '{"answer":"fixed"}' };
+      },
+    });
+    const result = await createStructuredInferencePort({ runner }).run(
+      request(role, "empty-repair", []),
+      z.strictObject({ answer: z.string() }),
+    );
+    expect(result.value).toEqual({ answer: "fixed" });
+    expect(received).toHaveLength(2);
+    expect(received[0]?.systemPrompt).toBe(received[1]?.systemPrompt);
+    expect(received[1]?.prompt).toContain("output_repair");
+    expect(received[1]?.prompt).toContain("Validation failure:");
+    expect(received[1]?.prompt).toContain("malformed evidence");
+  },
+);

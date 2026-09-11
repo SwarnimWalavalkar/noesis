@@ -51,7 +51,11 @@ export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPoli
       .addOptional(
         !foreground
           ? {
-              allowedMessageNames: Object.freeze([...isolatedRoleMessageNames[role], "output_contract"]),
+              allowedMessageNames: Object.freeze([
+                ...isolatedRoleMessageNames[role],
+                "output_contract",
+                "output_repair",
+              ]),
             }
           : undefined,
       )

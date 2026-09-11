@@ -2555,3 +2555,77 @@ test("groups enabled cache payloads across foreground turns while keeping Pi ses
     spy.mockRestore();
   }
 });
+
+test.each([
+  ["execute", "missing"],
+  ["execute", "failed"],
+  ["shell", "missing"],
+  ["shell", "failed"],
+] as const)("preserves completed %s effects when output persistence is %s", async (tool, persistence) => {
+  const plan = frozenPlan();
+  let effects = 0;
+  let rounds = 0;
+  const value = "completed effect evidence ".repeat(10_000);
+  const controlled = createControlledPiModels({
+    respond: ({ context }) => {
+      if (rounds++ === 0)
+        return controlledToolCallResponse(
+          tool,
+          tool === "execute" ? { source: "return effect();" } : {},
+          "effect-once",
+        );
+      const result = context.messages.find((message) => message.role === "toolResult");
+      expect(result).toMatchObject({ isError: false });
+      const serialized = JSON.stringify(result);
+      expect(serialized.length).toBeLessThan(12_000);
+      expect(serialized).toContain("Do not repeat");
+      expect(serialized).toContain(persistence === "missing" ? "not_configured" : "persistence_failed");
+      expect(serialized).not.toContain("fullOutputPath");
+      expect(effects).toBe(1);
+      return "Effect completed; exact recovery unavailable.";
+    },
+  });
+  const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
+    codeExecution: {
+      prepare: async () => {
+        const prepared: PreparedPiCodeExecution = {
+          catalog: catalogWithTools("output-persistence-failure", []),
+          invoke: async () => {
+            effects++;
+            return value;
+          },
+          execute: async () => {
+            effects++;
+            return { executionId: "effect-once", value, calls: 0, durationMs: 0 };
+          },
+          close: async () => undefined,
+        };
+        return persistence === "failed"
+          ? {
+              ...prepared,
+              saveModelOutput: async () => {
+                throw new Error("disk full");
+              },
+            }
+          : prepared;
+      },
+      shutdown: async () => undefined,
+    },
+  });
+  await expect(
+    runtime.run(
+      {
+        trailId: plan.sessionId,
+        provider: plan.provider,
+        model: plan.model,
+        thinkingLevel: plan.thinkingLevel,
+        systemPrompt: plan.renderedSystemPrompt,
+        prompt: "Perform the effect once.",
+        activeCapabilities: [],
+        frozenTurnPlan: plan,
+      },
+      () => undefined,
+    ),
+  ).resolves.toMatchObject({ outcome: "completed" });
+  expect(effects).toBe(1);
+});

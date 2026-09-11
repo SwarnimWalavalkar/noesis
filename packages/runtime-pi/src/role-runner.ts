@@ -361,14 +361,14 @@ function repairRequest(
   error: Error,
   attempt: number,
 ): AgentRunRequest {
-  const messages = request.messages.map((message, index) =>
-    index === request.messages.findLastIndex((entry) => entry.name !== "output_contract")
-      ? {
-          ...message,
-          content: `${message.content}\n\nRepair the following malformed model output. Return only corrected JSON.\nValidation failure: ${error.message}\nMalformed output:\n${raw}`,
-        }
-      : message,
-  );
+  const target = request.messages.findLastIndex((entry) => entry.name !== "output_contract");
+  const guidance = `Repair the following malformed model output. Return only corrected JSON.\nValidation failure: ${error.message}\nMalformed output:\n${raw}`;
+  const messages =
+    target < 0
+      ? [...request.messages, { role: "user" as const, name: "output_repair", content: guidance }]
+      : request.messages.map((message, index) =>
+          index === target ? { ...message, content: `${message.content}\n\n${guidance}` } : message,
+        );
   return { ...request, runId: `${request.runId}:repair:${attempt}`, messages };
 }
 function addUsage(left: AgentUsage, right: AgentUsage): AgentUsage {
