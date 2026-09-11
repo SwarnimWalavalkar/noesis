@@ -267,10 +267,7 @@ export function createComposer(options: ComposerOptions) {
       // Preview providers must return bounded, cached thumbnails; text always remains available.
       const visible =
         showPreviews && width >= 24 ? items.filter((item) => previews.has(item.id)).slice(0, 1) : [];
-      return [
-        ...visible.flatMap((item) => previews.get(item.id)?.render(Math.min(width, 16)) ?? []),
-        summary,
-      ];
+      return [...visible.flatMap((item) => previews.get(item.id)?.render(width) ?? []), summary];
     },
   };
 }

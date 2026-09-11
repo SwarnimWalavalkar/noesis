@@ -5908,7 +5908,7 @@ export async function createApplicationRuntimeComposition(
                   if (
                     estimatedCompleteRequestTokens +
                       projectedImageTokens +
-                      estimateContextTokens(projection.notice) >
+                      (projection.notice ? estimateContextTokens(projection.notice) : 0) >
                     contextTokenBudget
                   )
                     throw new Error(

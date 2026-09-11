@@ -488,3 +488,21 @@ it.skipIf(process.platform === "win32")(
   },
   1000,
 );
+
+it("falls back when a generated image is empty while preserving referenced-file failures", async () => {
+  const bytes = Buffer.from(image().data, "base64");
+  const run = vi
+    .fn()
+    .mockResolvedValueOnce(Buffer.from("image/png"))
+    .mockResolvedValueOnce(Buffer.alloc(0))
+    .mockResolvedValueOnce(Buffer.from("image/png"))
+    .mockResolvedValueOnce(bytes);
+  const inputs = await readClipboardAttachment({
+    platform: "linux",
+    env: { WAYLAND_DISPLAY: "w", DISPLAY: ":0" },
+    run,
+  });
+  expect(inputs).toHaveLength(1);
+  expect(run).toHaveBeenCalledTimes(4);
+  expect(await readFile(inputs[0]?.sourcePath ?? "missing")).toEqual(bytes);
+});

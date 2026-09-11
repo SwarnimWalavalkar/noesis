@@ -271,6 +271,8 @@ export async function readClipboardAttachment(
         return [input];
       } catch (error) {
         await disposeAttachmentInput({ sourcePath: capturedPath });
+        options.signal?.throwIfAborted();
+        if (command !== commands.at(-1)) continue;
         throw error;
       }
     } catch (error) {
