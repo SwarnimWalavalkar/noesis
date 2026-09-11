@@ -1,14 +1,21 @@
-import { createConditionalObject } from "@noesis/domain";
+import {
+  createConditionalObject,
+  ComposerAttachmentsSchema,
+  type ComposerAttachment,
+  type ComposerDraftAttachment,
+} from "@noesis/domain";
 import type { AgentRuntimeEvent, AgentSteerResult, AgentThinkingLevel } from "@noesis/agent-types";
 import type { UserIntentRecord } from "@noesis/workspace";
 export type InteractionCommand =
   | {
       readonly type: "submit";
       readonly text: string;
+      readonly attachments?: readonly ComposerDraftAttachment[];
     }
   | {
       readonly type: "enqueue";
       readonly text: string;
+      readonly attachments?: readonly ComposerDraftAttachment[];
     }
   | {
       readonly type: "reroute-pending";
@@ -18,6 +25,7 @@ export type InteractionCommand =
   | {
       readonly type: "steer";
       readonly text?: string;
+      readonly attachments?: readonly ComposerDraftAttachment[];
     }
   | {
       readonly type: "restore-newest";
@@ -35,6 +43,7 @@ export type InteractionCommand =
 export interface InteractionPendingIntent {
   readonly intentId: string;
   readonly text: string;
+  readonly attachments?: readonly ComposerAttachment[];
   readonly mode: "turn" | "steer";
   readonly status: "pending" | "held" | "dispatching";
   readonly createdAt: string;
@@ -43,6 +52,7 @@ export interface InteractionActiveTurn {
   readonly intentId: string;
   readonly turnId: string;
   readonly text: string;
+  readonly attachments?: readonly ComposerAttachment[];
   readonly mode: "turn" | "steer";
 }
 export interface InteractionSnapshot {
@@ -63,6 +73,7 @@ export type TurnInteractionEvent =
       readonly intentId: string;
       readonly turnId: string;
       readonly text: string;
+      readonly attachments?: readonly ComposerAttachment[];
     }
   | {
       readonly type: "agent";
@@ -76,6 +87,7 @@ export type TurnInteractionEvent =
       readonly intentId: string;
       readonly turnId: string;
       readonly text: string;
+      readonly attachments?: readonly ComposerAttachment[];
       readonly deliveredAt: string;
     }
   | {
@@ -112,6 +124,7 @@ export interface InteractionDispatchResult {
   readonly snapshot: InteractionSnapshot;
   readonly intentId?: string;
   readonly restoredText?: string;
+  readonly restoredAttachments?: readonly ComposerAttachment[];
   readonly queueWasHeld?: boolean;
 }
 export interface TurnInteractionIntentStore {
@@ -119,6 +132,7 @@ export interface TurnInteractionIntentStore {
     readonly intentId: string;
     readonly sessionId: string;
     readonly text: string;
+    readonly attachments?: readonly ComposerAttachment[];
     readonly queuedBehindTurnId?: string;
     readonly createdAt: string;
   }) => Promise<UserIntentRecord>;
@@ -148,6 +162,7 @@ export interface TurnInteractionIntentStore {
     readonly intentId: string;
     readonly sessionId: string;
     readonly text: string;
+    readonly attachments?: readonly ComposerAttachment[];
     readonly targetTurnId: string;
     readonly createdAt: string;
     readonly promotedAt: string;
@@ -156,6 +171,7 @@ export interface TurnInteractionIntentStore {
     readonly intentId: string;
     readonly sessionId: string;
     readonly text: string;
+    readonly attachments?: readonly ComposerAttachment[];
     readonly targetTurnId: string;
     readonly createdAt: string;
     readonly heldAt: string;
@@ -216,6 +232,11 @@ export interface TurnInteractionIntentStore {
 }
 export interface TurnInteractionControllerOptions {
   readonly intents: TurnInteractionIntentStore;
+  readonly prepareAttachments?: (
+    sessionId: string,
+    inputs: readonly ComposerDraftAttachment[],
+    signal?: AbortSignal,
+  ) => Promise<readonly ComposerAttachment[]>;
   readonly createIntentId: () => string;
   readonly createTurnId: () => string;
   readonly now?: () => string;
@@ -225,6 +246,7 @@ export interface TurnInteractionControllerOptions {
     readonly intentId: string;
     readonly turnId: string;
     readonly text: string;
+    readonly attachments?: readonly ComposerAttachment[];
     readonly thinkingLevel?: AgentThinkingLevel;
     readonly onEvent: (event: AgentRuntimeEvent) => void;
     readonly onReady: () => void;
@@ -232,12 +254,17 @@ export interface TurnInteractionControllerOptions {
   }) => Promise<{
     readonly outcome: "completed" | "aborted";
   }>;
-  readonly steer: (sessionId: string, text: string) => Promise<AgentSteerResult>;
+  readonly steer: (
+    sessionId: string,
+    text: string,
+    attachments?: readonly ComposerAttachment[],
+  ) => Promise<AgentSteerResult>;
   readonly recordSteerDelivery: (request: {
     readonly sessionId: string;
     readonly intentId: string;
     readonly turnId: string;
     readonly text: string;
+    readonly attachments?: readonly ComposerAttachment[];
     readonly timelineSequence: number;
     readonly deliveredAt: string;
   }) => Promise<void>;
@@ -264,6 +291,7 @@ interface SessionInteractionState {
   steerDeliveries: Set<Promise<InteractionDispatchResult>>;
   steerDeliveryTail: Promise<void>;
   steerReadiness?: TurnSteerReadiness;
+  preparation?: AbortController;
   cancelScheduled?: () => void;
   wakeRequested: boolean;
   resumeGeneration: number;
@@ -292,6 +320,9 @@ const pendingIntent = (record: UserIntentRecord): InteractionPendingIntent =>
   Object.freeze({
     intentId: record.intentId,
     text: intentText(record),
+    ...createConditionalObject({})
+      .addOptional(record.attachments?.length ? { attachments: record.attachments } : undefined)
+      .finish(),
     mode: record.deliveryMode,
     status:
       record.status === "held"
@@ -499,6 +530,9 @@ export function createTurnInteractionController(
         intentId: claimed.intentId,
         turnId,
         text: intentText(claimed),
+        ...createConditionalObject({})
+          .addOptional(claimed.attachments?.length ? { attachments: claimed.attachments } : undefined)
+          .finish(),
         mode: "turn" as const,
       });
       state.active = active;
@@ -518,6 +552,9 @@ export function createTurnInteractionController(
             intentId: active.intentId,
             turnId,
             text: active.text,
+            ...createConditionalObject({})
+              .addOptional(active.attachments?.length ? { attachments: active.attachments } : undefined)
+              .finish(),
           } as const)
             .addOptional(thinkingLevel ? { thinkingLevel } : undefined)
             .add({
@@ -534,6 +571,9 @@ export function createTurnInteractionController(
                   intentId: active.intentId,
                   turnId,
                   text: active.text,
+                  ...createConditionalObject({})
+                    .addOptional(active.attachments?.length ? { attachments: active.attachments } : undefined)
+                    .finish(),
                 });
               },
               isInterruptRequested: () => state.interruptRequested,
@@ -665,7 +705,14 @@ export function createTurnInteractionController(
     dispatchOptions: InteractionDispatchOptions = {},
   ): Promise<InteractionDispatchResult> => {
     if (closed) throw new Error("Turn interaction controller is closed");
+    if (command.type === "steer" && command.text === undefined && command.attachments?.length)
+      command = { ...command, text: "" };
     const state = stateFor(sessionId);
+    if (command.type === "interrupt" || command.type === "pause-queue") {
+      state.cancellationGeneration += 1;
+      state.preparation?.abort();
+    }
+    const cancellationGeneration = state.cancellationGeneration;
     if (dispatchOptions.onEvent) {
       if (observedSessionId && observedSessionId !== sessionId) delete stateFor(observedSessionId).observer;
       observedSessionId = sessionId;
@@ -680,12 +727,35 @@ export function createTurnInteractionController(
         };
     const serialized = await serialize<SerializedDispatch>(state, async () => {
       await ensureRecovered(sessionId, state);
+      const attachmentInputs = "attachments" in command ? (command.attachments ?? []) : [];
+      if (closed) throw new Error("Turn interaction controller is closed");
+      let attachments: readonly ComposerAttachment[] = [];
+      if (attachmentInputs.length) {
+        if (state.cancellationGeneration !== cancellationGeneration)
+          throw new Error("Attachment preparation cancelled");
+        const preparation = new AbortController();
+        state.preparation = preparation;
+        try {
+          attachments = options.prepareAttachments
+            ? await options.prepareAttachments(sessionId, attachmentInputs, preparation.signal)
+            : ComposerAttachmentsSchema.parse(attachmentInputs);
+          preparation.signal.throwIfAborted();
+          if (state.cancellationGeneration !== cancellationGeneration)
+            throw new Error("Attachment preparation cancelled");
+        } finally {
+          delete state.preparation;
+        }
+      }
       if (command.type === "submit" || command.type === "enqueue") {
-        if (!command.text) throw new Error("Cannot queue an empty message");
+        if (!command.text.trim() && attachments.length === 0)
+          throw new Error("Cannot queue an empty message");
         const intent = await options.intents.enqueue({
           intentId: options.createIntentId(),
           sessionId,
           text: command.text,
+          ...createConditionalObject({})
+            .addOptional(attachments.length ? { attachments } : undefined)
+            .finish(),
           createdAt: now(),
         });
         if (command.type === "submit") {
@@ -729,8 +799,8 @@ export function createTurnInteractionController(
       }
       if (command.type === "pause-queue") {
         const queueWasHeld = state.queuePaused && (await snapshot(sessionId, state)).pending.length > 0;
+        state.preparation?.abort();
         state.queuePaused = true;
-        state.cancellationGeneration += 1;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         const current = await snapshot(sessionId, state);
@@ -778,6 +848,13 @@ export function createTurnInteractionController(
                   effect: "restored" as const,
                   intentId: restored.intentId,
                   restoredText: intentText(restored),
+                  ...createConditionalObject({})
+                    .addOptional(
+                      restored.attachments?.length
+                        ? { restoredAttachments: restored.attachments }
+                        : undefined,
+                    )
+                    .finish(),
                   snapshot: current,
                 }),
               }
@@ -786,8 +863,8 @@ export function createTurnInteractionController(
       }
       if (command.type === "interrupt") {
         if (!command.turnId) throw new Error("Interrupt requires a visible active turn identity");
+        state.preparation?.abort();
         state.queuePaused = true;
-        state.cancellationGeneration += 1;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         const active = state.active;
@@ -819,12 +896,16 @@ export function createTurnInteractionController(
           ? state.active
           : undefined;
       if (!active && command.text !== undefined) {
-        if (!command.text) throw new Error("Cannot steer with an empty message");
+        if (!command.text.trim() && attachments.length === 0)
+          throw new Error("Cannot steer with an empty message");
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         return Object.freeze({
           result: Object.freeze({
             effect: "idle" as const,
             restoredText: command.text,
+            ...createConditionalObject({})
+              .addOptional(attachments.length ? { restoredAttachments: attachments } : undefined)
+              .finish(),
             snapshot: await snapshot(sessionId, state),
           }),
         });
@@ -840,13 +921,17 @@ export function createTurnInteractionController(
       const readiness = state.steerReadiness;
       const held = !ready;
       if (command.text !== undefined) {
-        if (!command.text) throw new Error("Cannot steer with an empty message");
+        if (!command.text.trim() && attachments.length === 0)
+          throw new Error("Cannot steer with an empty message");
         const createdAt = now();
         steeringIntent = ready
           ? await options.intents.enqueueAndPromoteToSteer({
               intentId: options.createIntentId(),
               sessionId,
               text: command.text,
+              ...createConditionalObject({})
+                .addOptional(attachments.length ? { attachments } : undefined)
+                .finish(),
               targetTurnId: active.turnId,
               createdAt,
               promotedAt: now(),
@@ -855,6 +940,9 @@ export function createTurnInteractionController(
               intentId: options.createIntentId(),
               sessionId,
               text: command.text,
+              ...createConditionalObject({})
+                .addOptional(attachments.length ? { attachments } : undefined)
+                .finish(),
               targetTurnId: active.turnId,
               createdAt,
               heldAt: now(),
@@ -865,6 +953,9 @@ export function createTurnInteractionController(
             result: Object.freeze({
               effect: "idle" as const,
               restoredText: command.text,
+              ...createConditionalObject({})
+                .addOptional(attachments.length ? { restoredAttachments: attachments } : undefined)
+                .finish(),
               snapshot: await snapshot(sessionId, state),
             }),
           });
@@ -918,6 +1009,13 @@ export function createTurnInteractionController(
                   effect: "restored" as const,
                   intentId: released.intentId,
                   restoredText: intentText(released),
+                  ...createConditionalObject({})
+                    .addOptional(
+                      released.attachments?.length
+                        ? { restoredAttachments: released.attachments }
+                        : undefined,
+                    )
+                    .finish(),
                   snapshot: current,
                 })
               : Object.freeze({ effect: "queued" as const, intentId: released.intentId, snapshot: current });
@@ -926,7 +1024,7 @@ export function createTurnInteractionController(
         const text = intentText(intent);
         let receipt: AgentSteerResult;
         try {
-          receipt = await options.steer(sessionId, text);
+          receipt = await options.steer(sessionId, text, intent.attachments);
         } catch {
           const unresolved = await options.intents.markUnresolved({
             sessionId,
@@ -956,6 +1054,11 @@ export function createTurnInteractionController(
               effect: "restored" as const,
               intentId: intent.intentId,
               restoredText: intentText(restored),
+              ...createConditionalObject({})
+                .addOptional(
+                  restored.attachments?.length ? { restoredAttachments: restored.attachments } : undefined,
+                )
+                .finish(),
               snapshot: current,
             });
           }
@@ -976,6 +1079,9 @@ export function createTurnInteractionController(
             intentId: intent.intentId,
             turnId: active.turnId,
             text,
+            ...createConditionalObject({})
+              .addOptional(intent.attachments?.length ? { attachments: intent.attachments } : undefined)
+              .finish(),
             timelineSequence: receipt.timelineSequence,
             deliveredAt,
           });
@@ -997,6 +1103,9 @@ export function createTurnInteractionController(
           intentId: intent.intentId,
           turnId: active.turnId,
           text,
+          ...createConditionalObject({})
+            .addOptional(intent.attachments?.length ? { attachments: intent.attachments } : undefined)
+            .finish(),
           deliveredAt,
         });
         const current = await snapshot(sessionId, state);
@@ -1013,8 +1122,8 @@ export function createTurnInteractionController(
       const interruptFailures: unknown[] = [];
       const interrupts: Promise<void>[] = [];
       for (const [sessionId, state] of sessions) {
+        state.preparation?.abort();
         state.queuePaused = true;
-        state.cancellationGeneration += 1;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         if (state.active) state.phase = "interrupting";

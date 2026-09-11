@@ -138,6 +138,14 @@ export interface ArtifactImportRequest {
   readonly sourcePath: string;
   readonly actor: ActorRef;
   readonly relationshipRefs: readonly (DatabaseRowRef | FileRevisionRef)[];
+  readonly signal?: AbortSignal;
+  readonly expectedSource?: {
+    readonly byteLength: number;
+    readonly mtimeMs: number;
+    readonly ctimeMs: number;
+    readonly ino: number;
+    readonly dev: number;
+  };
 }
 
 export interface WorkspaceReadPort {
@@ -148,7 +156,10 @@ export interface WorkspaceReadPort {
   readonly readWorkingFile: (workingPath: string) => Promise<Uint8Array | undefined>;
   readonly readRevision: (ref: FileRevisionRef) => Promise<Uint8Array>;
   readonly readEvidence: <Kind extends EvidenceKind>(ref: EvidenceRevisionRef<Kind>) => Promise<Uint8Array>;
-  readonly readArtifact: (ref: ArtifactFileRef) => Promise<Uint8Array>;
+  readonly readArtifact: (ref: ArtifactFileRef, maxBytes?: number) => Promise<Uint8Array>;
+  readonly inspectArtifact: (
+    ref: ArtifactFileRef,
+  ) => Promise<{ readonly byteLength: number; readonly contentDigest: string }>;
 }
 
 export interface DefinitionFilePort {

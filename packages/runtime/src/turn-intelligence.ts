@@ -1,3 +1,4 @@
+import { renderComposerAttachmentText } from "./attachments.ts";
 import {
   type AgentThinkingLevel,
   type FrozenBaselineRef,
@@ -7,6 +8,7 @@ import {
   type FrozenRevisionMaterial,
   type FrozenTurnPlan,
   frozenTurnPlanDigest,
+  renderFrozenConversationHistoryContent,
   MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS,
   MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES,
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
@@ -21,13 +23,20 @@ import type {
   Capability,
   CapabilityRevision,
   CapabilityRevisionRef,
+  ComposerAttachment,
   EvidenceRef,
   FileRevisionRef,
   PermissionManifest,
   ProjectRef,
   WorkingAdjustment,
 } from "@noesis/domain";
-import { createConditionalObject, canonicalJson, sha256, toJsonValue } from "@noesis/domain";
+import {
+  ComposerAttachmentsSchema,
+  createConditionalObject,
+  canonicalJson,
+  sha256,
+  toJsonValue,
+} from "@noesis/domain";
 import { isCapabilityBindingAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 import { contextNotebookTokenBudget, resolveContextNotebook } from "./session-compaction.ts";
@@ -315,6 +324,7 @@ export interface TurnCapabilityRoutingCandidate {
   readonly intent: string;
 }
 export interface TurnRoutingHistoryMessage {
+  readonly attachments?: readonly ComposerAttachment[];
   readonly messageId: string;
   readonly role: "user" | "assistant";
   readonly content: string;
@@ -411,6 +421,11 @@ async function freezeConversationHistory(
       durable.createdAt !== message.createdAt
     )
       throw new Error(`Turn history message ${message.messageId} does not match authoritative SQLite state`);
+    const attachments = ComposerAttachmentsSchema.parse(durable.metadata["attachments"] ?? []);
+    if (canonicalJson(attachments) !== canonicalJson(message.attachments ?? []))
+      throw new Error(`Turn history message ${message.messageId} has stale attachments`);
+    if (attachments.length > 0 && message.role !== "user")
+      throw new Error(`Turn history message ${message.messageId} attaches files to a non-user message`);
     if (message.turnStatus !== undefined) {
       const turnId = durable.metadata["turnId"];
       if (typeof turnId !== "string" || turnId.length === 0)
@@ -419,6 +434,22 @@ async function freezeConversationHistory(
       if (!turn || turn.sessionId !== sessionId || turn.status !== message.turnStatus)
         throw new Error(`Turn history message ${message.messageId} has a stale terminal turn status`);
     }
+    const attachmentText = renderComposerAttachmentText("", attachments, workspace.paths.root);
+    const renderedLength = renderFrozenConversationHistoryContent({ ...message, attachmentText }).length;
+    totalCharacters += renderedLength - message.content.length;
+    if (renderedLength > MAX_FROZEN_CONVERSATION_HISTORY_ENTRY_CHARACTERS)
+      throw new Error(`Turn history message ${message.messageId} exceeds the per-entry character bound`);
+    if (totalCharacters > MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS)
+      throw new Error("Turn history exceeds the total character bound");
+    const imageDigests = [];
+    for (const attachment of attachments)
+      if (attachment.mimeType.startsWith("image/")) {
+        const metadata = await workspace.reads.inspectArtifact(attachment.artifact);
+        imageDigests.push({
+          artifactId: attachment.artifact.artifactId,
+          contentDigest: metadata.contentDigest,
+        });
+      }
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     frozen.push(
       Object.freeze(
@@ -435,6 +466,15 @@ async function freezeConversationHistory(
           contentDigest: sha256(message.content),
         } as const)
           .addOptional(!(message.turnStatus === undefined) ? { turnStatus: message.turnStatus } : undefined)
+          .addOptional(
+            attachments.length > 0
+              ? {
+                  attachments,
+                  attachmentText,
+                  imageDigests,
+                }
+              : undefined,
+          )
           .finish(),
       ),
     );
@@ -590,17 +630,18 @@ export function createTurnIntelligencePlanner(
                     }),
                   ]
                 : []),
-              ...conversationHistory.map(({ messageId, role, content, createdAt, turnStatus }) =>
-                Object.freeze(
-                  createConditionalObject({
-                    messageId,
-                    role,
-                    content,
-                    createdAt,
-                  } as const)
-                    .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
-                    .finish(),
-                ),
+              ...conversationHistory.map(
+                ({ messageId, role, content, attachmentText, createdAt, turnStatus }) =>
+                  Object.freeze(
+                    createConditionalObject({
+                      messageId,
+                      role,
+                      content: [content, attachmentText].filter(Boolean).join("\n"),
+                      createdAt,
+                    } as const)
+                      .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
+                      .finish(),
+                  ),
               ),
             ]),
             candidates: Object.freeze(

@@ -34,6 +34,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: 1.30.0
         version: 1.30.0(zod@4.4.3)
+      '@silvia-odwyer/photon-node':
+        specifier: 0.3.4
+        version: 0.3.4
       acorn:
         specifier: 8.18.0
         version: 8.18.0
@@ -376,6 +379,9 @@ importers:
       '@noesis/runtime':
         specifier: workspace:*
         version: link:../runtime
+      '@silvia-odwyer/photon-node':
+        specifier: 0.3.4
+        version: 0.3.4
       arktype:
         specifier: 2.2.3
         version: 2.2.3

@@ -1,4 +1,5 @@
 import { realpath } from "node:fs/promises";
+import { resolveAttachmentHistory } from "./attachment-history.ts";
 import { resolve } from "node:path";
 import type {
   AgentActionEvent,
@@ -43,6 +44,8 @@ import {
   createConditionalObject,
   type CapabilityRevision,
   type CapabilityRevisionRef,
+  type ComposerAttachment,
+  COMPOSER_IMAGE_PROJECTION_LIMITS,
   canonicalJson,
   capabilityRevisionRef,
   createId,
@@ -91,6 +94,10 @@ import {
   DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS,
   estimateContextTokens,
   loadRuntimeTranscript,
+  composerAttachmentsFromMetadata,
+  persistComposerAttachments,
+  projectComposerAttachmentImages,
+  renderComposerAttachmentText,
   type NoesisRuntime,
   prepareCompactionWindow,
   renderContextCheckpointSummary,
@@ -5200,6 +5207,9 @@ export async function createApplicationRuntimeComposition(
             historySequence: index,
           } as const)
             .addOptional(historyTurnKey ? { historyTurnKey } : undefined)
+            .addOptional(
+              message.metadata["attachments"] ? { attachments: message.metadata["attachments"] } : undefined,
+            )
             .add({
               inheritedFromSessionId: trailId,
               inheritedFromMessageId: message.messageId,
@@ -5284,6 +5294,11 @@ export async function createApplicationRuntimeComposition(
             createdAt: message.createdAt,
             sensitivity: message.sensitivity,
             startsTurn: message.role === "user" && replayHistoryKind(message) === "turn",
+            attachmentText: renderComposerAttachmentText(
+              "",
+              composerAttachmentsFromMetadata(message.metadata),
+              workspace.paths.root,
+            ),
           } as const)
             .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
             .finish(),
@@ -5517,6 +5532,7 @@ export async function createApplicationRuntimeComposition(
       readonly onReady: () => void;
       readonly isInterruptRequested: () => boolean;
     },
+    attachments: readonly ComposerAttachment[] = [],
   ): Promise<TurnResult> => {
     const trail = getTrail(trailId);
     if (trail.status === "running") throw new Error("Trail is already running");
@@ -5525,7 +5541,11 @@ export async function createApplicationRuntimeComposition(
         `Trail ${trailId} is pinned to runtime ${trail.runtime}; active runtime is ${agent.name}.`,
       );
     const contextTokenBudget = effectiveContextBudget(trail);
-    const historyTokenBudget = effectiveHistoryBudget(trail, input);
+    const currentAttachmentText = renderComposerAttachmentText("", attachments, workspace.paths.root);
+    const historyTokenBudget = effectiveHistoryBudget(
+      trail,
+      [input, currentAttachmentText].filter(Boolean).join("\n"),
+    );
     if (options.config.context.autoCompact) await serializeCompaction(trail, "automatic", historyTokenBudget);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
@@ -5566,6 +5586,7 @@ export async function createApplicationRuntimeComposition(
       const priorConversation = Object.freeze(
         historyMessages.map((message) => {
           const turnStatus = contextById.get(message.messageId)?.turnStatus;
+          const attachments = composerAttachmentsFromMetadata(message.metadata);
           // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return Object.freeze(
             createConditionalObject({
@@ -5575,6 +5596,7 @@ export async function createApplicationRuntimeComposition(
               createdAt: message.createdAt,
             } as const)
               .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
+              .addOptional(attachments.length > 0 ? { attachments } : undefined)
               .finish(),
           );
         }),
@@ -5602,6 +5624,7 @@ export async function createApplicationRuntimeComposition(
       const estimatedCompleteRequestTokens =
         estimateContextTokens(plan.renderedSystemPrompt) +
         estimateContextTokens(input) +
+        estimateContextTokens(currentAttachmentText) +
         DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS +
         (plan.contextCheckpoint ? estimateContextTokens(plan.contextCheckpoint.summary) : 0) +
         (plan.conversationHistory ?? []).reduce(
@@ -5670,6 +5693,7 @@ export async function createApplicationRuntimeComposition(
             input,
           } as const)
             .addOptional(sourceIntentId ? { sourceIntentId } : undefined)
+            .addOptional(attachments.length > 0 ? { attachments } : undefined)
             .add({
               occurredAt,
               plan,
@@ -5725,7 +5749,12 @@ export async function createApplicationRuntimeComposition(
                 const recordActionPersistenceFailure = (cause: unknown): void => {
                   actionPersistenceFailure ??= cause;
                 };
+                const pendingAttachmentNotices: AgentRuntimeEvent[] = [];
                 const emit = (event: AgentRuntimeEvent): void => {
+                  if (event.type === "notice" && !interactionReady) {
+                    pendingAttachmentNotices.push(event);
+                    return;
+                  }
                   if (event.type === "status" && event.status === "started" && !interactionReady) {
                     interactionReady = true;
                     if (interactionControl?.isInterruptRequested()) void agent.abort(trailId);
@@ -5837,6 +5866,8 @@ export async function createApplicationRuntimeComposition(
                     return;
                   }
                   runOptions?.onEvent?.(event);
+                  if (interactionReady)
+                    for (const notice of pendingAttachmentNotices.splice(0)) runOptions?.onEvent?.(notice);
                 };
                 let agentOutcome:
                   | {
@@ -5848,6 +5879,41 @@ export async function createApplicationRuntimeComposition(
                       readonly error: unknown;
                     };
                 try {
+                  const budget = {
+                    remainingBytes: COMPOSER_IMAGE_PROJECTION_LIMITS.totalBytes,
+                    remainingTokens: Math.max(0, contextTokenBudget - estimatedCompleteRequestTokens - 1024),
+                  };
+                  const validateImages = (images: readonly { mimeType: string; data: string }[]) => {
+                    if (!agent.validateImages) throw new Error("This runtime does not support inline images");
+                    agent.validateImages(plan.provider, plan.model, images);
+                  };
+                  const projection = await projectComposerAttachmentImages(
+                    workspace,
+                    attachments,
+                    budget,
+                    validateImages,
+                  );
+                  const publishNotice = (text: string) => emit({ type: "notice", text });
+                  if (projection.notice) publishNotice(projection.notice);
+                  const history = await resolveAttachmentHistory(
+                    workspace,
+                    plan,
+                    budget,
+                    validateImages,
+                    publishNotice,
+                  );
+                  const projectedImageTokens =
+                    Math.max(0, contextTokenBudget - estimatedCompleteRequestTokens - 1024) -
+                    budget.remainingTokens;
+                  if (
+                    estimatedCompleteRequestTokens +
+                      projectedImageTokens +
+                      (projection.notice ? estimateContextTokens(projection.notice) : 0) >
+                    contextTokenBudget
+                  )
+                    throw new Error(
+                      "The complete turn request exceeds the selected context token budget after image projection.",
+                    );
                   agentOutcome = {
                     status: "completed",
                     result: await agent.run(
@@ -5858,6 +5924,13 @@ export async function createApplicationRuntimeComposition(
                         thinkingLevel: plan.thinkingLevel,
                         systemPrompt: plan.renderedSystemPrompt,
                         prompt: input,
+                        images: projection.images,
+                        attachmentText: renderComposerAttachmentText(
+                          projection.notice,
+                          attachments,
+                          workspace.paths.root,
+                        ),
+                        history,
                         activeCapabilities: plan.selectedCapabilities.map((selection) => ({
                           name: selection.name,
                           version: plan.activationRevision,
@@ -5868,7 +5941,18 @@ export async function createApplicationRuntimeComposition(
                     ),
                   };
                 } catch (error) {
-                  agentOutcome = { status: "failed", error };
+                  const notices = pendingAttachmentNotices
+                    .splice(0)
+                    .flatMap((event) => (event.type === "notice" ? [event.text] : []));
+                  agentOutcome = {
+                    status: "failed",
+                    error: notices.length
+                      ? new Error(
+                          [error instanceof Error ? error.message : String(error), ...notices].join("\n"),
+                          { cause: error },
+                        )
+                      : error,
+                  };
                 }
                 const [, assistantPersistenceResult] = await Promise.allSettled([
                   actionPersistence,
@@ -5960,6 +6044,10 @@ export async function createApplicationRuntimeComposition(
     intents: workspace.operational.userIntents,
     createIntentId: () => createId("intent"),
     createTurnId: () => createId("turn"),
+    prepareAttachments: async (sessionId, inputs, signal) => {
+      getTrail(sessionId);
+      return await persistComposerAttachments(workspace, sessionId, inputs, signal);
+    },
     runTurn: async ({
       sessionId,
       intentId,
@@ -5969,6 +6057,7 @@ export async function createApplicationRuntimeComposition(
       onEvent,
       onReady,
       isInterruptRequested,
+      attachments,
     }) => {
       try {
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -5983,6 +6072,7 @@ export async function createApplicationRuntimeComposition(
             .finish(),
           intentId,
           { onReady, isInterruptRequested },
+          attachments,
         );
         return Object.freeze({ outcome: result.outcome });
       } catch (error) {
@@ -5992,15 +6082,42 @@ export async function createApplicationRuntimeComposition(
         throw error;
       }
     },
-    steer: async (sessionId, text) => {
-      return await agent.steer(sessionId, text);
+    steer: async (sessionId, text, attachments = []) => {
+      const trail = getTrail(sessionId);
+      const projection = await projectComposerAttachmentImages(
+        workspace,
+        attachments,
+        undefined,
+        (images) => {
+          if (!agent.validateImages) throw new Error("This runtime does not support inline images");
+          agent.validateImages(trail.provider, trail.model, images);
+        },
+      );
+      return await agent.steer(
+        sessionId,
+        renderComposerAttachmentText(
+          [text, projection.notice].filter(Boolean).join("\n"),
+          attachments,
+          workspace.paths.root,
+        ),
+        projection.images,
+      );
     },
-    recordSteerDelivery: async ({ sessionId, intentId, turnId, text, timelineSequence, deliveredAt }) => {
+    recordSteerDelivery: async ({
+      sessionId,
+      intentId,
+      turnId,
+      text,
+      attachments,
+      timelineSequence,
+      deliveredAt,
+    }) => {
       const delivered = await workspace.operational.userIntents.recordSteerDelivery({
         sessionId,
         intentId,
         targetTurnId: turnId,
         text,
+        attachments: attachments ?? [],
         sensitivity: "normal",
         timelineSequence,
         deliveredAt,

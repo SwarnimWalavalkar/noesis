@@ -323,3 +323,15 @@ describe("session compaction", () => {
     );
   });
 });
+
+test("compaction sizes attachment reference text exactly once", () => {
+  const entry = {
+    ...message("attached", "question", true),
+    attachmentText: "Original: /workspace/artifacts/file",
+  };
+  const expected = estimateContextTokens(`${entry.content}\n${entry.attachmentText}`);
+  expect(resolvedSessionContext([entry], undefined, expected)).toMatchObject({
+    estimatedTokens: expected,
+    exceedsBudget: false,
+  });
+});

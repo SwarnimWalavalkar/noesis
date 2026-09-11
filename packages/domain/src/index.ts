@@ -206,3 +206,5 @@ export * from "./research.ts";
 export * from "./object-builder.ts";
 export * from "./storage-schemas.ts";
 export * from "./workspace.ts";
+
+export * from "./attachments.ts";

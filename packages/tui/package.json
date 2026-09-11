@@ -11,6 +11,7 @@
     "@noesis/context": "workspace:*",
     "@noesis/domain": "workspace:*",
     "@noesis/runtime": "workspace:*",
+    "@silvia-odwyer/photon-node": "0.3.4",
     "arktype": "2.2.3"
   },
   "devDependencies": {

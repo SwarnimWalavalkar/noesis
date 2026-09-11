@@ -1,3 +1,4 @@
+import { composerAttachmentsFromMetadata } from "./attachments.ts";
 import {
   createConditionalObject,
   isJsonObject,
@@ -318,6 +319,7 @@ export async function loadRuntimeTranscript(
         .add({
           role: message.role,
           text: message.content,
+          attachments: composerAttachmentsFromMetadata(message.metadata),
           createdAt: message.createdAt,
         } as const)
         .finish(),

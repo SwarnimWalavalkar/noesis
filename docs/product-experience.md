@@ -33,6 +33,10 @@ The user's words take priority. Phrases such as "just do it," "think this throug
 
 The approach can change during a session. A build can expose something the user needs to learn. Reflection can turn into execution. An open discussion can end with a concrete task. Noesis should preserve why the change happened.
 
+### Composer attachments
+
+`Ctrl+V` attaches local copied files or a clipboard image; `/attach <path>` attaches an image or file. A compact strip above the editor shows a small image preview where supported and numbered text labels everywhere else. `/detach` removes items. Original files travel with the durable message through the queue, restoration, and session replay. Failed admission retains the draft. See [composer attachments](composer-attachments.md) for terminal support, clipboard helpers, limits, and model behavior.
+
 ### Session continuity
 
 You can continue a long conversation without carrying its full transcript into every model request. Noesis records notes from older work once, keeps recent messages in full, and retrieves original evidence when needed. This avoids repeatedly rewriting earlier notes and limits how much history each future request includes. The [compaction guide](session-compaction.md) explains the user controls and cost tradeoffs.

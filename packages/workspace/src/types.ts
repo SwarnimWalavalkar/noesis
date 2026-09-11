@@ -1,3 +1,4 @@
+import type { ComposerAttachment } from "@noesis/domain";
 import type {
   AgentAddress,
   AgentMessageStatus,
@@ -115,6 +116,7 @@ export interface UserIntentRecord {
   readonly sessionId: string;
   /** Cleared after delivery; the durable message becomes the sole authority for delivered text. */
   readonly text?: string;
+  readonly attachments?: readonly ComposerAttachment[];
   readonly contentDigest: string;
   readonly deliveryMode: UserIntentMode;
   readonly status: UserIntentStatus;
@@ -775,6 +777,7 @@ export interface OperationalRepositories {
       readonly intentId: string;
       readonly sessionId: string;
       readonly text: string;
+      readonly attachments?: readonly ComposerAttachment[];
       readonly queuedBehindTurnId?: string;
       readonly createdAt: string;
     }) => Promise<UserIntentRecord>;
@@ -800,6 +803,7 @@ export interface OperationalRepositories {
       readonly intentId: string;
       readonly sessionId: string;
       readonly text: string;
+      readonly attachments?: readonly ComposerAttachment[];
       readonly targetTurnId: string;
       readonly createdAt: string;
       readonly promotedAt: string;
@@ -812,6 +816,7 @@ export interface OperationalRepositories {
       readonly intentId: string;
       readonly sessionId: string;
       readonly text: string;
+      readonly attachments?: readonly ComposerAttachment[];
       readonly targetTurnId: string;
       readonly createdAt: string;
       readonly heldAt: string;
@@ -876,6 +881,7 @@ export interface OperationalRepositories {
       readonly intentId: string;
       readonly targetTurnId: string;
       readonly text: string;
+      readonly attachments?: readonly ComposerAttachment[];
       readonly sensitivity: Sensitivity;
       readonly timelineSequence: number;
       readonly deliveredAt: string;

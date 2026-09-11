@@ -1,7 +1,10 @@
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { ComposerAttachmentsSchema, composerContentDigest } from "@noesis/domain";
 import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
-import { copyFile, link, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
+import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
+import { link, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
@@ -529,10 +532,11 @@ export async function createWorkspaceStore(
   };
   const inspectFile = async (
     path: string,
+    signal?: AbortSignal,
   ): Promise<{ readonly byteLength: number; readonly contentDigest: string }> => {
     const hash = createHash("sha256");
     let byteLength = 0;
-    for await (const chunk of createReadStream(path)) {
+    for await (const chunk of createReadStream(path, signal ? { signal } : {})) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       hash.update(bytes);
       byteLength += bytes.byteLength;
@@ -542,14 +546,50 @@ export async function createWorkspaceStore(
   const persistFileAtomically = async (
     path: string,
     sourcePath: string,
+    request?: ArtifactImportRequest,
   ): Promise<{ readonly byteLength: number; readonly contentDigest: string }> => {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      await copyFile(sourcePath, temporary);
-      const inspected = await inspectFile(temporary);
+      request?.signal?.throwIfAborted();
+      const source = await open(sourcePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
       try {
-        const existing = await inspectFile(path);
+        const before = await source.stat();
+        if (!before.isFile()) throw new Error("Artifact source must be a regular file");
+        const expected = request?.expectedSource;
+        if (
+          expected &&
+          (expected.byteLength !== before.size ||
+            expected.mtimeMs !== before.mtimeMs ||
+            expected.ctimeMs !== before.ctimeMs ||
+            expected.ino !== before.ino ||
+            expected.dev !== before.dev)
+        )
+          throw new Error("Attachment changed since selection; detach and attach it again.");
+        await pipeline(
+          before.size
+            ? source.createReadStream({ autoClose: false, start: 0, end: before.size - 1 })
+            : Readable.from([]),
+          createWriteStream(temporary, { flags: "wx", mode: 0o600 }),
+          request?.signal ? { signal: request.signal } : {},
+        );
+        const after = await source.stat();
+        const selectedPath = await stat(sourcePath);
+        if (
+          selectedPath.ino !== before.ino ||
+          selectedPath.dev !== before.dev ||
+          selectedPath.ctimeMs !== before.ctimeMs ||
+          after.size !== before.size ||
+          after.mtimeMs !== before.mtimeMs ||
+          after.ctimeMs !== before.ctimeMs
+        )
+          throw new Error("Artifact source changed while being imported");
+      } finally {
+        await source.close();
+      }
+      const inspected = await inspectFile(temporary, request?.signal);
+      try {
+        const existing = await inspectFile(path, request?.signal);
         if (existing.contentDigest !== inspected.contentDigest)
           throw new Error(`Artifact path already contains different bytes: ${path}`);
         return inspected;
@@ -562,11 +602,14 @@ export async function createWorkspaceStore(
       } finally {
         await handle.close();
       }
+      request?.signal?.throwIfAborted();
+      // Publication begins a non-cancellable completion boundary: register the
+      // artifact rather than unlinking a path another caller may already reuse.
       try {
         await link(temporary, path);
       } catch (error) {
         if (!isAlreadyExists(error)) throw error;
-        const existing = await inspectFile(path);
+        const existing = await inspectFile(path, request?.signal);
         if (existing.contentDigest !== inspected.contentDigest)
           throw new Error(`Artifact path already contains different bytes: ${path}`);
         return existing;
@@ -856,7 +899,7 @@ export async function createWorkspaceStore(
     for (const ref of request.relationshipRefs) assertStoredReference(db, ref);
     const artifactAbsolute = pathInside(paths.artifacts, request.path);
     const storedPath = workspaceRelative(paths, artifactAbsolute);
-    const inspected = await persistFileAtomically(artifactAbsolute, request.sourcePath);
+    const inspected = await persistFileAtomically(artifactAbsolute, request.sourcePath, request);
     return recordArtifact(request, storedPath, inspected.byteLength, inspected.contentDigest);
   };
   const readVerifiedFile = async (storedPath: string, expectedDigest?: string): Promise<Uint8Array> => {
@@ -1565,10 +1608,33 @@ export async function createWorkspaceStore(
           throw new Error(`Evidence reference does not match authoritative metadata: ${ref.revisionId}`);
         return await readVerifiedFile(ref.snapshotPath, ref.contentDigest);
       },
-      readArtifact: async (ref: ArtifactFileRef) => {
+      inspectArtifact: async (ref: ArtifactFileRef) => {
+        ArtifactFileRefSchema.parse(ref);
+        assertStoredReference(db, ref);
+        const row = db
+          .prepare("SELECT byte_length, content_digest FROM artifacts WHERE artifact_id = ?")
+          .get(ref.artifactId);
+        if (!row) throw new Error("Missing artifact");
+        const byteLength = requiredNumber(row, "byte_length");
+        const file = await open(
+          pathInside(paths.root, ref.path),
+          fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+        );
+        try {
+          const info = await file.stat();
+          if (!info.isFile() || info.size !== byteLength)
+            throw new Error("Artifact file does not match authoritative metadata");
+        } finally {
+          await file.close();
+        }
+        return { byteLength, contentDigest: requiredString(row, "content_digest") };
+      },
+      readArtifact: async (ref: ArtifactFileRef, maxBytes?: number) => {
         ArtifactFileRefSchema.parse(ref);
         const row = db
-          .prepare("SELECT path, content_digest, media_type FROM artifacts WHERE artifact_id = ?")
+          .prepare(
+            "SELECT path, content_digest, media_type, byte_length FROM artifacts WHERE artifact_id = ?",
+          )
           .get(ref.artifactId);
         if (
           row === undefined ||
@@ -1576,7 +1642,39 @@ export async function createWorkspaceStore(
           requiredString(row, "media_type") !== ref.mediaType
         )
           throw new Error(`Artifact reference does not match authoritative metadata: ${ref.artifactId}`);
-        return await readVerifiedFile(ref.path, requiredString(row, "content_digest"));
+        if (maxBytes === undefined)
+          return await readVerifiedFile(ref.path, requiredString(row, "content_digest"));
+        z.number()
+          .int()
+          .nonnegative()
+          .max(100 * 1024 * 1024)
+          .parse(maxBytes);
+        const expectedLength = requiredNumber(row, "byte_length");
+        if (expectedLength > maxBytes) throw new Error("Artifact exceeds byte limit");
+        const handle = await open(
+          pathInside(paths.root, ref.path),
+          fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+        );
+        try {
+          const status = await handle.stat();
+          if (!status.isFile()) throw new Error("Artifact is not a regular file");
+          if (status.size !== expectedLength) throw new Error(`Immutable file digest mismatch: ${ref.path}`);
+          const bytes = Buffer.alloc(Math.min(expectedLength + 1, maxBytes + 1));
+          let length = 0;
+          while (length < bytes.length) {
+            const read = await handle.read(bytes, length, bytes.length - length, null);
+            if (read.bytesRead === 0) break;
+            length += read.bytesRead;
+          }
+          if (length > maxBytes) throw new Error("Artifact exceeds byte limit");
+          if (length !== expectedLength) throw new Error(`Immutable file digest mismatch: ${ref.path}`);
+          const result = bytes.subarray(0, length);
+          if (sha256(result) !== requiredString(row, "content_digest"))
+            throw new Error(`Immutable file digest mismatch: ${ref.path}`);
+          return result;
+        } finally {
+          await handle.close();
+        }
       },
     }),
     definitions: Object.freeze({
@@ -2379,7 +2477,7 @@ function createOperationalRepositories(
   const userIntentMessageState = (intent: UserIntentRecord): "missing" | "verified" => {
     if (intent.targetTurnId === undefined) return "missing";
     const messages = db
-      .prepare(`SELECT content
+      .prepare(`SELECT content, metadata_json
          FROM messages
          WHERE session_id = ?
            AND role = 'user'
@@ -2389,7 +2487,14 @@ function createOperationalRepositories(
       .all(intent.sessionId, intent.targetTurnId, intent.intentId);
     if (messages.length === 0) return "missing";
     for (const message of messages) {
-      if (sha256(requiredString(message, "content")) !== intent.contentDigest)
+      if (
+        composerContentDigest(
+          requiredString(message, "content"),
+          ComposerAttachmentsSchema.parse(
+            JSON.parse(requiredString(message, "metadata_json"))["attachments"] ?? [],
+          ),
+        ) !== intent.contentDigest
+      )
         throw new Error(`User intent ${intent.intentId} durable message content does not match its digest`);
     }
     return "verified";
@@ -2404,7 +2509,7 @@ function createOperationalRepositories(
       throw new Error(`User intent ${intent.intentId} has no matching durable user message`);
     const delivered = db
       .prepare(`UPDATE user_intents
-         SET status = 'delivered', text = NULL, delivered_at = ?, unresolved_at = NULL, updated_at = ?
+         SET status = 'delivered', text = NULL, attachments_json = '[]', delivered_at = ?, unresolved_at = NULL, updated_at = ?
          WHERE intent_id = ? AND session_id = ? AND status IN ('dispatching', 'unresolved')
            AND target_turn_id = ?`)
       .run(deliveredAt, deliveredAt, intent.intentId, intent.sessionId, intent.targetTurnId);
@@ -2420,9 +2525,15 @@ function createOperationalRepositories(
     database.transaction(() => {
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
-      z.string().trim().min(1).parse(request.text);
+      const attachments = ComposerAttachmentsSchema.parse(request.attachments ?? []);
+      for (const attachment of attachments) {
+        if (attachment.mimeType !== attachment.artifact.mediaType)
+          throw new Error("Attachment MIME does not match artifact");
+        assertStoredReference(db, attachment.artifact);
+      }
+      if (attachments.length === 0) z.string().trim().min(1).parse(request.text);
       const createdAt = z.string().min(1).parse(request.createdAt);
-      const contentDigest = sha256(request.text);
+      const contentDigest = composerContentDigest(request.text, request.attachments);
       const existing = getUserIntent(intentId, sessionId);
       if (existing !== undefined) {
         if (
@@ -2452,13 +2563,14 @@ function createOperationalRepositories(
         "next_sequence",
       );
       db.prepare(`INSERT INTO user_intents(
-          intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+          intent_id, session_id, text, attachments_json, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
           promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
-        ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
+        ) VALUES (?, ?, ?, ?, ?, 'turn', 'pending', ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
         intentId,
         sessionId,
         request.text,
+        JSON.stringify(attachments),
         contentDigest,
         queueSequence,
         request.queuedBehindTurnId ?? null,
@@ -2548,13 +2660,14 @@ function createOperationalRepositories(
         if (Number(withdrawn.changes) !== 1)
           throw new Error(`Source user intent ${source.intentId} changed during reroute`);
         db.prepare(`INSERT INTO user_intents(
-            intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+            intent_id, session_id, text, attachments_json, content_digest, delivery_mode, status, queue_sequence,
             queued_behind_turn_id, target_turn_id, created_at, updated_at,
             promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
-          ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
+          ) VALUES (?, ?, ?, ?, ?, 'turn', 'pending', ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
           destinationIntentId,
           destinationSessionId,
           source.text,
+          JSON.stringify(source.attachments ?? []),
           source.contentDigest,
           nextSequence,
           source.createdAt,
@@ -2580,12 +2693,18 @@ function createOperationalRepositories(
     database.transaction(() => {
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
-      z.string().trim().min(1).parse(request.text);
+      const attachments = ComposerAttachmentsSchema.parse(request.attachments ?? []);
+      for (const attachment of attachments) {
+        if (attachment.mimeType !== attachment.artifact.mediaType)
+          throw new Error("Attachment MIME does not match artifact");
+        assertStoredReference(db, attachment.artifact);
+      }
+      if (attachments.length === 0) z.string().trim().min(1).parse(request.text);
       const text = request.text;
       const targetTurnId = z.string().min(1).parse(request.targetTurnId);
       const createdAt = z.string().min(1).parse(request.createdAt);
       const promotedAt = z.string().min(1).parse(request.promotedAt);
-      const contentDigest = sha256(text);
+      const contentDigest = composerContentDigest(text, attachments);
       const existing = getUserIntent(intentId, sessionId);
       if (existing !== undefined) {
         if (
@@ -2620,13 +2739,14 @@ function createOperationalRepositories(
         "next_sequence",
       );
       db.prepare(`INSERT INTO user_intents(
-          intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+          intent_id, session_id, text, attachments_json, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
           held_at, promoted_at, delivered_at, unresolved_at, withdrawn_at, steer_origin, attempt_count
-        ) VALUES (?, ?, ?, ?, 'steer', 'dispatching', ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, 'explicit', 1)`).run(
+        ) VALUES (?, ?, ?, ?, ?, 'steer', 'dispatching', ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, 'explicit', 1)`).run(
         intentId,
         sessionId,
         text,
+        JSON.stringify(attachments),
         contentDigest,
         queueSequence,
         targetTurnId,
@@ -2652,12 +2772,18 @@ function createOperationalRepositories(
     database.transaction(() => {
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
-      z.string().trim().min(1).parse(request.text);
+      const attachments = ComposerAttachmentsSchema.parse(request.attachments ?? []);
+      for (const attachment of attachments) {
+        if (attachment.mimeType !== attachment.artifact.mediaType)
+          throw new Error("Attachment MIME does not match artifact");
+        assertStoredReference(db, attachment.artifact);
+      }
+      if (attachments.length === 0) z.string().trim().min(1).parse(request.text);
       const text = request.text;
       const targetTurnId = z.string().min(1).parse(request.targetTurnId);
       const createdAt = z.string().min(1).parse(request.createdAt);
       const heldAt = z.string().min(1).parse(request.heldAt);
-      const contentDigest = sha256(text);
+      const contentDigest = composerContentDigest(text, attachments);
       const existing = getUserIntent(intentId, sessionId);
       if (existing !== undefined) {
         if (
@@ -2687,13 +2813,14 @@ function createOperationalRepositories(
         "next_sequence",
       );
       db.prepare(`INSERT INTO user_intents(
-          intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+          intent_id, session_id, text, attachments_json, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
           held_at, promoted_at, delivered_at, unresolved_at, withdrawn_at, steer_origin, attempt_count
-        ) VALUES (?, ?, ?, ?, 'steer', 'held', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'explicit', 0)`).run(
+        ) VALUES (?, ?, ?, ?, ?, 'steer', 'held', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'explicit', 0)`).run(
         intentId,
         sessionId,
         text,
+        JSON.stringify(attachments),
         contentDigest,
         queueSequence,
         targetTurnId,
@@ -2977,7 +3104,7 @@ function createOperationalRepositories(
     database.transaction(() => {
       const current = getUserIntent(request.intentId, request.sessionId);
       if (current === undefined || current.targetTurnId !== request.targetTurnId) return undefined;
-      if (sha256(request.text) !== current.contentDigest)
+      if (composerContentDigest(request.text, request.attachments) !== current.contentDigest)
         throw new Error(`Steer delivery text for intent ${request.intentId} does not match its digest`);
       if (
         current.status !== "dispatching" &&
@@ -3012,6 +3139,9 @@ function createOperationalRepositories(
         turnId: request.targetTurnId,
         sourceIntentId: request.intentId,
         deliveryMode: "steer",
+        ...createConditionalObject({})
+          .addOptional(request.attachments?.length ? { attachments: request.attachments } : undefined)
+          .finish(),
       });
       const existingMessage = decodeOptional(
         db

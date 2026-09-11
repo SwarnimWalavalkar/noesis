@@ -1,9 +1,21 @@
+import { createConditionalObject, type ComposerAttachment } from "@noesis/domain";
+import type { TuiAttachmentLabel } from "./state.ts";
 import type { NoesisView } from "./rendering.ts";
 import type { TuiInteractionView } from "./state.ts";
 
 export interface OptimisticPromptEcho {
-  readonly echoIfIdle: (interaction: TuiInteractionView, trailId: string, text: string) => string | undefined;
-  readonly admit: (trailId: string, text: string, turnId: string) => boolean;
+  readonly echoIfIdle: (
+    interaction: TuiInteractionView,
+    trailId: string,
+    text: string,
+    attachments?: readonly TuiAttachmentLabel[],
+  ) => string | undefined;
+  readonly admit: (
+    trailId: string,
+    text: string,
+    turnId: string,
+    attachments?: readonly ComposerAttachment[],
+  ) => boolean;
   readonly rejectForTrail: (trailId: string) => boolean;
   readonly reject: (localSubmissionId: string) => boolean;
   readonly hasPending: () => boolean;
@@ -38,7 +50,7 @@ export function createOptimisticPromptEcho(
   };
 
   return {
-    echoIfIdle(interaction, trailId, text) {
+    echoIfIdle(interaction, trailId, text, attachments) {
       if (interaction.phase !== "idle" || interaction.queuedInputs.length > 0 || pending.length > 0)
         return undefined;
       sequence += 1;
@@ -48,22 +60,34 @@ export function createOptimisticPromptEcho(
         text,
       };
       pending.push(prompt);
-      view.dispatch({
-        type: "prompt-submitted",
-        text,
-        localSubmissionId: prompt.localSubmissionId,
-      });
+      view.dispatch(
+        createConditionalObject({
+          type: "prompt-submitted" as const,
+          text,
+          localSubmissionId: prompt.localSubmissionId,
+        })
+          .addOptional(
+            attachments
+              ? { attachments: attachments.map(({ name, mimeType }) => ({ name, mimeType })) }
+              : undefined,
+          )
+          .finish(),
+      );
       requestRender();
       return prompt.localSubmissionId;
     },
-    admit(trailId, text, turnId) {
+    admit(trailId, text, turnId, attachments) {
       const prompt = take((candidate) => candidate.trailId === trailId && candidate.text === text);
       if (!prompt) return false;
-      view.dispatch({
-        type: "prompt-admitted",
-        localSubmissionId: prompt.localSubmissionId,
-        turnId,
-      });
+      view.dispatch(
+        createConditionalObject({
+          type: "prompt-admitted" as const,
+          localSubmissionId: prompt.localSubmissionId,
+          turnId,
+        })
+          .addOptional(attachments ? { attachments } : undefined)
+          .finish(),
+      );
       return true;
     },
     rejectForTrail: (trailId) => rejectPrompt(take((prompt) => prompt.trailId === trailId)),

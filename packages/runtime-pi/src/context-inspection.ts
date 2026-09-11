@@ -1,3 +1,4 @@
+import { imageSafeJson } from "./image-input.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { brokerToolAlias, FOREGROUND_DIRECT_TOOL_NAMES, piBrokerToolDefinition } from "./broker-tools.ts";
 import { piExecuteToolDefinition, type PiFrozenToolCatalog } from "./execute-tool.ts";
@@ -66,7 +67,7 @@ export function requestContextComponents(input: {
         : message.role === "assistant"
           ? "Assistant messages & reasoning"
           : "Tool results & loaded skills";
-    groups.get(label)?.push(JSON.stringify("content" in message ? message.content : message));
+    groups.get(label)?.push(imageSafeJson("content" in message ? message.content : message));
   }
   return [...groups].map(([label, parts]) => {
     const content = parts.join("\n\n");

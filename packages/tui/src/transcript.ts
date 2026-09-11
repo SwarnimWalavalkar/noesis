@@ -1,3 +1,4 @@
+import { attachmentLabel } from "./attachment-label.ts";
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { isJsonObject, type JsonValue } from "@noesis/domain";
 import { EXECUTE_ACTION_NAME, formatCount, sourceOf, summarizeAction } from "./action-summary.ts";
@@ -29,7 +30,9 @@ export function renderMessageBlock(message: TuiMessage, width: number, colorEnab
   const bodyWidth = Math.max(1, width - visibleWidth(rail));
   const source = message.text || (message.role === "assistant" ? "…" : "");
   const renderedBody = renderRichText(source, bodyWidth, colorEnabled);
-  const body = renderedBody.length > 0 ? renderedBody : [""];
+  const attachments = attachmentLabel(message.attachments);
+  const body = [...renderedBody, ...(attachments ? [elideText(attachments, bodyWidth)] : [])];
+  if (body.length === 0) body.push("");
   return [
     styled(colorEnabled, `${ANSI.bold}${labelColor}`, shownLabel),
     ...body.map((line) =>
