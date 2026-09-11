@@ -1,11 +1,11 @@
 import { Worker, type WorkerOptions } from "node:worker_threads";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile, truncate } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, truncate, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PhotonImage } from "@silvia-odwyer/photon-node";
-import { COMPOSER_ATTACHMENT_LIMITS } from "@noesis/domain";
+import { COMPOSER_IMAGE_PROJECTION_LIMITS } from "@noesis/domain";
 import {
   attachmentImageDimensions,
   attachmentPath,
@@ -65,11 +65,17 @@ describe("explicit clipboard access", () => {
       .mockResolvedValueOnce(Buffer.from(input.data, "base64"));
     await expect(
       readClipboardAttachment({ platform: "linux", env: { WAYLAND_DISPLAY: "w", DISPLAY: ":0" }, run }),
-    ).resolves.toEqual([{ ...input, name: "clipboard.png" }]);
+    ).resolves.toMatchObject([
+      {
+        name: "clipboard.png",
+        mimeType: input.mimeType,
+        sourceSize: Buffer.byteLength(input.data, "base64"),
+      },
+    ]);
     expect(run).toHaveBeenCalledTimes(3);
   });
   it("reports empty or oversized clipboard output with /attach fallback", async () => {
-    for (const bytes of [Buffer.alloc(0), Buffer.alloc(COMPOSER_ATTACHMENT_LIMITS.perFileBytes + 1)]) {
+    for (const bytes of [Buffer.alloc(0), Buffer.alloc(COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes + 1)]) {
       await expect(
         readClipboardAttachment({ platform: "darwin", env: {}, run: async () => bytes }),
       ).rejects.toThrow("/attach");
@@ -87,7 +93,7 @@ describe("explicit clipboard access", () => {
       );
       const inputs = await readClipboardAttachment({ platform, env: {}, run });
       expect(inputs.map((input) => input.name)).toEqual(["résumé.pdf", "data.bin"]);
-      expect(inputs.map((input) => Buffer.from(input.data, "base64"))).toEqual(bytes);
+      expect(await Promise.all(inputs.map((input) => readFile(input.sourcePath)))).toEqual(bytes);
       expect(run).toHaveBeenCalledOnce();
       expect(run.mock.calls[0]).toEqual([
         clipboardFileCommand(
@@ -111,8 +117,8 @@ describe("explicit clipboard access", () => {
           ),
         );
       const inputs = await readClipboardAttachment({ platform: "linux", env: { DISPLAY: ":0" }, run });
-      expect(inputs).toEqual([
-        { name: "a #é.txt", mimeType: "text/plain", data: Buffer.from("original").toString("base64") },
+      expect(inputs).toMatchObject([
+        { name: "a #é.txt", mimeType: "text/plain", sourcePath: path, sourceSize: 8 },
       ]);
       expect(run).toHaveBeenCalledTimes(2);
     },
@@ -121,7 +127,7 @@ describe("explicit clipboard access", () => {
     const dir = await directory();
     const path = join(dir, "good.txt");
     await writeFile(path, "good");
-    for (const paths of [[path, join(dir, "missing.pdf")], [dir], Array.from({ length: 9 }, () => path)]) {
+    for (const paths of [[path, join(dir, "missing.pdf")], [dir]]) {
       const run = vi.fn(async (_command: import("../src/attachment-input.ts").ClipboardCommand) =>
         Buffer.from(JSON.stringify(paths)),
       );
@@ -135,8 +141,12 @@ describe("explicit clipboard access", () => {
       .fn()
       .mockResolvedValueOnce(Buffer.from("[]"))
       .mockResolvedValueOnce(Buffer.from(input.data, "base64"));
-    await expect(readClipboardAttachment({ platform: "darwin", env: {}, run })).resolves.toEqual([
-      { ...input, name: "clipboard.png" },
+    await expect(readClipboardAttachment({ platform: "darwin", env: {}, run })).resolves.toMatchObject([
+      {
+        name: "clipboard.png",
+        mimeType: input.mimeType,
+        sourceSize: Buffer.byteLength(input.data, "base64"),
+      },
     ]);
   });
   it("does not turn a failed file probe into an icon", async () => {
@@ -152,7 +162,7 @@ describe("explicit clipboard access", () => {
       runClipboardCommand({ ...command, args: ["-e", "process.stdout.write('!')"] }),
     ).rejects.toThrow("invalid image data");
     await expect(
-      runClipboardCommand({ ...command, args: ["-e", "process.stdout.write('A'.repeat(15*1024*1024))"] }),
+      runClipboardCommand({ ...command, args: ["-e", "process.stdout.write('A'.repeat(17*1024*1024))"] }),
     ).rejects.toThrow("failed or timed out");
     await expect(
       runClipboardCommand({ ...command, args: ["-e", "setInterval(()=>{},1000)"] }),
@@ -171,15 +181,21 @@ describe("attachment files", () => {
     const path = join(await directory(), " image with spaces ");
     const input = image();
     await writeFile(path, Buffer.from(input.data, "base64"));
-    await expect(readAttachmentPath(`"${path}"`)).resolves.toEqual({ ...input, name: " image with spaces " });
+    await expect(readAttachmentPath(`"${path}"`)).resolves.toMatchObject({
+      name: " image with spaces ",
+      mimeType: input.mimeType,
+      sourcePath: path,
+    });
   });
-  it("rejects empty, oversize, missing and non-regular files", async () => {
+  it("admits empty and large files but rejects missing and non-regular files", async () => {
     const dir = await directory();
     const path = join(dir, "file");
     await writeFile(path, "");
-    await expect(readAttachmentPath(path)).rejects.toThrow("empty");
-    await truncate(path, COMPOSER_ATTACHMENT_LIMITS.perFileBytes + 1);
-    await expect(readAttachmentPath(path)).rejects.toThrow("10 MiB");
+    await expect(readAttachmentPath(path)).resolves.toMatchObject({ sourceSize: 0 });
+    await truncate(path, COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes + 1);
+    await expect(readAttachmentPath(path)).resolves.toMatchObject({
+      sourceSize: COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes + 1,
+    });
     await expect(readAttachmentPath(dir)).rejects.toThrow("regular file");
     await expect(readAttachmentPath(join(dir, "missing"))).rejects.toThrow();
   });
@@ -262,4 +278,96 @@ describe("image preparation", () => {
       }),
     ).rejects.toThrow();
   });
+});
+
+it("falls back to X11 after an inspected Wayland PNG read fails", async () => {
+  const input = image();
+  const run = vi
+    .fn()
+    .mockResolvedValueOnce(Buffer.from("image/png"))
+    .mockRejectedValueOnce(new Error("clipboard changed"))
+    .mockResolvedValueOnce(Buffer.from("image/png"))
+    .mockResolvedValueOnce(Buffer.from(input.data, "base64"));
+  await expect(
+    readClipboardAttachment({
+      platform: "linux",
+      env: { WAYLAND_DISPLAY: "w", DISPLAY: ":0" },
+      run,
+    }),
+  ).resolves.toMatchObject([
+    { name: "clipboard.png", mimeType: input.mimeType, sourceSize: Buffer.byteLength(input.data, "base64") },
+  ]);
+  expect(run).toHaveBeenCalledTimes(4);
+});
+
+it("never substitutes another backend image after a selected file representation fails", async () => {
+  const run = vi
+    .fn()
+    .mockResolvedValueOnce(Buffer.from("text/uri-list\nimage/png"))
+    .mockRejectedValueOnce(new Error("unreadable file references"))
+    .mockResolvedValueOnce(Buffer.from("image/png"));
+  await expect(
+    readClipboardAttachment({
+      platform: "linux",
+      env: { WAYLAND_DISPLAY: "w", DISPLAY: ":0" },
+      run,
+    }),
+  ).rejects.toThrow("file references could not be read");
+  expect(run).toHaveBeenCalledTimes(3);
+});
+
+it("cancels queued payloads immediately, bounds backlog and terminates obsolete active workers", async () => {
+  const createWorker = vi.fn(() => new Worker("setInterval(() => {}, 1000)", { eval: true, execArgv: [] }));
+  const active = new AbortController();
+  const running = createAttachmentThumbnail(image(), { createWorker, signal: active.signal }).catch(
+    () => "cancelled",
+  );
+  const input = image();
+  for (let index = 0; index < 100; index++) {
+    const controller = new AbortController();
+    const cancelled = createAttachmentThumbnail(input, { createWorker, signal: controller.signal });
+    controller.abort();
+    await expect(cancelled).rejects.toThrow("cancelled");
+  }
+  expect(createWorker).toHaveBeenCalledOnce();
+  const large = { ...input, data: Buffer.alloc(10 * 1024 * 1024).toString("base64") };
+  const largeController = new AbortController();
+  const largeQueued = createAttachmentThumbnail(large, { createWorker, signal: largeController.signal });
+  await expect(createAttachmentThumbnail(large, { createWorker })).rejects.toThrow("queue is full");
+  largeController.abort();
+  await expect(largeQueued).rejects.toThrow("cancelled");
+  const queued = Array.from({ length: 8 }, () => {
+    const controller = new AbortController();
+    const result = createAttachmentThumbnail(input, { createWorker, signal: controller.signal }).catch(
+      () => "cancelled",
+    );
+    return { controller, result };
+  });
+  await expect(createAttachmentThumbnail(input, { createWorker })).rejects.toThrow("queue is full");
+  for (const job of queued) job.controller.abort();
+  await Promise.all(queued.map((job) => job.result));
+  active.abort();
+  expect(await running).toBe("cancelled");
+  expect(createWorker).toHaveBeenCalledOnce();
+  await expect(createAttachmentThumbnail(input)).resolves.toMatchObject({ width: 2, height: 1 });
+});
+
+it("tries X11 file references when Wayland advertises files but cannot provide them", async () => {
+  const path = join(await directory(), "copied.txt");
+  await writeFile(path, "original");
+  const { pathToFileURL } = await import("node:url");
+  const run = vi
+    .fn()
+    .mockResolvedValueOnce(Buffer.from("text/uri-list\nimage/png"))
+    .mockRejectedValueOnce(new Error("clipboard data unavailable"))
+    .mockResolvedValueOnce(Buffer.from("text/uri-list\nimage/png"))
+    .mockResolvedValueOnce(Buffer.from(pathToFileURL(path).href));
+  await expect(
+    readClipboardAttachment({
+      platform: "linux",
+      env: { WAYLAND_DISPLAY: "w", DISPLAY: ":0" },
+      run,
+    }),
+  ).resolves.toMatchObject([{ name: "copied.txt", mimeType: "text/plain", sourcePath: path, sourceSize: 8 }]);
+  expect(run).toHaveBeenCalledTimes(4);
 });

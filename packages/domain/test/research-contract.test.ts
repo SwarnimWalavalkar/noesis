@@ -183,6 +183,7 @@ function createFakeWorkspaceStore(): WorkspaceStore {
         if (!bytes) throw new Error(`Missing evidence: ${ref.revisionId}`);
         return copy(bytes);
       },
+      inspectArtifact: async () => ({ byteLength: 0, contentDigest: "" }),
       readArtifact: async () => encoder.encode("fake artifact"),
     }),
     definitions: Object.freeze({

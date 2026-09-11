@@ -69,10 +69,17 @@ test("live composer reads an explicit image, keeps failed admission draft, and r
     expect(terminal.output).not.toContain("draft retained");
     admission.resolve();
     await vi.waitFor(() => expect(terminal.output).toContain("draft retained"));
-    expect(submit.mock.calls[0]?.[1]).toEqual({
+    expect(submit.mock.calls[0]?.[1]).toMatchObject({
       type: "submit",
       text: "inspect this",
-      attachments: [{ name: "photo.png", mimeType: "image/png", data: png }],
+      attachments: [
+        {
+          name: "photo.png",
+          mimeType: "image/png",
+          sourcePath: path,
+          sourceSize: Buffer.byteLength(png, "base64"),
+        },
+      ],
     });
     terminal.send("\r");
     await vi.waitFor(() => expect(submit).toHaveBeenCalledTimes(2));

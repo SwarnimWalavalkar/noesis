@@ -1064,6 +1064,7 @@ export interface AgentRuntimeRequest {
   /** Prior conversation preserved at its original instruction level. */
   readonly history?: readonly {
     readonly attachmentText?: string;
+    readonly omittedImageArtifactIds?: readonly string[];
     readonly images?: readonly AgentRuntimeImage[];
     readonly attachments?: readonly ComposerAttachment[] | undefined;
     readonly role: "user" | "assistant";
@@ -1121,6 +1122,7 @@ export interface AgentReasoningBoundary {
   readonly createdAt: string;
 }
 export type AgentRuntimeEvent =
+  | { readonly type: "notice"; readonly text: string }
   | {
       readonly type: "delta";
       readonly text: string;

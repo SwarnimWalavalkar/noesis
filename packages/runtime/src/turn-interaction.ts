@@ -2,7 +2,7 @@ import {
   createConditionalObject,
   ComposerAttachmentsSchema,
   type ComposerAttachment,
-  type ComposerAttachmentInput,
+  type ComposerDraftAttachment,
 } from "@noesis/domain";
 import type { AgentRuntimeEvent, AgentSteerResult, AgentThinkingLevel } from "@noesis/agent-types";
 import type { UserIntentRecord } from "@noesis/workspace";
@@ -10,12 +10,12 @@ export type InteractionCommand =
   | {
       readonly type: "submit";
       readonly text: string;
-      readonly attachments?: readonly (ComposerAttachmentInput | ComposerAttachment)[];
+      readonly attachments?: readonly ComposerDraftAttachment[];
     }
   | {
       readonly type: "enqueue";
       readonly text: string;
-      readonly attachments?: readonly (ComposerAttachmentInput | ComposerAttachment)[];
+      readonly attachments?: readonly ComposerDraftAttachment[];
     }
   | {
       readonly type: "reroute-pending";
@@ -25,7 +25,7 @@ export type InteractionCommand =
   | {
       readonly type: "steer";
       readonly text?: string;
-      readonly attachments?: readonly (ComposerAttachmentInput | ComposerAttachment)[];
+      readonly attachments?: readonly ComposerDraftAttachment[];
     }
   | {
       readonly type: "restore-newest";
@@ -234,7 +234,8 @@ export interface TurnInteractionControllerOptions {
   readonly intents: TurnInteractionIntentStore;
   readonly prepareAttachments?: (
     sessionId: string,
-    inputs: readonly (ComposerAttachmentInput | ComposerAttachment)[],
+    inputs: readonly ComposerDraftAttachment[],
+    signal?: AbortSignal,
   ) => Promise<readonly ComposerAttachment[]>;
   readonly createIntentId: () => string;
   readonly createTurnId: () => string;
@@ -290,6 +291,7 @@ interface SessionInteractionState {
   steerDeliveries: Set<Promise<InteractionDispatchResult>>;
   steerDeliveryTail: Promise<void>;
   steerReadiness?: TurnSteerReadiness;
+  preparation?: AbortController;
   cancelScheduled?: () => void;
   wakeRequested: boolean;
   resumeGeneration: number;
@@ -706,6 +708,7 @@ export function createTurnInteractionController(
     if (command.type === "steer" && command.text === undefined && command.attachments?.length)
       command = { ...command, text: "" };
     const state = stateFor(sessionId);
+    if (command.type === "interrupt") state.preparation?.abort();
     if (dispatchOptions.onEvent) {
       if (observedSessionId && observedSessionId !== sessionId) delete stateFor(observedSessionId).observer;
       observedSessionId = sessionId;
@@ -721,12 +724,20 @@ export function createTurnInteractionController(
     const serialized = await serialize<SerializedDispatch>(state, async () => {
       await ensureRecovered(sessionId, state);
       const attachmentInputs = "attachments" in command ? (command.attachments ?? []) : [];
-      const attachments =
-        attachmentInputs.length === 0
-          ? []
-          : options.prepareAttachments
-            ? await options.prepareAttachments(sessionId, attachmentInputs)
+      if (closed) throw new Error("Turn interaction controller is closed");
+      let attachments: readonly ComposerAttachment[] = [];
+      if (attachmentInputs.length) {
+        const preparation = new AbortController();
+        state.preparation = preparation;
+        try {
+          attachments = options.prepareAttachments
+            ? await options.prepareAttachments(sessionId, attachmentInputs, preparation.signal)
             : ComposerAttachmentsSchema.parse(attachmentInputs);
+          preparation.signal.throwIfAborted();
+        } finally {
+          delete state.preparation;
+        }
+      }
       if (command.type === "submit" || command.type === "enqueue") {
         if (!command.text.trim() && attachments.length === 0)
           throw new Error("Cannot queue an empty message");
@@ -780,6 +791,7 @@ export function createTurnInteractionController(
       }
       if (command.type === "pause-queue") {
         const queueWasHeld = state.queuePaused && (await snapshot(sessionId, state)).pending.length > 0;
+        state.preparation?.abort();
         state.queuePaused = true;
         state.cancellationGeneration += 1;
         state.cancelScheduled?.();
@@ -844,6 +856,7 @@ export function createTurnInteractionController(
       }
       if (command.type === "interrupt") {
         if (!command.turnId) throw new Error("Interrupt requires a visible active turn identity");
+        state.preparation?.abort();
         state.queuePaused = true;
         state.cancellationGeneration += 1;
         state.cancelScheduled?.();
@@ -1103,6 +1116,7 @@ export function createTurnInteractionController(
       const interruptFailures: unknown[] = [];
       const interrupts: Promise<void>[] = [];
       for (const [sessionId, state] of sessions) {
+        state.preparation?.abort();
         state.queuePaused = true;
         state.cancellationGeneration += 1;
         state.cancelScheduled?.();

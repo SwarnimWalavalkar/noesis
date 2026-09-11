@@ -49,7 +49,7 @@ function fixture(
 }
 
 describe("attachment composer", () => {
-  test("clipboard batches submit together and overflow fails atomically", async () => {
+  test("clipboard batches larger than eight submit together without admission caps", async () => {
     const f = fixture();
     const second = { ...file, name: "second.pdf", mimeType: "application/pdf" };
     f.readClipboard.mockResolvedValueOnce([file, second]);
@@ -63,9 +63,14 @@ describe("attachment composer", () => {
     f.readClipboard.mockResolvedValueOnce(Array.from({ length: 9 }, () => file));
     f.composer.handleKey("\u0016");
     await settle();
-    expect(f.composer.render(100).join(" ")).toContain("failed");
-    f.enter("blocked");
-    expect(f.submit).toHaveBeenCalledTimes(1);
+    f.enter("/attachments 2");
+    expect(f.notice.mock.calls.map(([text]) => text).join("\n")).toContain("9. notes.txt");
+    f.enter("/detach 9");
+    f.enter("all files");
+    expect(f.submit).toHaveBeenLastCalledWith(
+      "all files",
+      Array.from({ length: 8 }, () => file),
+    );
   });
   test("ordinary paths remain text; explicit attachment-only messages submit", async () => {
     const read = vi.fn(async () => file);
@@ -141,7 +146,7 @@ describe("attachment composer", () => {
     expect(f.composer.handleKey("x")).toBe(false);
     for (let index = 0; index < 9; index++) f.composer.handleKey("\u0016");
     await settle();
-    expect(f.readClipboard).toHaveBeenCalledTimes(8);
+    expect(f.readClipboard).toHaveBeenCalledTimes(9);
     f.composer.restore([{ ...file, name: "evil\u001b[2J\nlabel" }]);
     const rendered = f.composer.render(20, false);
     expect(rendered).toHaveLength(1);

@@ -20,6 +20,7 @@ export function tuiActionForAgentEvent(
   event: Exclude<AgentRuntimeEvent, { readonly type: "delta" } | { readonly type: "reasoning-delta" }>,
   at = Date.now(),
 ): NoesisTuiAction | undefined {
+  if (event.type === "notice") return { type: "system-message", text: safeTerminalText(event.text) };
   if (event.type === "tool-start") {
     const identity = actionIdentityForView(event);
     return {

@@ -45,6 +45,7 @@ import {
   type CapabilityRevision,
   type CapabilityRevisionRef,
   type ComposerAttachment,
+  COMPOSER_IMAGE_PROJECTION_LIMITS,
   canonicalJson,
   capabilityRevisionRef,
   createId,
@@ -95,7 +96,7 @@ import {
   loadRuntimeTranscript,
   composerAttachmentsFromMetadata,
   persistComposerAttachments,
-  resolveComposerAttachmentImages,
+  projectComposerAttachmentImages,
   renderComposerAttachmentText,
   type NoesisRuntime,
   prepareCompactionWindow,
@@ -5866,6 +5867,26 @@ export async function createApplicationRuntimeComposition(
                       readonly error: unknown;
                     };
                 try {
+                  const budget = { remainingBytes: COMPOSER_IMAGE_PROJECTION_LIMITS.totalBytes };
+                  const validateImages = (images: readonly { mimeType: string; data: string }[]) => {
+                    if (!agent.validateImages) throw new Error("This runtime does not support inline images");
+                    agent.validateImages(plan.provider, plan.model, images);
+                  };
+                  const projection = await projectComposerAttachmentImages(
+                    workspace,
+                    attachments,
+                    budget,
+                    validateImages,
+                  );
+                  const publishNotice = (text: string) => emit({ type: "notice", text });
+                  if (projection.notice) publishNotice(projection.notice);
+                  const history = await resolveAttachmentHistory(
+                    workspace,
+                    plan,
+                    budget,
+                    validateImages,
+                    publishNotice,
+                  );
                   agentOutcome = {
                     status: "completed",
                     result: await agent.run(
@@ -5876,9 +5897,13 @@ export async function createApplicationRuntimeComposition(
                         thinkingLevel: plan.thinkingLevel,
                         systemPrompt: plan.renderedSystemPrompt,
                         prompt: input,
-                        images: await resolveComposerAttachmentImages(workspace, attachments),
-                        attachmentText: renderComposerAttachmentText("", attachments, workspace.paths.root),
-                        history: await resolveAttachmentHistory(workspace, plan),
+                        images: projection.images,
+                        attachmentText: renderComposerAttachmentText(
+                          projection.notice,
+                          attachments,
+                          workspace.paths.root,
+                        ),
+                        history,
                         activeCapabilities: plan.selectedCapabilities.map((selection) => ({
                           name: selection.name,
                           version: plan.activationRevision,
@@ -5981,15 +6006,9 @@ export async function createApplicationRuntimeComposition(
     intents: workspace.operational.userIntents,
     createIntentId: () => createId("intent"),
     createTurnId: () => createId("turn"),
-    prepareAttachments: async (sessionId, inputs) => {
-      const trail = getTrail(sessionId);
-      return await persistComposerAttachments(workspace, sessionId, inputs, (resolved) => {
-        const images = resolved.filter((input) => input.mimeType.startsWith("image/"));
-        if (images.length > 0) {
-          if (!agent.validateImages) throw new Error("This runtime does not support image attachments");
-          agent.validateImages(trail.provider, trail.model, images);
-        }
-      });
+    prepareAttachments: async (sessionId, inputs, signal) => {
+      getTrail(sessionId);
+      return await persistComposerAttachments(workspace, sessionId, inputs, signal);
     },
     runTurn: async ({
       sessionId,
@@ -6026,11 +6045,24 @@ export async function createApplicationRuntimeComposition(
       }
     },
     steer: async (sessionId, text, attachments = []) => {
-      const images = await resolveComposerAttachmentImages(workspace, attachments);
+      const trail = getTrail(sessionId);
+      const projection = await projectComposerAttachmentImages(
+        workspace,
+        attachments,
+        undefined,
+        (images) => {
+          if (!agent.validateImages) throw new Error("This runtime does not support inline images");
+          agent.validateImages(trail.provider, trail.model, images);
+        },
+      );
       return await agent.steer(
         sessionId,
-        renderComposerAttachmentText(text, attachments, workspace.paths.root),
-        images,
+        renderComposerAttachmentText(
+          [text, projection.notice].filter(Boolean).join("\n"),
+          attachments,
+          workspace.paths.root,
+        ),
+        projection.images,
       );
     },
     recordSteerDelivery: async ({

@@ -251,9 +251,16 @@ function historyForRequest(
   }
   return frozen.map((entry, index) => {
     const images = request.history?.[index]?.images ?? [];
-    const expected = (entry.attachments ?? []).filter((attachment) =>
+    const omitted = request.history?.[index]?.omittedImageArtifactIds ?? [];
+    const imageRefs = (entry.attachments ?? []).filter((attachment) =>
       attachment.mimeType.startsWith("image/"),
     );
+    if (
+      new Set(omitted).size !== omitted.length ||
+      omitted.some((id) => !imageRefs.some((ref) => ref.artifact.artifactId === id))
+    )
+      throw new Error(`Runtime history omissions do not match frozen turn plan ${plan.planId}`);
+    const expected = imageRefs.filter((attachment) => !omitted.includes(attachment.artifact.artifactId));
     if (
       images.length !== expected.length ||
       images.some((image, i) => image.mimeType !== expected[i]?.mimeType)

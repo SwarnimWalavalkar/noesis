@@ -1,19 +1,14 @@
+import { captureClipboardToFile, disposeAttachmentInput } from "./attachment-capture.ts";
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
-import { getImageDimensions } from "@earendil-works/pi-tui";
-import {
-  COMPOSER_ATTACHMENT_LIMITS,
-  validateComposerAttachmentInputs,
-  type ComposerAttachmentInput,
-} from "@noesis/domain";
+import { type ComposerFileInput } from "@noesis/domain";
 
 export const ATTACHMENT_INPUT_TIMEOUT_MS = 3_000;
-export const MAX_IMAGE_PIXELS = 16_000_000;
-export const MAX_IMAGE_DIMENSION = 16_384;
+export { attachmentImageDimensions, MAX_IMAGE_PIXELS, MAX_IMAGE_DIMENSION } from "@noesis/domain";
 const fallback = "Use /attach <path> instead.";
 export type ClipboardCommand = Readonly<{
   command: string;
@@ -145,7 +140,8 @@ export function runClipboardCommand(command: ClipboardCommand): Promise<Buffer> 
       {
         encoding: "buffer",
         timeout: ATTACHMENT_INPUT_TIMEOUT_MS,
-        maxBuffer: 4 * Math.ceil(COMPOSER_ATTACHMENT_LIMITS.perFileBytes / 3) + 1024,
+        // File-reference metadata only; image pixels are spooled with backpressure.
+        maxBuffer: 16 * 1024 * 1024,
         windowsHide: true,
         killSignal: "SIGKILL",
       },
@@ -170,24 +166,7 @@ export function runClipboardCommand(command: ClipboardCommand): Promise<Buffer> 
   });
 }
 
-export function attachmentImageDimensions(input: ComposerAttachmentInput): { width: number; height: number } {
-  const dimensions = getImageDimensions(input.data, input.mimeType);
-  if (
-    !dimensions ||
-    dimensions.widthPx < 1 ||
-    dimensions.heightPx < 1 ||
-    dimensions.widthPx > MAX_IMAGE_DIMENSION ||
-    dimensions.heightPx > MAX_IMAGE_DIMENSION ||
-    dimensions.widthPx * dimensions.heightPx > MAX_IMAGE_PIXELS
-  )
-    throw new Error("Image dimensions are invalid or exceed the 16 megapixel preview limit.");
-  return { width: dimensions.widthPx, height: dimensions.heightPx };
-}
-
-function prepare(name: string, bytes: Buffer): ComposerAttachmentInput {
-  if (!bytes.length) throw new Error("Attachment is empty.");
-  if (bytes.length > COMPOSER_ATTACHMENT_LIMITS.perFileBytes)
-    throw new Error("Attachment exceeds the 10 MiB file limit.");
+function attachmentMimeType(name: string, bytes: Buffer): string {
   let mimeType = "application/octet-stream";
   if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) mimeType = "image/png";
   else if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) mimeType = "image/jpeg";
@@ -199,10 +178,7 @@ function prepare(name: string, bytes: Buffer): ComposerAttachmentInput {
     mimeType = "image/webp";
   else if (extname(name).toLowerCase() === ".txt") mimeType = "text/plain";
   else if (extname(name).toLowerCase() === ".pdf") mimeType = "application/pdf";
-  const input = { name, mimeType, data: bytes.toString("base64") };
-  validateComposerAttachmentInputs([input]);
-  if (mimeType.startsWith("image/")) attachmentImageDimensions(input);
-  return input;
+  return mimeType;
 }
 
 export async function readClipboardAttachment(
@@ -210,10 +186,13 @@ export async function readClipboardAttachment(
     platform?: NodeJS.Platform;
     env?: NodeJS.ProcessEnv;
     run?: (command: ClipboardCommand) => Promise<Buffer>;
+    signal?: AbortSignal;
   } = {},
-): Promise<readonly ComposerAttachmentInput[]> {
+): Promise<readonly ComposerFileInput[]> {
+  options.signal?.throwIfAborted();
   const commands = clipboardCommands(options.platform ?? process.platform, options.env ?? process.env);
   const run = options.run ?? runClipboardCommand;
+  let requireFiles = false;
   for (const command of commands) {
     let probe: Buffer;
     try {
@@ -226,6 +205,7 @@ export async function readClipboardAttachment(
         `Could not inspect clipboard files: ${error instanceof Error ? error.message : "unknown error"} ${fallback}`,
       );
     }
+    let selectedFileRepresentation = requireFiles;
     try {
       let paths: readonly string[];
       if (command.command === "osascript" || command.command === "powershell.exe")
@@ -235,39 +215,56 @@ export async function readClipboardAttachment(
         const type = ["x-special/gnome-copied-files", "text/uri-list"].find((candidate) =>
           types.includes(candidate),
         );
-        paths = type
-          ? uriPaths(
-              await run({
-                ...command,
-                args:
-                  command.command === "wl-paste"
-                    ? ["--no-newline", "--type", type]
-                    : ["-selection", "clipboard", "-t", type, "-o"],
-              }),
-              type === "x-special/gnome-copied-files",
-            )
-          : [];
+        if (type) {
+          requireFiles = true;
+          selectedFileRepresentation = true;
+          let references: Buffer;
+          try {
+            references = await run({
+              ...command,
+              args:
+                command.command === "wl-paste"
+                  ? ["--no-newline", "--type", type]
+                  : ["-selection", "clipboard", "-t", type, "-o"],
+            });
+          } catch (error) {
+            // Another backend may supply the original file references, but an icon
+            // can never substitute for an advertised file representation.
+            if (command !== commands.at(-1)) continue;
+            throw error;
+          }
+          paths = uriPaths(references, type === "x-special/gnome-copied-files");
+        } else paths = [];
       }
       if (paths.length) {
-        if (paths.length > COMPOSER_ATTACHMENT_LIMITS.count)
-          throw new Error("Up to 8 attachments per message.");
-        const inputs: ComposerAttachmentInput[] = [];
+        selectedFileRepresentation = true;
+        const inputs: ComposerFileInput[] = [];
         for (const path of paths) {
           try {
+            options.signal?.throwIfAborted();
             inputs.push(await readAttachmentFile(path));
           } catch (error) {
             throw new Error(
               `Could not read copied file ${path}: ${error instanceof Error ? error.message : "unknown error"}`,
             );
           }
-          validateComposerAttachmentInputs(inputs);
         }
         return inputs;
       }
-      const input = prepare("clipboard.png", await run(command));
-      if (input.mimeType !== "image/png") throw new Error("Clipboard did not contain PNG image data.");
+      if (requireFiles) throw new Error("Clipboard file references could not be read from any backend.");
+      const capturedPath = await captureClipboardToFile(
+        command,
+        options.signal,
+        options.run ? await run(command) : undefined,
+      );
+      const input = await readAttachmentFile(capturedPath);
+      if (input.mimeType !== "image/png") {
+        await disposeAttachmentInput(input);
+        throw new Error("Clipboard did not contain PNG image data.");
+      }
       return [input];
     } catch (error) {
+      if (!selectedFileRepresentation && command !== commands.at(-1)) continue;
       throw new Error(
         `Could not read clipboard attachment: ${error instanceof Error ? error.message : "unknown error"} ${fallback}`,
       );
@@ -288,27 +285,30 @@ export function attachmentPath(value: string): string {
   return path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
-export async function readAttachmentPath(value: string): Promise<ComposerAttachmentInput> {
+export async function readAttachmentPath(value: string): Promise<ComposerFileInput> {
   return readAttachmentFile(attachmentPath(value));
 }
 
-async function readAttachmentFile(path: string): Promise<ComposerAttachmentInput> {
+async function readAttachmentFile(path: string): Promise<ComposerFileInput> {
   // O_NONBLOCK prevents FIFO open hangs; fstat checks the opened object, not a racy pathname.
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
   try {
     const stat = await file.stat();
     if (!stat.isFile()) throw new Error("Attachment must be a regular file.");
-    if (stat.size > COMPOSER_ATTACHMENT_LIMITS.perFileBytes)
-      throw new Error("Attachment exceeds the 10 MiB file limit.");
-    const bytes = Buffer.alloc(Math.min(stat.size + 1, COMPOSER_ATTACHMENT_LIMITS.perFileBytes + 1));
-    let length = 0;
-    while (length < bytes.length) {
-      const result = await file.read(bytes, length, bytes.length - length, length);
-      if (!result.bytesRead) break;
-      length += result.bytesRead;
-    }
-    if (length !== stat.size) throw new Error("Attachment changed while being read; please retry.");
-    return prepare(basename(path), bytes.subarray(0, length));
+    // Only sniff a small header; source bytes stay on disk until streamed admission.
+    const header = Buffer.alloc(Math.min(stat.size, 64 * 1024));
+    const read = await file.read(header, 0, header.length, 0);
+    const name = basename(path);
+    return {
+      name,
+      mimeType: attachmentMimeType(name, header.subarray(0, read.bytesRead)),
+      sourcePath: path,
+      sourceSize: stat.size,
+      sourceMtimeMs: stat.mtimeMs,
+      sourceCtimeMs: stat.ctimeMs,
+      sourceIno: stat.ino,
+      sourceDev: stat.dev,
+    };
   } finally {
     await file.close();
   }

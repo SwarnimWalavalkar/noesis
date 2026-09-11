@@ -2,9 +2,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import {
-  COMPOSER_ATTACHMENT_LIMITS,
+  COMPOSER_IMAGE_PROJECTION_LIMITS,
   composerContentDigest,
   validateComposerAttachmentInputs,
 } from "@noesis/domain";
@@ -47,20 +47,18 @@ async function setup() {
     });
   return { root, workspace };
 }
-test("validates bounds, canonical base64, safe names, image signatures and empty files", () => {
+test("validates canonical base64 and safe names without count/byte admission caps", () => {
   expect(validateComposerAttachmentInputs([{ ...input, data: "" }])).toHaveLength(1);
   expect(() => validateComposerAttachmentInputs([{ ...input, data: "Zh==" }])).toThrow();
   expect(() => validateComposerAttachmentInputs([{ ...input, name: "../escape" }])).toThrow();
-  expect(() => validateComposerAttachmentInputs([{ ...input, mimeType: "image/png" }])).toThrow(
-    /invalid image/,
-  );
-  expect(() => validateComposerAttachmentInputs(Array.from({ length: 9 }, () => input))).toThrow();
+  expect(validateComposerAttachmentInputs([{ ...input, mimeType: "image/png" }])).toHaveLength(1);
+  expect(validateComposerAttachmentInputs(Array.from({ length: 9 }, () => input))).toHaveLength(9);
   const nearLimit = {
     ...input,
-    data: Buffer.alloc(COMPOSER_ATTACHMENT_LIMITS.perFileBytes).toString("base64"),
+    data: Buffer.alloc(COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes).toString("base64"),
   };
   expect(validateComposerAttachmentInputs([nearLimit])).toHaveLength(1);
-  expect(() => validateComposerAttachmentInputs([nearLimit, nearLimit, input])).toThrow(/total byte/);
+  expect(validateComposerAttachmentInputs([nearLimit, nearLimit, input])).toHaveLength(3);
 });
 test("persists immutable bytes, validates restored refs and rejects corruption or oversized reads", async () => {
   const { root, workspace } = await setup();
@@ -78,9 +76,10 @@ test("persists immutable bytes, validates restored refs and rejects corruption o
     persistComposerAttachments(workspace, "source", [
       { ...first, artifact: { ...first.artifact, path: "forged" } },
     ]),
-  ).rejects.toThrow(/authoritative/);
+  ).rejects.toThrow(/artifact reference/);
   await writeFile(join(root, first.artifact.path), "changed");
-  await expect(persistComposerAttachments(workspace, "source", [first])).rejects.toThrow(/digest mismatch/);
+  expect(await persistComposerAttachments(workspace, "source", [first])).toEqual([first]);
+  await expect(workspace.reads.readArtifact(first.artifact, 100)).rejects.toThrow(/digest mismatch/);
   await workspace.close();
 });
 test("attachment-only queue survives reopening, reroutes in order, and restores exact text plus refs", async () => {
@@ -147,3 +146,27 @@ test.skipIf(process.platform === "win32")(
     await workspace.close();
   },
 );
+
+test("image resolution never reads generic artifacts, but validates MIME references", async () => {
+  const { workspace } = await setup();
+  try {
+    const refs = await persistComposerAttachments(workspace, "source", [input, png]);
+    const readArtifact = vi.fn(workspace.reads.readArtifact);
+    const instrumented = { ...workspace, reads: { ...workspace.reads, readArtifact } };
+    expect(await resolveComposerAttachmentImages(instrumented, refs)).toEqual([
+      { mimeType: png.mimeType, data: png.data },
+    ]);
+    expect(readArtifact).toHaveBeenCalledTimes(1);
+    expect(readArtifact).toHaveBeenCalledWith(
+      refs[1]?.artifact,
+      COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes,
+    );
+    const generic = refs[0];
+    if (!generic) throw new Error("Missing generic fixture");
+    await expect(
+      resolveComposerAttachmentImages(instrumented, [{ ...generic, mimeType: "application/pdf" }]),
+    ).rejects.toThrow("MIME differs");
+  } finally {
+    await workspace.close();
+  }
+});

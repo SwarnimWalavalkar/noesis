@@ -124,7 +124,7 @@ export async function startNoesisTui(
       tui.requestRender();
     },
     readPath: readAttachmentPath,
-    readClipboard: readClipboardAttachment,
+    readClipboard: (signal) => readClipboardAttachment(signal ? { signal } : {}),
     preview: (attachment) =>
       createAttachmentPreview(attachment, () => tui.requestRender(), terminal instanceof ProcessTerminal),
     canSubmit: () => phase === "main" && !exclusiveCommands?.activeWork(),

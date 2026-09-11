@@ -113,6 +113,7 @@ export const NOESIS_SLASH_COMMANDS = [
     description: "Attach a file or image (Ctrl+V reads copied files or images)",
     argumentHint: "<path>",
   },
+  { name: "attachments", description: "Inspect a page of draft attachments", argumentHint: "[page]" },
   { name: "detach", description: "Remove a composer attachment", argumentHint: "<number|all>" },
   {
     name: "help",

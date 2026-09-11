@@ -1,7 +1,9 @@
-import { COMPOSER_ATTACHMENT_LIMITS, ComposerAttachmentsSchema, composerContentDigest } from "@noesis/domain";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import { ComposerAttachmentsSchema, composerContentDigest } from "@noesis/domain";
 import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants, createReadStream } from "node:fs";
+import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import { copyFile, link, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -530,10 +532,11 @@ export async function createWorkspaceStore(
   };
   const inspectFile = async (
     path: string,
+    signal?: AbortSignal,
   ): Promise<{ readonly byteLength: number; readonly contentDigest: string }> => {
     const hash = createHash("sha256");
     let byteLength = 0;
-    for await (const chunk of createReadStream(path)) {
+    for await (const chunk of createReadStream(path, signal ? { signal } : {})) {
       const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       hash.update(bytes);
       byteLength += bytes.byteLength;
@@ -543,14 +546,46 @@ export async function createWorkspaceStore(
   const persistFileAtomically = async (
     path: string,
     sourcePath: string,
+    request?: ArtifactImportRequest,
   ): Promise<{ readonly byteLength: number; readonly contentDigest: string }> => {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
     try {
-      await copyFile(sourcePath, temporary);
-      const inspected = await inspectFile(temporary);
+      request?.signal?.throwIfAborted();
+      const source = await open(sourcePath, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK);
       try {
-        const existing = await inspectFile(path);
+        const before = await source.stat();
+        if (!before.isFile()) throw new Error("Artifact source must be a regular file");
+        const expected = request?.expectedSource;
+        if (
+          expected &&
+          (expected.byteLength !== before.size ||
+            expected.mtimeMs !== before.mtimeMs ||
+            expected.ctimeMs !== before.ctimeMs ||
+            expected.ino !== before.ino ||
+            expected.dev !== before.dev)
+        )
+          throw new Error("Attachment changed since selection; detach and attach it again.");
+        await pipeline(
+          before.size
+            ? source.createReadStream({ autoClose: false, start: 0, end: before.size - 1 })
+            : Readable.from([]),
+          createWriteStream(temporary, { flags: "wx", mode: 0o600 }),
+          request?.signal ? { signal: request.signal } : {},
+        );
+        const after = await source.stat();
+        if (
+          after.size !== before.size ||
+          after.mtimeMs !== before.mtimeMs ||
+          after.ctimeMs !== before.ctimeMs
+        )
+          throw new Error("Artifact source changed while being imported");
+      } finally {
+        await source.close();
+      }
+      const inspected = await inspectFile(temporary, request?.signal);
+      try {
+        const existing = await inspectFile(path, request?.signal);
         if (existing.contentDigest !== inspected.contentDigest)
           throw new Error(`Artifact path already contains different bytes: ${path}`);
         return inspected;
@@ -567,7 +602,7 @@ export async function createWorkspaceStore(
         await link(temporary, path);
       } catch (error) {
         if (!isAlreadyExists(error)) throw error;
-        const existing = await inspectFile(path);
+        const existing = await inspectFile(path, request?.signal);
         if (existing.contentDigest !== inspected.contentDigest)
           throw new Error(`Artifact path already contains different bytes: ${path}`);
         return existing;
@@ -857,7 +892,7 @@ export async function createWorkspaceStore(
     for (const ref of request.relationshipRefs) assertStoredReference(db, ref);
     const artifactAbsolute = pathInside(paths.artifacts, request.path);
     const storedPath = workspaceRelative(paths, artifactAbsolute);
-    const inspected = await persistFileAtomically(artifactAbsolute, request.sourcePath);
+    const inspected = await persistFileAtomically(artifactAbsolute, request.sourcePath, request);
     return recordArtifact(request, storedPath, inspected.byteLength, inspected.contentDigest);
   };
   const readVerifiedFile = async (storedPath: string, expectedDigest?: string): Promise<Uint8Array> => {
@@ -1565,6 +1600,18 @@ export async function createWorkspaceStore(
         )
           throw new Error(`Evidence reference does not match authoritative metadata: ${ref.revisionId}`);
         return await readVerifiedFile(ref.snapshotPath, ref.contentDigest);
+      },
+      inspectArtifact: async (ref: ArtifactFileRef) => {
+        ArtifactFileRefSchema.parse(ref);
+        assertStoredReference(db, ref);
+        const row = db
+          .prepare("SELECT byte_length, content_digest FROM artifacts WHERE artifact_id = ?")
+          .get(ref.artifactId);
+        if (!row) throw new Error("Missing artifact");
+        return {
+          byteLength: requiredNumber(row, "byte_length"),
+          contentDigest: requiredString(row, "content_digest"),
+        };
       },
       readArtifact: async (ref: ArtifactFileRef, maxBytes?: number) => {
         ArtifactFileRefSchema.parse(ref);
@@ -2463,23 +2510,10 @@ function createOperationalRepositories(
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
       const attachments = ComposerAttachmentsSchema.parse(request.attachments ?? []);
-      let attachmentBytes = 0;
       for (const attachment of attachments) {
         if (attachment.mimeType !== attachment.artifact.mediaType)
           throw new Error("Attachment MIME does not match artifact");
         assertStoredReference(db, attachment.artifact);
-        const byteLength = requiredNumber(
-          db
-            .prepare("SELECT byte_length FROM artifacts WHERE artifact_id = ?")
-            .get(attachment.artifact.artifactId),
-          "byte_length",
-        );
-        attachmentBytes += byteLength;
-        if (
-          byteLength > COMPOSER_ATTACHMENT_LIMITS.perFileBytes ||
-          attachmentBytes > COMPOSER_ATTACHMENT_LIMITS.totalBytes
-        )
-          throw new Error("Attachments exceed byte limit");
       }
       if (attachments.length === 0) z.string().trim().min(1).parse(request.text);
       const createdAt = z.string().min(1).parse(request.createdAt);
@@ -2644,23 +2678,10 @@ function createOperationalRepositories(
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
       const attachments = ComposerAttachmentsSchema.parse(request.attachments ?? []);
-      let attachmentBytes = 0;
       for (const attachment of attachments) {
         if (attachment.mimeType !== attachment.artifact.mediaType)
           throw new Error("Attachment MIME does not match artifact");
         assertStoredReference(db, attachment.artifact);
-        const byteLength = requiredNumber(
-          db
-            .prepare("SELECT byte_length FROM artifacts WHERE artifact_id = ?")
-            .get(attachment.artifact.artifactId),
-          "byte_length",
-        );
-        attachmentBytes += byteLength;
-        if (
-          byteLength > COMPOSER_ATTACHMENT_LIMITS.perFileBytes ||
-          attachmentBytes > COMPOSER_ATTACHMENT_LIMITS.totalBytes
-        )
-          throw new Error("Attachments exceed byte limit");
       }
       if (attachments.length === 0) z.string().trim().min(1).parse(request.text);
       const text = request.text;
@@ -2736,23 +2757,10 @@ function createOperationalRepositories(
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
       const attachments = ComposerAttachmentsSchema.parse(request.attachments ?? []);
-      let attachmentBytes = 0;
       for (const attachment of attachments) {
         if (attachment.mimeType !== attachment.artifact.mediaType)
           throw new Error("Attachment MIME does not match artifact");
         assertStoredReference(db, attachment.artifact);
-        const byteLength = requiredNumber(
-          db
-            .prepare("SELECT byte_length FROM artifacts WHERE artifact_id = ?")
-            .get(attachment.artifact.artifactId),
-          "byte_length",
-        );
-        attachmentBytes += byteLength;
-        if (
-          byteLength > COMPOSER_ATTACHMENT_LIMITS.perFileBytes ||
-          attachmentBytes > COMPOSER_ATTACHMENT_LIMITS.totalBytes
-        )
-          throw new Error("Attachments exceed byte limit");
       }
       if (attachments.length === 0) z.string().trim().min(1).parse(request.text);
       const text = request.text;

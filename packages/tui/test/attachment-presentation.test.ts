@@ -103,6 +103,7 @@ describe("compact attachment presentation", () => {
       prepare,
     );
     preview?.dispose?.();
+    expect(prepare.mock.calls.at(-1)?.[1]?.signal?.aborted).toBe(true);
     await settle();
     expect(render).not.toHaveBeenCalled();
     expect(preview?.render(80)).toEqual([]);

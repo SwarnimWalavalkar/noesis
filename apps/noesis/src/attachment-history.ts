@@ -1,13 +1,16 @@
 import type { AgentRuntimeRequest, FrozenTurnPlan } from "@noesis/agent-types";
 import { renderFrozenConversationHistoryContent } from "@noesis/agent-types";
-import { COMPOSER_ATTACHMENT_LIMITS, createConditionalObject } from "@noesis/domain";
-import { renderComposerAttachmentText, resolveComposerAttachmentImages } from "@noesis/runtime";
+import { createConditionalObject } from "@noesis/domain";
+import { renderComposerAttachmentText, projectComposerAttachmentImages } from "@noesis/runtime";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
 
 /** Resolve only retained image bytes, once per request. Frozen plans retain artifact references. */
 export async function resolveAttachmentHistory(
   workspace: NoesisWorkspaceStore,
   plan: FrozenTurnPlan,
+  budget?: import("@noesis/runtime").ComposerImageProjectionBudget,
+  validateImages?: (images: readonly { mimeType: string; data: string }[]) => void,
+  notice?: (text: string) => void,
 ): Promise<NonNullable<AgentRuntimeRequest["history"]>> {
   const history: NonNullable<AgentRuntimeRequest["history"]>[number][] = [];
   if (plan.contextCheckpoint)
@@ -16,13 +19,10 @@ export async function resolveAttachmentHistory(
       content: plan.contextCheckpoint.summary,
       createdAt: plan.contextCheckpoint.createdAt,
     });
-  let imageBytes = 0;
   for (const entry of plan.conversationHistory ?? []) {
     const attachments = entry.attachments ?? [];
-    const images = await resolveComposerAttachmentImages(workspace, attachments);
-    imageBytes += images.reduce((total, image) => total + Buffer.byteLength(image.data, "base64"), 0);
-    if (imageBytes > COMPOSER_ATTACHMENT_LIMITS.totalBytes)
-      throw new Error("Retained images exceed 20 MiB. Run /compact before continuing.");
+    const projection = await projectComposerAttachmentImages(workspace, attachments, budget, validateImages);
+    if (projection.notice) notice?.(projection.notice);
     history.push(
       createConditionalObject({
         role: entry.role,
@@ -33,8 +33,13 @@ export async function resolveAttachmentHistory(
           attachments.length > 0
             ? {
                 attachments,
-                images,
-                attachmentText: renderComposerAttachmentText("", attachments, workspace.paths.root),
+                images: projection.images,
+                omittedImageArtifactIds: projection.omittedArtifactIds,
+                attachmentText: renderComposerAttachmentText(
+                  projection.notice,
+                  attachments,
+                  workspace.paths.root,
+                ),
               }
             : undefined,
         )

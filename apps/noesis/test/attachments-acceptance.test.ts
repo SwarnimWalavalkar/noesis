@@ -1,11 +1,10 @@
 import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
 import { type ComposerAttachmentInput, ComposerAttachmentsSchema } from "@noesis/domain";
 import { createPiAgentRoleRunner, createPiAgentRuntime } from "@noesis/runtime-pi";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
@@ -160,34 +159,52 @@ test("generic file queue restoration retains exact references and exposes readab
     await runtime.shutdown();
   }
 });
-test("unsupported image models reject before queue admission", async () => {
-  const { open, prompts } = await fixture(false);
-  const runtime = await open();
-  const trail = await runtime.startTrail({ title: "Text-only model" });
-  try {
-    const workspace = runtime.debug.workspace;
-    const database = new DatabaseSync(workspace.paths.database, { readOnly: true });
+test.each([false, true])(
+  "original images remain attached when model support/safe decode is unavailable (%s)",
+  async (supportsImages) => {
+    const { open, prompts } = await fixture(supportsImages);
+    const runtime = await open();
     try {
-      const rows = () => database.prepare("SELECT * FROM artifacts ORDER BY artifact_id").all();
-      const beforeRows = rows();
-      const beforeFiles = await readdir(workspace.paths.artifacts, { recursive: true });
-      for (let attempt = 0; attempt < 2; attempt++) {
-        await expect(
-          runtime.interact(trail.trailId, { type: "submit", text: "See this", attachments: [image] }),
-        ).rejects.toThrow(/image/i);
-        expect(rows()).toEqual(beforeRows);
-        expect(await readdir(workspace.paths.artifacts, { recursive: true })).toEqual(beforeFiles);
-      }
+      const trail = await runtime.startTrail({ title: "Original image retained" });
+      const bytes = Buffer.from(image.data, "base64");
+      if (supportsImages) bytes.writeUInt32BE(100_000, 16);
+      const events: string[] = [];
+      const result = await runtime.interact(
+        trail.trailId,
+        {
+          type: "submit",
+          text: "See this",
+          attachments: [{ ...image, data: bytes.toString("base64") }],
+        },
+        {
+          onEvent: (event) => {
+            if (event.type === "agent" && event.event.type === "notice") events.push(event.event.text);
+          },
+        },
+      );
+      expect(result.effect).toBe("queued");
+      await vi.waitFor(() => expect(runtime.getTrail(trail.trailId).turns).toHaveLength(1));
+      expect(events.join("\n")).toContain("not inlined");
+      const user = (await runtime.debug.workspace.operational.messages.listForSession(trail.trailId)).find(
+        (message) => message.role === "user",
+      );
+      const refs = ComposerAttachmentsSchema.parse(user?.metadata["attachments"]);
+      expect(refs).toHaveLength(1);
+      const ref = refs[0];
+      if (!ref) throw new Error("Missing original image");
+      expect(await readFile(join(runtime.debug.workspace.paths.root, ref.artifact.path))).toEqual(bytes);
+      const blocks = prompts
+        .flatMap((prompt) => prompt.context.messages)
+        .filter((message) => message.role === "user")
+        .flatMap((message) => (typeof message.content === "string" ? [] : message.content));
+      expect(blocks.some((block) => block.type === "image")).toBe(false);
+      expect(JSON.stringify(blocks)).toContain("not inlined");
     } finally {
-      database.close();
+      await runtime.shutdown();
     }
-    expect((await runtime.inspectInteraction(trail.trailId)).pending).toEqual([]);
-    expect(await runtime.debug.workspace.operational.messages.listForSession(trail.trailId)).toEqual([]);
-    expect(prompts).toEqual([]);
-  } finally {
-    await runtime.shutdown();
-  }
-});
+  },
+);
+
 test("steering commits original text and image references only after Pi consumes them", async () => {
   const started = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();

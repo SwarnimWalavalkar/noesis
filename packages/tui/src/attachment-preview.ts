@@ -41,14 +41,15 @@ export function createAttachmentPreview(
   prepare: typeof createAttachmentThumbnail = createAttachmentThumbnail,
 ): ComposerPreview | undefined {
   if (
-    !("data" in attachment) ||
+    "artifact" in attachment ||
     !attachment.mimeType.startsWith("image/") ||
     !supportsAttachmentGraphics(process.env, getCapabilities().images, interactive)
   )
     return undefined;
   let image: Image | undefined;
   let disposed = false;
-  void prepare(attachment)
+  const controller = new AbortController();
+  void prepare(attachment, { signal: controller.signal })
     .then((thumbnail) => {
       if (disposed) return;
       image = new Image(
@@ -67,6 +68,7 @@ export function createAttachmentPreview(
   return {
     dispose: () => {
       disposed = true;
+      controller.abort();
       image = undefined;
     },
     invalidate: () => image?.invalidate(),
