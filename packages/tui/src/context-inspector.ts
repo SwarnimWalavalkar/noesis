@@ -6,6 +6,7 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { type } from "arktype";
 import type { AgentContextInspection } from "@noesis/agent-types";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
@@ -14,8 +15,79 @@ const number = (value: number): string => Math.round(value).toLocaleString("en-U
 const compact = (value: number): string =>
   value >= 1000 ? `${Number((value / 1000).toFixed(1))}k` : number(value);
 
+const contextTools = type({
+  name: "string",
+  description: "string",
+  parameters: "object.json | string | number | boolean | null",
+}).array();
+
+/** Format only the captured preview; never fetch or reconstruct tool definitions. */
+export function renderContextTools(
+  content: string,
+  width: number,
+  color: boolean,
+  schemas: boolean,
+): string[] {
+  const wrap = (text: string): string[] => wrapTextWithAnsi(safeTerminalText(text), Math.max(1, width));
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    return wrap(content || "No material in this component.");
+  }
+  const result = contextTools(parsed);
+  if (result instanceof type.errors) return wrap(content);
+  if (result.length === 0) return wrap("No tools in this component.");
+  return result.flatMap((tool, index) => [
+    ...(index > 0 ? [""] : []),
+    ...wrap(tool.name).map((line) => styled(color, ANSI.bold + ANSI.cyan, line)),
+    ...wrap(tool.description),
+    ...wrap(schemas ? "Parameters" : "Parameters · hidden (s to show)").map((line) =>
+      styled(color, ANSI.dim, line),
+    ),
+    ...(schemas ? wrap(JSON.stringify(tool.parameters, null, 2)) : []),
+  ]);
+}
+
 function sections(snapshot: AgentContextInspection, expanded: boolean) {
   return snapshot.components.filter((part) => expanded || part.tokens > 0);
+}
+
+/** Parse the escaped catalog syntax emitted by formatSkillsForNoesisPrompt. */
+export function renderContextSkills(content: string, width: number, color: boolean): string[] {
+  const wrap = (text: string): string[] => wrapTextWithAnsi(safeTerminalText(text), Math.max(1, width));
+  const catalog = /^(.*?)<available_skills>(.*)$/s.exec(content);
+  const introduction = catalog?.[1];
+  const body = catalog?.[2]?.replace(/<\/available_skills>\s*$/, "");
+  if (introduction === undefined || body === undefined)
+    return wrap(content || "No material in this component.");
+  const entries = [
+    ...body.matchAll(/\s*<skill>\s*<name>([^<]*)<\/name>\s*<description>([^<]*)<\/description>\s*<\/skill>/g),
+  ];
+  if (entries.length === 0) return wrap(content);
+  const decode = (text: string): string =>
+    text
+      .replaceAll("&lt;", "<")
+      .replaceAll("&gt;", ">")
+      .replaceAll("&quot;", '"')
+      .replaceAll("&apos;", "'")
+      .replaceAll("&amp;", "&");
+  const rows = wrap(introduction.trim()).map((line) => styled(color, ANSI.dim, line));
+  let offset = 0;
+  for (const entry of entries) {
+    // Preserve unfamiliar material between entries, including incomplete captured XML.
+    const gap = body.slice(offset, entry.index).trim();
+    if (gap) rows.push("", ...wrap(gap));
+    rows.push(
+      "",
+      ...wrap(decode(entry[1] ?? "")).map((line) => styled(color, ANSI.bold + ANSI.cyan, line)),
+      ...wrap(decode(entry[2] ?? "")),
+    );
+    offset = entry.index + entry[0].length;
+  }
+  const tail = body.slice(offset).trim();
+  if (tail) rows.push("", ...wrap(tail));
+  return rows;
 }
 
 function aligned(left: string, right: string, width: number): string {
@@ -141,6 +213,7 @@ export function createContextInspector(options: {
       let notice = "Loading context…";
       let cursor = 0;
       let detail = false;
+      let schemas = false;
       let budget = false;
       let expanded = false;
       let refreshSequence = 0;
@@ -174,6 +247,14 @@ export function createContextInspector(options: {
             } else close();
           } else if (key === "r") {
             void refresh();
+          } else if (
+            key === "s" &&
+            detail &&
+            snapshot &&
+            sections(snapshot, expanded)[cursor]?.label === "Tools"
+          ) {
+            schemas = !schemas;
+            scroll = 0;
           } else if (key === "?") {
             budget = !budget;
             detail = false;
@@ -217,10 +298,14 @@ export function createContextInspector(options: {
                     ...wrapTextWithAnsi(safeTerminalText(`CONTEXT / ${selected.label}`), inner),
                     `~${number(selected.tokens)} tokens · estimated`,
                     "",
-                    ...wrapTextWithAnsi(
-                      safeTerminalText(selected.content || "No material in this component."),
-                      inner,
-                    ),
+                    ...(selected.label === "Tools"
+                      ? renderContextTools(selected.content, inner, options.colorEnabled, schemas)
+                      : selected.label === "Skill catalog"
+                        ? renderContextSkills(selected.content, inner, options.colorEnabled)
+                        : wrapTextWithAnsi(
+                            safeTerminalText(selected.content || "No material in this component."),
+                            inner,
+                          )),
                   ]
                 : snapshot
                   ? renderContextOverview(snapshot, inner, options.colorEnabled, cursor, expanded)
@@ -243,7 +328,9 @@ export function createContextInspector(options: {
             ...document.slice(scroll, scroll + rows).map(row),
             row(
               detail || budget
-                ? "↑↓ scroll · PgUp/PgDn · Esc back"
+                ? detail && selected?.label === "Tools"
+                  ? `↑↓ scroll · PgUp/PgDn · s ${schemas ? "hide" : "show"} schemas · Esc back`
+                  : "↑↓ scroll · PgUp/PgDn · Esc back"
                 : "↑↓ select · Enter inspect · ? details · r refresh · Esc",
             ),
             "╰" + "─".repeat(width - 2) + "╯",
