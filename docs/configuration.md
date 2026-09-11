@@ -100,6 +100,12 @@ This example configures a remote OAuth server:
 
 Project skills and project MCP servers stay disabled unless you start with `--trust-workspace`. This flag does not restrict direct file and shell access. See [public beta and trust](../README.md#public-beta-and-trust).
 
+The agent can also manage servers through codemode: `mcp.configure`, `mcp.status`, `mcp.authenticate`, `mcp.set_enabled`, `mcp.reconnect`, `mcp.logout`, `mcp.remove`, and `mcp.reload`. The bundled `noesis` skill explains scope, transport, and authentication settings. Configuration changes reconnect servers in the current session.
+
+`mcp.authenticate` waits for the OAuth callback and reconnect, or collects header/stdio credentials in a masked form outside the conversation. OAuth and manually entered credentials persist in protected storage and restore automatically across sessions and restarts. Header/stdio credentials live in `~/.noesis/mcp-secrets.json`, with owner-only file permissions, and remain bound to the scoped server and its connection settings. They never enter `mcp.json` or the conversation. `mcp.logout` clears saved credentials and disconnects the server; removing a server also deletes its saved header/stdio credentials. Credentials supplied by the launch environment remain environment-owned. Cancellation and connection failure are returned to the agent as failures. If OAuth sign-in succeeds and the subsequent MCP connection fails, the browser confirms that sign-in completed and the tool error directs the agent to `mcp.reconnect`. Saved credentials remain available; a second sign-in is not required to retry the connection.
+
+A newly connected server can be used in the same turn through `mcp.call_tool`, using the exact tool identity and native schema returned by management/status tools. The ordinary catalog remains frozen until the next turn. Server-requested MCP forms and URLs continue through the existing interaction UI.
+
 Connected MCP tools join the same catalog as built-in tools. The model can call them through `execute` or use them from a saved Program.
 
 ## Upgrade or uninstall

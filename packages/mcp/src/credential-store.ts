@@ -34,7 +34,55 @@ const CredentialSchema = z.strictObject({
   state: z.string().min(1).optional(),
   discovery: DiscoverySchema.optional(),
 });
-const CredentialFileSchema = z.record(z.string().min(1), CredentialSchema);
+const CredentialFileSchema = z.record(z.string().min(1), CredentialSchema).transform((parsed) => {
+  const credentials: Record<string, McpOAuthCredential> = {};
+  for (const [key, credential] of Object.entries(parsed)) {
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    const discovery = credential.discovery
+      ? createConditionalObject({
+          authorizationServerUrl: credential.discovery.authorizationServerUrl,
+        } as const)
+          .addOptional(
+            credential.discovery.authorizationServerMetadata
+              ? {
+                  authorizationServerMetadata: credential.discovery.authorizationServerMetadata,
+                }
+              : undefined,
+          )
+          .addOptional(
+            credential.discovery.resourceMetadata
+              ? {
+                  resourceMetadata: credential.discovery.resourceMetadata,
+                }
+              : undefined,
+          )
+          .addOptional(
+            credential.discovery.resourceMetadataUrl
+              ? {
+                  resourceMetadataUrl: credential.discovery.resourceMetadataUrl,
+                }
+              : undefined,
+          )
+          .finish()
+      : undefined;
+    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+    credentials[key] = createConditionalObject({
+      serverUrl: credential.serverUrl,
+    } as const)
+      .addOptional(
+        credential.authIdentityDigest ? { authIdentityDigest: credential.authIdentityDigest } : undefined,
+      )
+      .addOptional(
+        credential.clientInformation ? { clientInformation: credential.clientInformation } : undefined,
+      )
+      .addOptional(credential.tokens ? { tokens: credential.tokens } : undefined)
+      .addOptional(credential.codeVerifier ? { codeVerifier: credential.codeVerifier } : undefined)
+      .addOptional(credential.state ? { state: credential.state } : undefined)
+      .addOptional(discovery ? { discovery } : undefined)
+      .finish();
+  }
+  return credentials;
+});
 function isCode(cause: unknown, code: string): boolean {
   return cause instanceof Error && "code" in cause && cause.code === code;
 }
@@ -49,6 +97,33 @@ function assertOwned(path: string, metadata: Stats): void {
 }
 export const mcpCredentialPath = (home: string): string => join(home, "mcp-auth.json");
 export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCredentialStore {
+  return createSecureCredentialStore(path, CredentialFileSchema);
+}
+
+const SecretCredentialSchema = z.strictObject({
+  identityDigest: z.string().min(1),
+  values: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/u), z.string().min(1)),
+});
+export type McpSecretCredential = Readonly<z.infer<typeof SecretCredentialSchema>>;
+export type McpSecretCredentialStore = Pick<
+  SecureCredentialStore<McpSecretCredential>,
+  "read" | "write" | "delete"
+>;
+export const mcpSecretCredentialPath = (home: string): string => join(home, "mcp-secrets.json");
+export function createSecureMcpSecretCredentialStore(path: string): McpSecretCredentialStore {
+  return createSecureCredentialStore(path, z.record(z.string().min(1), SecretCredentialSchema));
+}
+interface SecureCredentialStore<Credential> {
+  readonly read: (key: string) => Promise<Credential | undefined>;
+  readonly write: (key: string, credential: Credential) => Promise<void>;
+  readonly update: (key: string, update: (current: Credential | undefined) => Credential) => Promise<void>;
+  readonly delete: (key: string) => Promise<void>;
+  readonly deleteIf: (key: string, predicate: (current: Credential | undefined) => boolean) => Promise<void>;
+}
+function createSecureCredentialStore<Credential>(
+  path: string,
+  schema: z.ZodType<Record<string, Credential>>,
+): SecureCredentialStore<Credential> {
   let queue: Promise<void> = Promise.resolve();
   const enqueue = <T>(operation: () => Promise<T>): Promise<T> => {
     const prior = queue;
@@ -84,7 +159,7 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
         },
       );
   };
-  const readAll = async (): Promise<Record<string, McpOAuthCredential>> => {
+  const readAll = async (): Promise<Record<string, Credential>> => {
     await secureDirectory();
     let metadata: Stats;
     try {
@@ -105,61 +180,15 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
       }
       if ((opened.mode & 0o777) !== 0o600) await handle.chmod(0o600);
       const raw: unknown = JSON.parse(await handle.readFile("utf8"));
-      const parsed = CredentialFileSchema.parse(raw);
-      const credentials: Record<string, McpOAuthCredential> = {};
-      for (const [key, credential] of Object.entries(parsed)) {
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        const discovery = credential.discovery
-          ? createConditionalObject({
-              authorizationServerUrl: credential.discovery.authorizationServerUrl,
-            } as const)
-              .addOptional(
-                credential.discovery.authorizationServerMetadata
-                  ? {
-                      authorizationServerMetadata: credential.discovery.authorizationServerMetadata,
-                    }
-                  : undefined,
-              )
-              .addOptional(
-                credential.discovery.resourceMetadata
-                  ? {
-                      resourceMetadata: credential.discovery.resourceMetadata,
-                    }
-                  : undefined,
-              )
-              .addOptional(
-                credential.discovery.resourceMetadataUrl
-                  ? {
-                      resourceMetadataUrl: credential.discovery.resourceMetadataUrl,
-                    }
-                  : undefined,
-              )
-              .finish()
-          : undefined;
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        credentials[key] = createConditionalObject({
-          serverUrl: credential.serverUrl,
-        } as const)
-          .addOptional(
-            credential.authIdentityDigest ? { authIdentityDigest: credential.authIdentityDigest } : undefined,
-          )
-          .addOptional(
-            credential.clientInformation ? { clientInformation: credential.clientInformation } : undefined,
-          )
-          .addOptional(credential.tokens ? { tokens: credential.tokens } : undefined)
-          .addOptional(credential.codeVerifier ? { codeVerifier: credential.codeVerifier } : undefined)
-          .addOptional(credential.state ? { state: credential.state } : undefined)
-          .addOptional(discovery ? { discovery } : undefined)
-          .finish();
-      }
-      return credentials;
+      const parsed = schema.parse(raw);
+      return parsed;
     } finally {
       await handle.close();
     }
   };
-  const persist = async (credentials: Readonly<Record<string, McpOAuthCredential>>): Promise<void> => {
+  const persist = async (credentials: Readonly<Record<string, Credential>>): Promise<void> => {
     await secureDirectory();
-    CredentialFileSchema.parse(credentials);
+    schema.parse(credentials);
     const temporary = `${path}.${process.pid}.${crypto.randomUUID()}.tmp`;
     const handle = await open(temporary, "wx", 0o600);
     try {
@@ -190,13 +219,13 @@ export function createSecureMcpOAuthCredentialStore(path: string): McpOAuthCrede
       await unlink(temporary).catch(() => undefined);
     }
   };
-  const store: McpOAuthCredentialStore = {
+  const store: SecureCredentialStore<Credential> = {
     read: (key: string) =>
       enqueue(async () => {
         await secureDirectory();
         return await withMcpFileLock(path, async () => (await readAll())[key]);
       }),
-    write: (key: string, credential: McpOAuthCredential) =>
+    write: (key: string, credential: Credential) =>
       enqueue(async () => {
         await secureDirectory();
         await withMcpFileLock(path, async () => {

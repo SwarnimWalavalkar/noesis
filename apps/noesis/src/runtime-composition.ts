@@ -161,9 +161,11 @@ import {
   createWorkspaceRuntimeInternals,
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
+import { createMcpManagementTools } from "./mcp-management-tools.ts";
 import { createCapabilityTools } from "./capability-tools.ts";
 import { loadLearningAuditSnapshot } from "./learning-audit-read-model.ts";
 import type {
+  ApplicationMcpIntegration,
   ApplicationMcpLifecycleAuthorizer,
   ApplicationMcpSamplingAuthorizer,
 } from "./mcp-integration.ts";
@@ -856,6 +858,9 @@ export interface ApplicationRuntimeCompositionOptions {
     listMcpServers: NonNullable<NoesisTuiRuntime["listMcpServers"]>;
     inspectMcpServer: NonNullable<NoesisTuiRuntime["inspectMcpServer"]>;
     mutateMcp: NonNullable<NoesisTuiRuntime["mutateMcp"]>;
+    readMcpConfiguration: ApplicationMcpIntegration["readMcpConfiguration"];
+    configureMcp: ApplicationMcpIntegration["configureMcp"];
+    authenticateMcp: ApplicationMcpIntegration["authenticateMcp"];
     setSamplingAuthorizer: (authorizer: ApplicationMcpSamplingAuthorizer) => void;
     setLifecycleAuthorizer: (authorizer: ApplicationMcpLifecycleAuthorizer) => void;
   }>;
@@ -3539,6 +3544,13 @@ export async function createApplicationRuntimeComposition(
       ...programWorkflowStateTools,
       ...capabilityProgramTools,
       ...mcpTools,
+      ...(!plan.subAgentActor && options.mcp
+        ? createMcpManagementTools(options.mcp, {
+            provider: plan.provider,
+            model: plan.model,
+            reasoning: plan.thinkingLevel,
+          })
+        : []),
       ...sessionDefinitionsForBroker(sessionDefinitions, { workspace, history }),
     ]);
     const admittedDefinitions = plan.subAgentActor

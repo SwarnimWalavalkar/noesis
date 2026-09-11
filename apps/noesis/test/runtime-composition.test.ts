@@ -747,6 +747,9 @@ describe("apps/noesis production control-plane composition", () => {
       listMcpServers: async () => Object.freeze([]),
       inspectMcpServer: async () => undefined,
       mutateMcp: async () => Object.freeze({ message: "unused" }),
+      readMcpConfiguration: async () => undefined,
+      configureMcp: async () => undefined,
+      authenticateMcp: async () => undefined,
       setSamplingAuthorizer: () => undefined,
       setLifecycleAuthorizer: () => undefined,
     });

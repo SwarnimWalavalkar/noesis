@@ -1,6 +1,9 @@
 import {
   createMcpHostManager,
   createSecureMcpOAuthCredentialStore,
+  createSecureMcpSecretCredentialStore,
+  mcpSecretCredentialPath,
+  type ScopedMcpServer,
   loadMcpConfig,
   mcpCredentialPath,
   normalizeMcpLocalServerConfig,
@@ -10,6 +13,9 @@ import {
   validateMcpElicitationResult,
   writeMcpServer,
   type LoadedMcpConfig,
+  McpServerConfigSchema,
+  type McpServerConfig,
+  type McpConfigScope,
   type McpElicitRequest,
   type McpElicitResult,
   type McpHostManager,
@@ -23,6 +29,7 @@ import { adaptMcpSamplingRequest, type PiMcpSamplingPort } from "@noesis/runtime
 import {
   createConditionalObject,
   canonicalJson,
+  sha256,
   createId,
   isJsonObject,
   type JsonValue,
@@ -44,6 +51,17 @@ export interface ApplicationMcpIntegration {
   readonly listMcpServers: NonNullable<NoesisTuiRuntime["listMcpServers"]>;
   readonly inspectMcpServer: NonNullable<NoesisTuiRuntime["inspectMcpServer"]>;
   readonly mutateMcp: NonNullable<NoesisTuiRuntime["mutateMcp"]>;
+  readonly readMcpConfiguration: (
+    scope: McpConfigScope,
+    name: string,
+  ) => Promise<McpServerConfig | undefined>;
+  readonly configureMcp: (
+    scope: McpConfigScope,
+    name: string,
+    config: McpServerConfig,
+    signal: AbortSignal,
+  ) => Promise<void>;
+  readonly authenticateMcp: (scope: McpConfigScope, name: string, signal: AbortSignal) => Promise<void>;
   readonly setSamplingAuthorizer: (authorizer: ApplicationMcpSamplingAuthorizer) => void;
   readonly setLifecycleAuthorizer: (authorizer: ApplicationMcpLifecycleAuthorizer) => void;
 }
@@ -275,6 +293,13 @@ function tuiConfig(
         .addOptional(config.headers ? { headers: config.headers } : undefined)
         .finish();
 }
+function secretKey(server: ScopedMcpServer): string {
+  return sha256(canonicalJson({ scope: server.scope, name: server.name, sourcePath: server.sourcePath }));
+}
+function secretIdentity(server: ScopedMcpServer): string {
+  const { enabled: _enabled, description: _description, timeout: _timeout, ...identity } = server.config;
+  return sha256(canonicalJson(identity));
+}
 function validatedRemoteUrl(value: string): string {
   const url = new URL(value);
   if (url.protocol !== "http:" && url.protocol !== "https:")
@@ -289,6 +314,8 @@ export function createApplicationMcpIntegration(input: {
   readonly openUrl: (url: string) => Promise<void>;
   readonly workspaceTrusted: boolean;
 }): ApplicationMcpIntegration {
+  const secretStore = createSecureMcpSecretCredentialStore(mcpSecretCredentialPath(input.home));
+  const authenticationRequests = new Map<string, number>();
   let configPromise = loadMcpConfig(input);
   let eventConfig: LoadedMcpConfig | undefined;
   let host: McpHostManager;
@@ -380,6 +407,11 @@ export function createApplicationMcpIntegration(input: {
       home: input.home,
       projectDirectory: input.projectDirectory,
       config: activeConfig,
+      resolveEnvironment: async (server) => {
+        const saved = await secretStore.read(secretKey(server));
+        if (saved?.identityDigest === secretIdentity(server)) return { ...process.env, ...saved.values };
+        return process.env;
+      },
       credentials: authorizeCredentialStore(
         createSecureMcpOAuthCredentialStore(mcpCredentialPath(input.home)),
       ),
@@ -430,7 +462,9 @@ export function createApplicationMcpIntegration(input: {
         },
         elicit: async (serverName, request, signal) =>
           await presentElicitation(serverName, request, input.interactions, signal),
-        onOAuthRedirect: async ({ authorizationUrl }) => await input.openUrl(authorizationUrl.href),
+        onOAuthRedirect: async ({ serverName, authorizationUrl }) => {
+          if (authenticationRequests.has(serverName)) await input.openUrl(authorizationUrl.href);
+        },
         onEvent: (event) => {
           if (isJsonObject(event.payload)) {
             const error = event.payload["error"];
@@ -630,7 +664,7 @@ export function createApplicationMcpIntegration(input: {
       if (!effective || effective.scope !== intent.scope)
         throw new Error(`MCP server ${intent.scope}/${intent.name} is shadowed or not installed`);
       if (
-        (intent.type === "authenticate" || intent.type === "logout") &&
+        intent.type === "authenticate" &&
         (effective.config.type !== "remote" || effective.config.oauth === false)
       )
         throw new Error(`MCP server ${intent.name} does not use OAuth`);
@@ -643,8 +677,15 @@ export function createApplicationMcpIntegration(input: {
           resource: `server:${intent.scope}:${intent.name}:authentication`,
           request: toJsonValue(intent),
           execute: async () => {
-            await manager.authenticate(intent.name, signal ? { signal } : undefined);
-            return null;
+            authenticationRequests.set(intent.name, (authenticationRequests.get(intent.name) ?? 0) + 1);
+            try {
+              await manager.authenticate(intent.name, signal ? { signal } : undefined);
+              return null;
+            } finally {
+              const remaining = (authenticationRequests.get(intent.name) ?? 1) - 1;
+              if (remaining > 0) authenticationRequests.set(intent.name, remaining);
+              else authenticationRequests.delete(intent.name);
+            }
           },
         });
       } else if (intent.type === "logout")
@@ -655,6 +696,7 @@ export function createApplicationMcpIntegration(input: {
           resource: `server:${intent.scope}:${intent.name}:authentication`,
           request: toJsonValue(intent),
           execute: async () => {
+            await secretStore.delete(secretKey(effective));
             await manager.logout(intent.name);
             return null;
           },
@@ -683,6 +725,10 @@ export function createApplicationMcpIntegration(input: {
         resource: `config:${intent.scope}:${intent.name}`,
         request: toJsonValue(intent),
         execute: async () => {
+          const installed = (await configPromise).installed.find(
+            (server) => server.scope === intent.scope && server.name === intent.name,
+          );
+          if (installed) await secretStore.delete(secretKey(installed));
           await removeMcpServer({ ...input, scope: intent.scope, name: intent.name });
           return null;
         },
@@ -782,6 +828,90 @@ export function createApplicationMcpIntegration(input: {
     await reload();
     return { message: `${intent.type.replaceAll("-", " ")} ${"name" in intent ? intent.name : "MCP"}.` };
   };
+  const configureMcp: ApplicationMcpIntegration["configureMcp"] = async (scope, name, value, signal) => {
+    signal.throwIfAborted();
+    if (scope === "project" && !input.workspaceTrusted)
+      throw new Error("Project MCP servers require a trusted workspace");
+    const config = McpServerConfigSchema.parse(value);
+    if (config.type === "remote") validatedRemoteUrl(config.url);
+    await authorizeLifecycle({
+      operation: "config-write",
+      effect: "write",
+      resource: `config:${scope}:${name}`,
+      request: toJsonValue({ scope, name, config }),
+      execute: async () => {
+        signal.throwIfAborted();
+        await writeMcpServer({ ...input, scope, name, config });
+        return null;
+      },
+    });
+    await reload();
+  };
+  const authenticateMcp: ApplicationMcpIntegration["authenticateMcp"] = async (scope, name, signal) => {
+    signal.throwIfAborted();
+    if (scope === "project" && !input.workspaceTrusted)
+      throw new Error("Project MCP servers require a trusted workspace");
+    const installed = hostConfig(await configPromise, input.workspaceTrusted).servers.get(name);
+    if (!installed || installed.scope !== scope || installed.config.enabled === false)
+      throw new Error(`MCP server ${scope}/${name} is disabled, shadowed, or not installed`);
+    const config = installed.config;
+    const references = config.type === "local" ? config.environment : config.headers;
+    const secretNames = [
+      ...new Set([
+        ...Object.values(references ?? {}),
+        ...(config.type === "remote" &&
+        typeof config.oauth === "object" &&
+        config.oauth.clientSecretEnvironment
+          ? [config.oauth.clientSecretEnvironment]
+          : []),
+      ]),
+    ];
+    if (secretNames.length > 0) {
+      const result = await input.interactions.handlers.elicitForm(
+        {
+          serverName: name,
+          title: "Authenticate MCP server",
+          message: `Enter credentials for ${scope}/${name}. Values are saved in protected credential storage and restored automatically after restart. For HTTP headers, enter the complete value (for example, Bearer followed by the token).`,
+          fields: secretNames.map((name) => ({ name, label: name, type: "secret", required: true })),
+        },
+        signal,
+      );
+      signal.throwIfAborted();
+      if (result.action !== "accept") throw new Error("MCP authentication was cancelled or declined");
+      const values = secretNames.map((name) => {
+        const value = result.values[name];
+        if (typeof value !== "string" || value.length === 0) throw new Error(`Missing credential ${name}`);
+        return { name, value };
+      });
+      // A concurrent edit must never redirect newly entered credentials to another server.
+      const current = hostConfig(await configPromise, input.workspaceTrusted).servers.get(name);
+      if (
+        !current ||
+        serverIdentity({ ...current, shadowed: false }) !== serverIdentity({ ...installed, shadowed: false })
+      )
+        throw new Error("MCP configuration changed during authentication; inspect and try again");
+      await authorizeLifecycle({
+        operation: "credential-save",
+        effect: "write",
+        resource: `server:${scope}:${name}:credentials`,
+        request: toJsonValue({ scope, name, references: secretNames }),
+        execute: async () => {
+          signal.throwIfAborted();
+          await secretStore.write(secretKey(installed), {
+            identityDigest: secretIdentity(installed),
+            values: Object.fromEntries(values.map(({ name, value }) => [name, value])),
+          });
+          return null;
+        },
+      });
+    }
+    if (config.type === "remote" && config.oauth !== false)
+      await mutateMcp({ type: "authenticate", scope, name }, signal);
+    else await mutateMcp({ type: "reconnect", scope, name }, signal);
+    signal.throwIfAborted();
+    if ((await currentHost()).inspectServer(name)?.status !== "connected")
+      throw new Error("MCP authentication did not establish a connected server; inspect its status");
+  };
   return Object.freeze({
     get host() {
       if (!host) throw new Error("MCP host has not initialized yet");
@@ -795,6 +925,11 @@ export function createApplicationMcpIntegration(input: {
     listMcpServers,
     inspectMcpServer,
     mutateMcp,
+    configureMcp,
+    authenticateMcp,
+    readMcpConfiguration: async (scope: McpConfigScope, name: string) =>
+      (await configPromise).installed.find((server) => server.scope === scope && server.name === name)
+        ?.config,
     setSamplingAuthorizer: (authorizer: ApplicationMcpSamplingAuthorizer) => {
       if (samplingAuthorizer) throw new Error("MCP sampling authority is already configured");
       samplingAuthorizer = authorizer;

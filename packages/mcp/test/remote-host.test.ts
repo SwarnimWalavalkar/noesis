@@ -275,7 +275,7 @@ describe("remote MCP transports", () => {
     }
   });
 
-  test("fails an accepted callback when the host closes during the committed reconnect", async () => {
+  test("reports completed sign-in when the host closes during the committed reconnect", async () => {
     const callbackPort = await availablePort();
     const reconnect = Promise.withResolvers<void>();
     let connectionAttempts = 0;
@@ -302,9 +302,9 @@ describe("remote MCP transports", () => {
       reconnect.resolve();
 
       const response = await callback;
-      expect(response.status).toBe(400);
-      expect(await response.text()).toContain("Authentication failed");
-      await expect(authentication).rejects.toThrow("did not complete OAuth reconnect");
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("Sign-in completed; server connection failed");
+      await expect(authentication).rejects.toThrow("Credentials were saved. Use mcp.reconnect");
       await closing;
       expect(manager.inspectServer("remote")).toBeUndefined();
     } finally {

@@ -169,6 +169,10 @@ export interface CreateMcpHostManagerInput {
   readonly handlers: McpHostHandlers;
   readonly oauthRedirectUrl?: string;
   readonly environment?: Readonly<Record<string, string | undefined>>;
+  /** Resolve protected credentials for this exact scoped server without sharing them across servers. */
+  readonly resolveEnvironment?: (
+    server: ScopedMcpServer,
+  ) => Promise<Readonly<Record<string, string | undefined>>>;
   readonly clientVersion?: string;
 }
 interface Catalog {
@@ -911,6 +915,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
   const remoteTransports = (
     server: ScopedMcpServer,
     config: McpRemoteServerConfig,
+    runtimeEnvironment: Readonly<Record<string, string | undefined>>,
   ): readonly RemoteTransport[] => {
     const authentication = latestAuthenticationByServer.get(server.name);
     const oauth = config.oauth === false ? undefined : config.oauth;
@@ -939,12 +944,11 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
                     await input.handlers.onOAuthRedirect(redirect);
                   }
                 },
-                environment: input.environment ?? process.env,
+                environment: runtimeEnvironment,
               } as const)
               .finish(),
           );
     const url = new URL(config.url);
-    const runtimeEnvironment = input.environment ?? process.env;
     const headers = config.headers
       ? Object.fromEntries(
           Object.entries(config.headers).map(([header, sourceVariable]) => {
@@ -1042,7 +1046,8 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     connection.intentionalClose = false;
     connection.status = "connecting";
     connection.lastError = undefined;
-    const runtimeEnvironment = input.environment ?? process.env;
+    const runtimeEnvironment = (await input.resolveEnvironment?.(server)) ?? input.environment ?? process.env;
+    if (!isCurrent()) return;
     const configuredEnvironment =
       server.config.type === "local" && server.config.environment
         ? Object.fromEntries(
@@ -1072,7 +1077,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
               stderr: "pipe",
             }),
           ]
-        : remoteTransports(server, server.config);
+        : remoteTransports(server, server.config, runtimeEnvironment);
     for (const transport of transports) {
       if (transport instanceof StdioClientTransport)
         transport.stderr?.on("data", (chunk: Buffer | string) => {
@@ -1375,14 +1380,14 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
       let callbackAuthorization:
         | Readonly<{
             code: string;
-            complete: (succeeded: boolean) => void;
+            complete: (outcome: "connected" | "authentication_failed" | "connection_failed") => void;
           }>
         | undefined;
       const listener = createServer();
       const callback = new Promise<
         Readonly<{
           code: string;
-          complete: (succeeded: boolean) => void;
+          complete: (outcome: "connected" | "authentication_failed" | "connection_failed") => void;
         }>
       >((resolve, reject) => {
         listener.on("request", (request, response) => {
@@ -1419,16 +1424,18 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
               let completed = false;
               callbackAuthorization = {
                 code,
-                complete: (succeeded) => {
+                complete: (outcome) => {
                   if (completed) return;
                   completed = true;
-                  response.writeHead(succeeded ? 200 : 400, {
+                  response.writeHead(outcome === "authentication_failed" ? 400 : 200, {
                     "content-type": "text/html; charset=utf-8",
                   });
                   response.end(
-                    succeeded
+                    outcome === "connected"
                       ? "<!doctype html><title>Noesis MCP connected</title><h1>Authentication successful</h1><p>You can close this window and return to Noesis.</p>"
-                      : "<!doctype html><title>Noesis MCP authentication failed</title><h1>Authentication failed</h1><p>Return to Noesis for details and try again.</p>",
+                      : outcome === "connection_failed"
+                        ? "<!doctype html><title>Noesis MCP connection failed</title><h1>Sign-in completed; server connection failed</h1><p>Your credentials have been saved. Return to Noesis and reconnect the server from /mcp. You can close this window.</p>"
+                        : "<!doctype html><title>Noesis MCP authentication failed</title><h1>Authentication failed</h1><p>Return to Noesis for details and try again.</p>",
                   );
                   listener.close();
                 },
@@ -1443,7 +1450,7 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         });
         listener.on("error", reject);
         abortCallback = (): void => {
-          callbackAuthorization?.complete(false);
+          callbackAuthorization?.complete("authentication_failed");
           listener.close();
           reject(authenticationController.signal.reason ?? new Error("MCP OAuth was cancelled"));
         };
@@ -1493,15 +1500,17 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
         await reconnect(name);
         const status = connections.get(name)?.status;
         if (status === "connected") {
-          callbackAuthorization?.complete(true);
+          callbackAuthorization?.complete("connected");
           return;
         }
         if (status !== "auth_required")
           throw new Error(`MCP server ${name} could not start OAuth authentication (${status ?? "missing"})`);
         const authorization = await callback;
+        let signInCompleted = false;
         try {
           authenticationController.signal.throwIfAborted();
           await exchangeAuthenticationCodeFor(name, authorization.code, authentication);
+          signInCompleted = true;
           if (callbackTimer) {
             clearTimeout(callbackTimer);
             callbackTimer = undefined;
@@ -1518,9 +1527,15 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
           ) {
             throw new Error(`MCP server ${name} did not complete OAuth reconnect`);
           }
-          authorization.complete(true);
+          authorization.complete("connected");
         } catch (error) {
-          authorization.complete(false);
+          authorization.complete(signInCompleted ? "connection_failed" : "authentication_failed");
+          if (signInCompleted) {
+            throw new Error(
+              `OAuth sign-in completed for MCP server ${name}, but the server connection failed. Credentials were saved. Use mcp.reconnect or Reconnect in /mcp to retry the connection. Cause: ${error instanceof Error ? error.message : String(error)}`,
+              { cause: error },
+            );
+          }
           throw error;
         }
       } finally {
@@ -1546,7 +1561,13 @@ export function createMcpHostManager(input: CreateMcpHostManagerInput): McpHostM
     if (!server) throw new Error(`MCP server ${JSON.stringify(name)} is not configured`);
     await closePendingOAuthTransport(name);
     await input.credentials.delete(credentialKey(server));
-    await reconnect(name);
+    await disconnect(name);
+    const connection = connections.get(name);
+    if (connection) {
+      connection.status = "auth_required";
+      connection.lastError = undefined;
+      await emit(name, "connection", { status: "auth_required" });
+    }
   };
   const canonicalToolNames = (): ReadonlyMap<
     string,
