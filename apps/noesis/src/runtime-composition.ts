@@ -5749,7 +5749,12 @@ export async function createApplicationRuntimeComposition(
                 const recordActionPersistenceFailure = (cause: unknown): void => {
                   actionPersistenceFailure ??= cause;
                 };
+                const pendingAttachmentNotices: AgentRuntimeEvent[] = [];
                 const emit = (event: AgentRuntimeEvent): void => {
+                  if (event.type === "notice" && !interactionReady) {
+                    pendingAttachmentNotices.push(event);
+                    return;
+                  }
                   if (event.type === "status" && event.status === "started" && !interactionReady) {
                     interactionReady = true;
                     if (interactionControl?.isInterruptRequested()) void agent.abort(trailId);
@@ -5861,6 +5866,8 @@ export async function createApplicationRuntimeComposition(
                     return;
                   }
                   runOptions?.onEvent?.(event);
+                  if (interactionReady)
+                    for (const notice of pendingAttachmentNotices.splice(0)) runOptions?.onEvent?.(notice);
                 };
                 let agentOutcome:
                   | {

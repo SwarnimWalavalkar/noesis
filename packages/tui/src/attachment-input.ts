@@ -132,13 +132,14 @@ function uriPaths(bytes: Buffer, copiedFiles: boolean): readonly string[] {
   return paths;
 }
 
-export function runClipboardCommand(command: ClipboardCommand): Promise<Buffer> {
+export function runClipboardCommand(command: ClipboardCommand, signal?: AbortSignal): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     execFile(
       command.command,
       [...command.args],
       {
         encoding: "buffer",
+        signal,
         timeout: ATTACHMENT_INPUT_TIMEOUT_MS,
         // File-reference metadata only; image pixels are spooled with backpressure.
         maxBuffer: 16 * 1024 * 1024,
@@ -191,13 +192,14 @@ export async function readClipboardAttachment(
 ): Promise<readonly ComposerFileInput[]> {
   options.signal?.throwIfAborted();
   const commands = clipboardCommands(options.platform ?? process.platform, options.env ?? process.env);
-  const run = options.run ?? runClipboardCommand;
+  const run = options.run ?? ((command: ClipboardCommand) => runClipboardCommand(command, options.signal));
   let requireFiles = false;
   for (const command of commands) {
     let probe: Buffer;
     try {
       probe = await run(clipboardFileCommand(command));
     } catch (error) {
+      options.signal?.throwIfAborted();
       // Another display backend may be available, but never request an image from
       // a backend whose file representations could not be inspected.
       if (command !== commands.at(-1)) continue;
@@ -228,6 +230,7 @@ export async function readClipboardAttachment(
                   : ["-selection", "clipboard", "-t", type, "-o"],
             });
           } catch (error) {
+            options.signal?.throwIfAborted();
             // Another backend may supply the original file references, but an icon
             // can never substitute for an advertised file representation.
             if (command !== commands.at(-1)) continue;
@@ -244,6 +247,7 @@ export async function readClipboardAttachment(
             options.signal?.throwIfAborted();
             inputs.push(await readAttachmentFile(path));
           } catch (error) {
+            options.signal?.throwIfAborted();
             throw new Error(
               `Could not read copied file ${path}: ${error instanceof Error ? error.message : "unknown error"}`,
             );
@@ -264,6 +268,7 @@ export async function readClipboardAttachment(
       }
       return [input];
     } catch (error) {
+      options.signal?.throwIfAborted();
       if (!selectedFileRepresentation && command !== commands.at(-1)) continue;
       throw new Error(
         `Could not read clipboard attachment: ${error instanceof Error ? error.message : "unknown error"} ${fallback}`,

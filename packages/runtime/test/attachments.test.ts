@@ -194,3 +194,22 @@ test("attachment digests cannot collide with literal serialization in text-only 
     await workspace.close();
   }
 });
+
+test("tiny image lists retain all originals while bounding image blocks before artifact reads", async () => {
+  const { workspace } = await setup();
+  try {
+    const refs = await persistComposerAttachments(
+      workspace,
+      "source",
+      Array.from({ length: 20 }, () => png),
+    );
+    const readArtifact = vi.fn(workspace.reads.readArtifact);
+    const instrumented = { ...workspace, reads: { ...workspace.reads, readArtifact } };
+    const images = await resolveComposerAttachmentImages(instrumented, refs);
+    expect(refs).toHaveLength(20);
+    expect(images).toHaveLength(COMPOSER_IMAGE_PROJECTION_LIMITS.imageCount);
+    expect(readArtifact).toHaveBeenCalledTimes(COMPOSER_IMAGE_PROJECTION_LIMITS.imageCount);
+  } finally {
+    await workspace.close();
+  }
+});

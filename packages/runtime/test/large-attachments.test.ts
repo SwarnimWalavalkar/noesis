@@ -156,3 +156,29 @@ test("streamed import cancellation terminates before a large file is read and re
     await workspace.close();
   }
 }, 5000);
+
+test("large inline API payloads use chunked spool/import rather than whole-byte artifact writes", async () => {
+  const { workspace } = await setup();
+  try {
+    const writeArtifact = vi.fn(workspace.artifacts.writeArtifact);
+    const importArtifact = vi.fn(workspace.artifacts.importArtifact);
+    const refs = await persistComposerAttachments(
+      { ...workspace, artifacts: { ...workspace.artifacts, writeArtifact, importArtifact } },
+      "source",
+      [
+        {
+          name: "inline.bin",
+          mimeType: "application/octet-stream",
+          data: Buffer.alloc(21 * 1024 * 1024).toString("base64"),
+        },
+      ],
+    );
+    expect(writeArtifact).not.toHaveBeenCalled();
+    expect(importArtifact).toHaveBeenCalledOnce();
+    const ref = refs[0];
+    if (!ref) throw new Error("Missing inline artifact");
+    expect((await workspace.reads.inspectArtifact(ref.artifact)).byteLength).toBe(21 * 1024 * 1024);
+  } finally {
+    await workspace.close();
+  }
+});

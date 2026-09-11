@@ -1,8 +1,14 @@
+import { pipeline } from "node:stream/promises";
 import { createHash } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, createWriteStream } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
 import path from "node:path";
-import type { ArtifactImportRequest, ComposerAttachment, ComposerFileInput } from "@noesis/domain";
+import type {
+  ArtifactImportRequest,
+  ComposerAttachment,
+  ComposerFileInput,
+  ComposerAttachmentInput,
+} from "@noesis/domain";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
 
 /** Preflight every selected source before the batch creates any immutable artifacts. */
@@ -81,6 +87,46 @@ export async function persistComposerManifest(
       relationshipRefs: [],
     };
     await workspace.artifacts.importArtifact(signal ? { ...request, signal } : request);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/** Inline API transport stays compatible, but decoding is chunked and spooled, never whole-file. */
+export async function importComposerInline(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+  input: ComposerAttachmentInput,
+  index: number,
+  signal?: AbortSignal,
+) {
+  const directory = await mkdtemp(path.join(workspace.paths.staging, "composer-inline-"));
+  try {
+    const sourcePath = path.join(directory, "source");
+    const hash = createHash("sha256").update(
+      JSON.stringify({ sessionId, index, name: input.name, mimeType: input.mimeType }),
+    );
+    async function* chunks() {
+      for (let offset = 0; offset < input.data.length; offset += 64 * 1024) {
+        signal?.throwIfAborted();
+        const chunk = input.data.slice(offset, offset + 64 * 1024);
+        hash.update(chunk);
+        yield Buffer.from(chunk, "base64");
+      }
+    }
+    await pipeline(
+      chunks(),
+      createWriteStream(sourcePath, { flags: "wx", mode: 0o600 }),
+      signal ? { signal } : {},
+    );
+    const request: ArtifactImportRequest = {
+      path: `composer/${hash.digest("hex")}/${input.name}`,
+      sourcePath,
+      mediaType: input.mimeType,
+      actor: { kind: "user", actorId: sessionId },
+      relationshipRefs: [{ kind: "database_row", table: "sessions", rowId: sessionId }],
+    };
+    return await workspace.artifacts.importArtifact(signal ? { ...request, signal } : request);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

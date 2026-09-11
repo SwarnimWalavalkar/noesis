@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import path from "node:path";
 import { z } from "zod";
 import {
@@ -17,6 +16,7 @@ import type { NoesisWorkspaceStore } from "@noesis/workspace";
 import {
   composerManifestPath,
   importComposerFile,
+  importComposerInline,
   persistComposerManifest,
   validateComposerFileSource,
 } from "./composer-files.ts";
@@ -53,13 +53,7 @@ export async function persistComposerAttachments(
     const artifact =
       "sourcePath" in input
         ? await importComposerFile(workspace, sessionId, input, index, signal)
-        : await workspace.artifacts.writeArtifact({
-            path: `composer/${createHash("sha256").update(JSON.stringify({ sessionId, index, input })).digest("hex")}/${input.name}`,
-            mediaType: input.mimeType,
-            bytes: Buffer.from(input.data, "base64"),
-            actor: { kind: "user", actorId: sessionId },
-            relationshipRefs: [{ kind: "database_row", table: "sessions", rowId: sessionId }],
-          });
+        : await importComposerInline(workspace, sessionId, input, index, signal);
     result.push({ name: input.name, mimeType: input.mimeType, artifact });
   }
   await persistComposerManifest(workspace, result, signal);
@@ -69,6 +63,7 @@ export async function persistComposerAttachments(
 export interface ComposerImageProjectionBudget {
   remainingBytes: number;
   remainingTokens?: number;
+  remainingImages?: number;
 }
 export interface ComposerImageProjection {
   readonly images: readonly { mimeType: string; data: string }[];
@@ -82,6 +77,7 @@ export async function projectComposerAttachmentImages(
   budget: ComposerImageProjectionBudget = { remainingBytes: COMPOSER_IMAGE_PROJECTION_LIMITS.totalBytes },
   validateImages?: (images: readonly { mimeType: string; data: string }[]) => void,
 ): Promise<ComposerImageProjection> {
+  budget.remainingImages ??= COMPOSER_IMAGE_PROJECTION_LIMITS.imageCount;
   const images: { mimeType: string; data: string }[] = [];
   const omittedArtifactIds: string[] = [];
   const reasons: string[] = [];
@@ -89,6 +85,9 @@ export async function projectComposerAttachmentImages(
     if (ref.mimeType !== ref.artifact.mediaType) throw new Error("Attachment MIME differs from artifact");
     if (!ref.mimeType.startsWith("image/")) continue;
     try {
+      if (budget.remainingImages <= 0) throw new Error("inline image block allowance exceeded");
+      if (budget.remainingTokens !== undefined && budget.remainingTokens < 1025)
+        throw new Error("inline image context allowance exceeded");
       const metadata = await workspace.reads.inspectArtifact(ref.artifact);
       if (
         metadata.byteLength > Math.min(COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes, budget.remainingBytes)
@@ -105,6 +104,7 @@ export async function projectComposerAttachmentImages(
       validateImages?.([image]);
       images.push(image);
       budget.remainingBytes -= bytes.length;
+      budget.remainingImages -= 1;
       if (budget.remainingTokens !== undefined) budget.remainingTokens -= tokens;
     } catch (error) {
       omittedArtifactIds.push(ref.artifact.artifactId);

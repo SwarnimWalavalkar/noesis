@@ -1,3 +1,4 @@
+import { elideText, safeTerminalText } from "./theme.ts";
 import { getCapabilities, Image, type ImageProtocol } from "@earendil-works/pi-tui";
 import type { DraftAttachment, ComposerPreview } from "./composer.ts";
 import { createAttachmentThumbnail } from "./attachment-thumbnail.ts";
@@ -47,6 +48,7 @@ export function createAttachmentPreview(
   )
     return undefined;
   let image: Image | undefined;
+  let unavailable = "";
   let disposed = false;
   const controller = new AbortController();
   void prepare(attachment, { signal: controller.signal })
@@ -64,7 +66,11 @@ export function createAttachmentPreview(
       );
       requestRender();
     })
-    .catch(() => undefined); // A failed optional preview never invalidates an otherwise usable file.
+    .catch((cause: unknown) => {
+      if (disposed) return;
+      unavailable = `Image preview unavailable; original attached (${safeTerminalText(cause instanceof Error ? cause.message : "preparation failed").slice(0, 120)})`;
+      requestRender();
+    });
   return {
     dispose: () => {
       disposed = true;
@@ -72,6 +78,6 @@ export function createAttachmentPreview(
       image = undefined;
     },
     invalidate: () => image?.invalidate(),
-    render: (width) => image?.render(width) ?? [],
+    render: (width) => image?.render(width) ?? (unavailable ? [elideText(unavailable, width)] : []),
   };
 }

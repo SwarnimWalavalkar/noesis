@@ -169,6 +169,7 @@ test.each([false, true])(
       const bytes = Buffer.from(image.data, "base64");
       if (supportsImages) bytes.writeUInt32BE(100_000, 16);
       const events: string[] = [];
+      const order: string[] = [];
       const result = await runtime.interact(
         trail.trailId,
         {
@@ -178,13 +179,18 @@ test.each([false, true])(
         },
         {
           onEvent: (event) => {
-            if (event.type === "agent" && event.event.type === "notice") events.push(event.event.text);
+            if (event.type === "turn-started") order.push("started");
+            if (event.type === "agent" && event.event.type === "notice") {
+              events.push(event.event.text);
+              order.push("notice");
+            }
           },
         },
       );
       expect(result.effect).toBe("queued");
       await vi.waitFor(() => expect(runtime.getTrail(trail.trailId).turns).toHaveLength(1));
       expect(events.join("\n")).toContain("not inlined");
+      expect(order).toEqual(["started", "notice"]);
       const user = (await runtime.debug.workspace.operational.messages.listForSession(trail.trailId)).find(
         (message) => message.role === "user",
       );

@@ -412,3 +412,26 @@ it("streams base64 helper chunks across boundaries without retaining the encoded
   expect(await readFile(path, "utf8")).toBe("abc");
   await disposeAttachmentInput(input);
 });
+
+it("aborts an in-flight file-reference probe without waiting for its helper deadline", async () => {
+  const controller = new AbortController();
+  const run = vi.fn(() =>
+    runClipboardCommand(
+      { command: process.execPath, args: ["-e", "setInterval(()=>{},1000)"], encoding: "binary" },
+      controller.signal,
+    ),
+  );
+  const pending = readClipboardAttachment({
+    platform: "linux",
+    env: { DISPLAY: ":0" },
+    run,
+    signal: controller.signal,
+  });
+  const timer = setTimeout(() => controller.abort(), 10);
+  try {
+    await expect(pending).rejects.toThrow();
+  } finally {
+    clearTimeout(timer);
+  }
+  expect(run).toHaveBeenCalledOnce();
+}, 1000);

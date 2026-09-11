@@ -11,6 +11,7 @@ import { ArtifactFileRefSchema } from "./storage-schemas.ts";
 /** Working-set bounds for optional inline image projection, never storage admission. */
 export const COMPOSER_IMAGE_PROJECTION_LIMITS = Object.freeze({
   perImageBytes: 10 * 1024 * 1024,
+  imageCount: 8,
   totalBytes: 20 * 1024 * 1024,
 });
 export const COMPOSER_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
@@ -37,7 +38,16 @@ const mimeSchema = z
 export const ComposerAttachmentInputSchema = z.strictObject({
   name: nameSchema,
   mimeType: mimeSchema,
-  data: z.string().regex(/^[A-Za-z0-9+/]*={0,2}$/u),
+  data: z
+    .string()
+    .regex(/^[A-Za-z0-9+/]*={0,2}$/u)
+    .refine((value) => {
+      if (value.length % 4) return false;
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+      if (value.endsWith("==")) return (alphabet.indexOf(value.at(-3) ?? "") & 15) === 0;
+      if (value.endsWith("=")) return (alphabet.indexOf(value.at(-2) ?? "") & 3) === 0;
+      return true;
+    }, "Invalid attachment base64"),
 });
 export type ComposerAttachmentInput = Readonly<z.infer<typeof ComposerAttachmentInputSchema>>;
 export const ComposerAttachmentSchema = z.strictObject({
@@ -63,12 +73,7 @@ export const ComposerFileInputSchema = z.strictObject({
 export type ComposerFileInput = Readonly<z.infer<typeof ComposerFileInputSchema>>;
 export type ComposerDraftAttachment = ComposerAttachmentInput | ComposerFileInput | ComposerAttachment;
 export function validateComposerAttachmentInputs(value: unknown): readonly ComposerAttachmentInput[] {
-  const inputs = z.array(ComposerAttachmentInputSchema).parse(value);
-  for (const input of inputs) {
-    const bytes = Buffer.from(input.data, "base64");
-    if (bytes.toString("base64") !== input.data) throw new Error("Invalid attachment base64");
-  }
-  return inputs;
+  return z.array(ComposerAttachmentInputSchema).parse(value);
 }
 
 /** Text-only digests retain compatibility with existing durable intents. */
