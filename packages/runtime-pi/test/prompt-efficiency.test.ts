@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runInNewContext } from "node:vm";
 import { describe, expect, test } from "vitest";
 import { applyPromptCacheKey, promptCacheKey } from "../src/prompt-cache.ts";
 import { MODEL_OUTPUT_BYTES, presentModelOutput } from "../src/model-output.ts";
@@ -39,14 +40,29 @@ describe("prompt efficiency boundaries", () => {
     }
   });
 
-  test("guides JSON recovery toward code-side projection instead of another direct read", async () => {
-    const result = JSON.parse(await presentModelOutput("x".repeat(40_000), async () => "/output.json"));
-    expect(result.recovery).toContain("tools.files.read({ path: fullOutputPath })");
-    expect(result.recovery).toContain("JSON.parse(file.content)");
-    expect(result.recovery).toContain("return only selected fields or a bounded slice");
-    expect(result.recovery).toContain("Do not return or log the whole file");
-    expect(result.recovery).toContain("Do not repeat the completed tool call");
-  });
+  test.each(["/output.json", '/odd "quote"/back\\slash\n🧪.json'])(
+    "guides executable JSON recovery for %s",
+    async (path) => {
+      const result = JSON.parse(await presentModelOutput("x".repeat(40_000), async () => path));
+      expect(result.recovery).toContain(`tools.files.read({ path: ${JSON.stringify(path)} })`);
+      const snippet = result.recovery.split("\n\n")[1];
+      const recovered = await runInNewContext(`(async () => { ${snippet} return data.marker; })()`, {
+        tools: {
+          files: {
+            read: async (input: { path: string }) => {
+              expect(input.path).toBe(path);
+              return { content: JSON.stringify({ marker: "recovered" }) };
+            },
+          },
+        },
+      });
+      expect(recovered).toBe("recovered");
+      expect(result.recovery).toContain("JSON.parse(file.content)");
+      expect(result.recovery).toContain("return only selected fields or a bounded slice");
+      expect(result.recovery).toContain("Do not return or log the whole file");
+      expect(result.recovery).toContain("Do not repeat the completed tool call");
+    },
+  );
 
   test("persists exact Unicode output before returning a bounded recoverable preview", async () => {
     const directory = await mkdtemp(join(tmpdir(), "noesis-output-"));

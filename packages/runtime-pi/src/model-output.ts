@@ -48,7 +48,10 @@ export async function presentModelOutput(
     ...preview,
     recoveryAvailable: true,
     fullOutputPath: path,
-    recovery:
-      "For JSON, use execute: const file = await tools.files.read({ path: fullOutputPath }); const data = JSON.parse(file.content); return only selected fields or a bounded slice of data. Do not return or log the whole file. Direct file_read can truncate a single long JSON line again. For multiline text, use file_read with bounded line ranges, or extract a bounded section with shell. This preview is incomplete evidence. Do not repeat the completed tool call to recover output.",
+    recovery: `For JSON, start execute with:
+
+const file = await tools.files.read({ path: ${JSON.stringify(path)} }); const data = JSON.parse(file.content);
+
+Then return only selected fields or a bounded slice of data. Do not return or log the whole file. Direct file_read can truncate a single long JSON line again. For multiline text, use file_read with bounded line ranges, or extract a bounded section with shell. This preview is incomplete evidence. Do not repeat the completed tool call to recover output.`,
   });
 }
