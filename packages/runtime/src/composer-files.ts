@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { mkdtemp, open, rm } from "node:fs/promises";
 import path from "node:path";
-import type { ComposerAttachment, ComposerFileInput } from "@noesis/domain";
+import type { ArtifactImportRequest, ComposerAttachment, ComposerFileInput } from "@noesis/domain";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
 
 /** Preflight every selected source before the batch creates any immutable artifacts. */
@@ -31,7 +31,7 @@ export async function importComposerFile(
   signal?: AbortSignal,
 ) {
   const identity = createHash("sha256").update(JSON.stringify({ sessionId, index, input })).digest("hex");
-  return await workspace.artifacts.importArtifact({
+  const request: ArtifactImportRequest = {
     path: `composer/${identity}/${input.name}`,
     mediaType: input.mimeType,
     sourcePath: input.sourcePath,
@@ -44,8 +44,8 @@ export async function importComposerFile(
       ino: input.sourceIno,
       dev: input.sourceDev,
     },
-    ...(signal ? { signal } : {}),
-  });
+  };
+  return await workspace.artifacts.importArtifact(signal ? { ...request, signal } : request);
 }
 
 export function composerManifestPath(refs: readonly ComposerAttachment[]): string {
@@ -58,6 +58,7 @@ export function composerManifestPath(refs: readonly ComposerAttachment[]): strin
 export async function persistComposerManifest(
   workspace: NoesisWorkspaceStore,
   refs: readonly ComposerAttachment[],
+  signal?: AbortSignal,
 ): Promise<void> {
   if (refs.length <= 8) return;
   const directory = await mkdtemp(path.join(workspace.paths.staging, "composer-manifest-"));
@@ -65,17 +66,21 @@ export async function persistComposerManifest(
   try {
     const file = await open(sourcePath, "wx", 0o600);
     try {
-      for (const ref of refs) await file.write(`${JSON.stringify(ref)}\n`);
+      for (const ref of refs) {
+        signal?.throwIfAborted();
+        await file.write(`${JSON.stringify(ref)}\n`);
+      }
     } finally {
       await file.close();
     }
-    await workspace.artifacts.importArtifact({
+    const request: ArtifactImportRequest = {
       path: composerManifestPath(refs),
       mediaType: "application/x-ndjson",
       sourcePath,
       actor: { kind: "system", actorId: "composer-manifest" },
       relationshipRefs: [],
-    });
+    };
+    await workspace.artifacts.importArtifact(signal ? { ...request, signal } : request);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

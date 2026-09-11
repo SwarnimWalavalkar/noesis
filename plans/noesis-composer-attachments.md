@@ -53,3 +53,12 @@ Typechecking and changed-file lint/format checks passed. The release build passe
 - Repository formatting, lint, typechecking, production dependency audit, release build, and installed package smoke passed.
 - Parent review findings have regressions for repeated unsupported-image rejection without artifact writes and literal paste-marker preservation plus undo. Automatic snippet collapsing is intentionally deferred rather than risking silent text corruption.
 - Clipboard/terminal compatibility is tested with automated adapters and fixtures, not physical cross-platform validation.
+
+## User-requested large-file revision (supersedes earlier admission limits)
+
+- Checkpoint `bbd948f` removes attachment-count/byte/empty-file admission caps. Copied files and paths stay on disk and use the existing artifact importer, now cancellation-aware and bounded to the selected source extent with identity/mutation checks.
+- Originals remain durable after source deletion; restored generic refs never reread whole contents. Bounded prompt summaries link to a complete streamed immutable manifest, and `/attachments <page>` exposes all draft indices/statuses.
+- Optional preview/model image working-set and decode bounds do not reject originals. Unsupported, oversized, or unsafe inline views emit explicit notices and preserve original artifact paths.
+- Clipboard pixels spool with backpressure, with cancellation and source ownership through pending admission. Preview queue jobs/payload bytes remain bounded and cancellable.
+- Validation: **924 tests / 73 files passed** on explicit domain, agent-types, runtime-pi, runtime, workspace, TUI, tools, and affected app test paths with `--maxWorkers=4`. This includes 12 files with two >16MiB originals and empty files, source deletion, complete manifests, mutation detection, retry dedup, real import cancellation, and clipboard spool/lifetime regressions.
+- Original checkpoint CI failed only lint issues; fixing those before the next push. Final-head CI and bot reviews—not original-head results—remain the merge gate.

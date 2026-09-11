@@ -1,3 +1,4 @@
+import { captureClipboardToFile, disposeAttachmentInput } from "../src/attachment-capture.ts";
 import { Worker, type WorkerOptions } from "node:worker_threads";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, rm, writeFile, truncate, readFile } from "node:fs/promises";
@@ -370,4 +371,44 @@ it("tries X11 file references when Wayland advertises files but cannot provide t
     }),
   ).resolves.toMatchObject([{ name: "copied.txt", mimeType: "text/plain", sourcePath: path, sourceSize: 8 }]);
   expect(run).toHaveBeenCalledTimes(4);
+});
+
+it("spools pixel helper output larger than old attachment limits and cleans its owned file", async () => {
+  const path = await captureClipboardToFile({
+    command: process.execPath,
+    args: ["-e", "process.stdout.write(Buffer.alloc(21*1024*1024))"],
+    encoding: "binary",
+  });
+  const input = await readAttachmentPath(path);
+  expect(input.sourceSize).toBe(21 * 1024 * 1024);
+  expect("data" in input).toBe(false);
+  await disposeAttachmentInput(input);
+  await expect(readFile(path)).rejects.toThrow();
+});
+
+it("cancellation during temporary-directory creation never launches the clipboard helper", async () => {
+  const marker = join(await directory(), "spawned");
+  const controller = new AbortController();
+  const pending = captureClipboardToFile(
+    {
+      command: process.execPath,
+      args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'launched')`],
+      encoding: "binary",
+    },
+    controller.signal,
+  );
+  controller.abort();
+  await expect(pending).rejects.toThrow();
+  await expect(readFile(marker)).rejects.toThrow();
+});
+
+it("streams base64 helper chunks across boundaries without retaining the encoded image", async () => {
+  const path = await captureClipboardToFile({
+    command: process.execPath,
+    args: ["-e", "process.stdout.write('YW');setTimeout(()=>process.stdout.write('Jj\\n'),5)"],
+    encoding: "base64",
+  });
+  const input = await readAttachmentPath(path);
+  expect(await readFile(path, "utf8")).toBe("abc");
+  await disposeAttachmentInput(input);
 });

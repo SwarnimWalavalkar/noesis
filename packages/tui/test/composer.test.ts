@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import { captureClipboardToFile } from "../src/attachment-capture.ts";
+import { readAttachmentPath } from "../src/attachment-input.ts";
 import { TuiMainScreen } from "@earendil-works/pi-tui";
 import type { ComposerAttachmentInput } from "@noesis/domain";
 import { describe, expect, test, vi } from "vitest";
@@ -239,4 +242,30 @@ test("large literal pastes remain one undoable edit", async () => {
   } finally {
     vi.useRealTimers();
   }
+});
+
+test("disposing composer preserves submitted clipboard sources until admission settles", async () => {
+  const path = await captureClipboardToFile(
+    { command: "fixture", args: [], encoding: "binary" },
+    undefined,
+    Buffer.from("owned"),
+  );
+  const attachment = await readAttachmentPath(path);
+  const admission = Promise.withResolvers<void>();
+  const f = fixture(undefined, async () => admission.promise);
+  f.composer.restore([attachment]);
+  f.enter("send original");
+  f.composer.dispose();
+  expect(await readFile(path, "utf8")).toBe("owned");
+  admission.resolve();
+  await expect
+    .poll(async () => {
+      try {
+        await readFile(path);
+        return false;
+      } catch {
+        return true;
+      }
+    })
+    .toBe(true);
 });

@@ -62,7 +62,7 @@ export async function persistComposerAttachments(
           });
     result.push({ name: input.name, mimeType: input.mimeType, artifact });
   }
-  await persistComposerManifest(workspace, result);
+  await persistComposerManifest(workspace, result, signal);
   return Object.freeze(result);
 }
 

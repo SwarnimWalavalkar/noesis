@@ -42,8 +42,8 @@ export function createComposer(options: ComposerOptions) {
   const previews = new Map<number, ComposerPreview>();
   const reads = new Map<number, AbortController>();
   const releaseInput = (attachment: DraftAttachment) => {
-    void disposeAttachmentInput(attachment).catch((error: unknown) =>
-      options.notice(`Clipboard cleanup failed: ${error instanceof Error ? error.message : "unknown error"}`),
+    void disposeAttachmentInput(attachment).catch((cause: unknown) =>
+      options.notice(`Clipboard cleanup failed: ${cause instanceof Error ? cause.message : "unknown error"}`),
     );
   };
   const release = (item: DraftItem) => {

@@ -4,7 +4,7 @@ import { ComposerAttachmentsSchema, composerContentDigest } from "@noesis/domain
 import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
-import { copyFile, link, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
+import { link, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";

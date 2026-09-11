@@ -14,7 +14,7 @@ export async function disposeAttachmentInput(input: ComposerDraftAttachment): Pr
   if (!("sourcePath" in input)) return;
   const directory = owned.get(input.sourcePath);
   if (!directory) return;
-  await rm(directory, { recursive: true, force: true });
+  await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
   owned.delete(input.sourcePath);
 }
 
@@ -87,7 +87,7 @@ export async function captureClipboardToFile(
     owned.set(path, directory);
     return path;
   } catch (error) {
-    if (directory) await rm(directory, { recursive: true, force: true });
+    if (directory) await rm(directory, { recursive: true, force: true, maxRetries: 3, retryDelay: 25 });
     throw error;
   } finally {
     capturing = false;
