@@ -1,14 +1,17 @@
-import { createConditionalObject, type JsonValue } from "@noesis/domain";
+export { interactionViewFromSnapshot } from "./interaction-view.ts";
+import { createConditionalObject, type JsonValue, type ComposerAttachment } from "@noesis/domain";
 import type { ContextSnapshot } from "@noesis/context";
 import type { SubAgentRuntimeEvent, SubAgentSummary } from "@noesis/agent-types";
 import type { RuntimeAgentDefaults, RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
 import { appendReasoningDelta, reconcileReasoning } from "./reasoning-timeline.ts";
-import type { TuiExecutionDetail, TuiInteractionSnapshot } from "./runtime-port.ts";
+import type { TuiExecutionDetail } from "./runtime-port.ts";
 import { reduceSubAgentPhase, retainActiveSubAgentPhases } from "./subagent-presentation-state.ts";
-import { tuiTimelineFromRuntime } from "./timeline-adapter.ts";
+import { tuiTimelineFromRuntime, tuiUserMessage } from "./timeline-adapter.ts";
 export { tuiTimelineFromRuntime };
 export type Pane = "trail" | "context" | "capabilities";
+export type TuiAttachmentLabel = Pick<ComposerAttachment, "name" | "mimeType">;
 export interface TuiMessage {
+  readonly attachments?: readonly TuiAttachmentLabel[];
   readonly role: "user" | "assistant" | "system";
   readonly text: string;
   /** View-local identity used only until the runtime admits a submitted prompt. */
@@ -75,6 +78,7 @@ export interface TuiContextUsage {
   readonly accuracy: "reported" | "estimated";
 }
 export interface TuiQueuedInput {
+  readonly attachments?: readonly ComposerAttachment[];
   readonly queueId: string;
   readonly text: string;
   readonly createdAt: string;
@@ -89,23 +93,6 @@ export interface TuiInteractionView {
     readonly text: string;
   };
   readonly queuedInputs: readonly TuiQueuedInput[];
-}
-export function interactionViewFromSnapshot(snapshot: TuiInteractionSnapshot): TuiInteractionView {
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return createConditionalObject({
-    phase: snapshot.phase,
-    queuePaused: snapshot.queuePaused,
-  } as const)
-    .addOptional(snapshot.active ? { active: { ...snapshot.active } } : undefined)
-    .add({
-      queuedInputs: snapshot.pending.map((input) => ({
-        queueId: input.intentId,
-        text: input.text,
-        createdAt: input.createdAt,
-        status: input.status,
-      })),
-    } as const)
-    .finish();
 }
 /** Overlay state for the run inspector opened from a transcript action. */
 export interface TuiInspectorState {
@@ -165,11 +152,13 @@ export type NoesisTuiAction =
     }
   | {
       readonly type: "prompt-submitted";
+      readonly attachments?: readonly TuiAttachmentLabel[];
       readonly text: string;
       readonly localSubmissionId?: string;
     }
   | {
       readonly type: "prompt-admitted";
+      readonly attachments?: readonly ComposerAttachment[];
       readonly localSubmissionId: string;
       readonly turnId: string;
     }
@@ -179,6 +168,7 @@ export type NoesisTuiAction =
     }
   | {
       readonly type: "steer-delivered";
+      readonly attachments?: readonly ComposerAttachment[];
       readonly text: string;
     }
   | {
@@ -460,6 +450,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         role: "user",
         text: action.text,
       } as const)
+        .addOptional(action.attachments ? { attachments: action.attachments } : undefined)
         .addOptional(action.localSubmissionId ? { localSubmissionId: action.localSubmissionId } : undefined)
         .finish();
       return {
@@ -475,7 +466,9 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         timeline: state.timeline.map((entry) => {
           if (entry.kind !== "message" || entry.localSubmissionId !== action.localSubmissionId) return entry;
           const { localSubmissionId: _localSubmissionId, ...message } = entry;
-          return { ...message, turnId: action.turnId };
+          return createConditionalObject({ ...message, turnId: action.turnId })
+            .addOptional(action.attachments ? { attachments: action.attachments } : undefined)
+            .finish();
         }),
       };
     case "prompt-rejected":
@@ -488,7 +481,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     case "steer-delivered":
       return {
         ...state,
-        timeline: [...state.timeline, { kind: "message", role: "user", text: action.text }],
+        timeline: [...state.timeline, tuiUserMessage(action.text, action.attachments)],
       };
     case "stream-delta": {
       const timeline = [...state.timeline];

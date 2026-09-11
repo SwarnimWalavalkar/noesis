@@ -1,6 +1,7 @@
+import { COMPOSER_ATTACHMENT_LIMITS, ComposerAttachmentsSchema, composerContentDigest } from "@noesis/domain";
 import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { constants as fsConstants, createReadStream } from "node:fs";
 import { copyFile, link, mkdir, open, readdir, readFile, rename, rm, unlink } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -1565,10 +1566,12 @@ export async function createWorkspaceStore(
           throw new Error(`Evidence reference does not match authoritative metadata: ${ref.revisionId}`);
         return await readVerifiedFile(ref.snapshotPath, ref.contentDigest);
       },
-      readArtifact: async (ref: ArtifactFileRef) => {
+      readArtifact: async (ref: ArtifactFileRef, maxBytes?: number) => {
         ArtifactFileRefSchema.parse(ref);
         const row = db
-          .prepare("SELECT path, content_digest, media_type FROM artifacts WHERE artifact_id = ?")
+          .prepare(
+            "SELECT path, content_digest, media_type, byte_length FROM artifacts WHERE artifact_id = ?",
+          )
           .get(ref.artifactId);
         if (
           row === undefined ||
@@ -1576,7 +1579,39 @@ export async function createWorkspaceStore(
           requiredString(row, "media_type") !== ref.mediaType
         )
           throw new Error(`Artifact reference does not match authoritative metadata: ${ref.artifactId}`);
-        return await readVerifiedFile(ref.path, requiredString(row, "content_digest"));
+        if (maxBytes === undefined)
+          return await readVerifiedFile(ref.path, requiredString(row, "content_digest"));
+        z.number()
+          .int()
+          .nonnegative()
+          .max(100 * 1024 * 1024)
+          .parse(maxBytes);
+        const expectedLength = requiredNumber(row, "byte_length");
+        if (expectedLength > maxBytes) throw new Error("Artifact exceeds byte limit");
+        const handle = await open(
+          pathInside(paths.root, ref.path),
+          fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+        );
+        try {
+          const status = await handle.stat();
+          if (!status.isFile()) throw new Error("Artifact is not a regular file");
+          if (status.size !== expectedLength) throw new Error(`Immutable file digest mismatch: ${ref.path}`);
+          const bytes = Buffer.alloc(Math.min(expectedLength + 1, maxBytes + 1));
+          let length = 0;
+          while (length < bytes.length) {
+            const read = await handle.read(bytes, length, bytes.length - length, null);
+            if (read.bytesRead === 0) break;
+            length += read.bytesRead;
+          }
+          if (length > maxBytes) throw new Error("Artifact exceeds byte limit");
+          if (length !== expectedLength) throw new Error(`Immutable file digest mismatch: ${ref.path}`);
+          const result = bytes.subarray(0, length);
+          if (sha256(result) !== requiredString(row, "content_digest"))
+            throw new Error(`Immutable file digest mismatch: ${ref.path}`);
+          return result;
+        } finally {
+          await handle.close();
+        }
       },
     }),
     definitions: Object.freeze({
@@ -2379,7 +2414,7 @@ function createOperationalRepositories(
   const userIntentMessageState = (intent: UserIntentRecord): "missing" | "verified" => {
     if (intent.targetTurnId === undefined) return "missing";
     const messages = db
-      .prepare(`SELECT content
+      .prepare(`SELECT content, metadata_json
          FROM messages
          WHERE session_id = ?
            AND role = 'user'
@@ -2389,7 +2424,14 @@ function createOperationalRepositories(
       .all(intent.sessionId, intent.targetTurnId, intent.intentId);
     if (messages.length === 0) return "missing";
     for (const message of messages) {
-      if (sha256(requiredString(message, "content")) !== intent.contentDigest)
+      if (
+        composerContentDigest(
+          requiredString(message, "content"),
+          ComposerAttachmentsSchema.parse(
+            JSON.parse(requiredString(message, "metadata_json"))["attachments"] ?? [],
+          ),
+        ) !== intent.contentDigest
+      )
         throw new Error(`User intent ${intent.intentId} durable message content does not match its digest`);
     }
     return "verified";
@@ -2404,7 +2446,7 @@ function createOperationalRepositories(
       throw new Error(`User intent ${intent.intentId} has no matching durable user message`);
     const delivered = db
       .prepare(`UPDATE user_intents
-         SET status = 'delivered', text = NULL, delivered_at = ?, unresolved_at = NULL, updated_at = ?
+         SET status = 'delivered', text = NULL, attachments_json = '[]', delivered_at = ?, unresolved_at = NULL, updated_at = ?
          WHERE intent_id = ? AND session_id = ? AND status IN ('dispatching', 'unresolved')
            AND target_turn_id = ?`)
       .run(deliveredAt, deliveredAt, intent.intentId, intent.sessionId, intent.targetTurnId);
@@ -2420,9 +2462,28 @@ function createOperationalRepositories(
     database.transaction(() => {
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
-      z.string().trim().min(1).parse(request.text);
+      const attachments = ComposerAttachmentsSchema.parse(request.attachments ?? []);
+      let attachmentBytes = 0;
+      for (const attachment of attachments) {
+        if (attachment.mimeType !== attachment.artifact.mediaType)
+          throw new Error("Attachment MIME does not match artifact");
+        assertStoredReference(db, attachment.artifact);
+        const byteLength = requiredNumber(
+          db
+            .prepare("SELECT byte_length FROM artifacts WHERE artifact_id = ?")
+            .get(attachment.artifact.artifactId),
+          "byte_length",
+        );
+        attachmentBytes += byteLength;
+        if (
+          byteLength > COMPOSER_ATTACHMENT_LIMITS.perFileBytes ||
+          attachmentBytes > COMPOSER_ATTACHMENT_LIMITS.totalBytes
+        )
+          throw new Error("Attachments exceed byte limit");
+      }
+      if (attachments.length === 0) z.string().trim().min(1).parse(request.text);
       const createdAt = z.string().min(1).parse(request.createdAt);
-      const contentDigest = sha256(request.text);
+      const contentDigest = composerContentDigest(request.text, request.attachments);
       const existing = getUserIntent(intentId, sessionId);
       if (existing !== undefined) {
         if (
@@ -2452,13 +2513,14 @@ function createOperationalRepositories(
         "next_sequence",
       );
       db.prepare(`INSERT INTO user_intents(
-          intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+          intent_id, session_id, text, attachments_json, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
           promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
-        ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
+        ) VALUES (?, ?, ?, ?, ?, 'turn', 'pending', ?, ?, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
         intentId,
         sessionId,
         request.text,
+        JSON.stringify(attachments),
         contentDigest,
         queueSequence,
         request.queuedBehindTurnId ?? null,
@@ -2548,13 +2610,14 @@ function createOperationalRepositories(
         if (Number(withdrawn.changes) !== 1)
           throw new Error(`Source user intent ${source.intentId} changed during reroute`);
         db.prepare(`INSERT INTO user_intents(
-            intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+            intent_id, session_id, text, attachments_json, content_digest, delivery_mode, status, queue_sequence,
             queued_behind_turn_id, target_turn_id, created_at, updated_at,
             promoted_at, delivered_at, unresolved_at, withdrawn_at, attempt_count
-          ) VALUES (?, ?, ?, ?, 'turn', 'pending', ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
+          ) VALUES (?, ?, ?, ?, ?, 'turn', 'pending', ?, NULL, NULL, ?, ?, NULL, NULL, NULL, NULL, 0)`).run(
           destinationIntentId,
           destinationSessionId,
           source.text,
+          JSON.stringify(source.attachments ?? []),
           source.contentDigest,
           nextSequence,
           source.createdAt,
@@ -2580,12 +2643,31 @@ function createOperationalRepositories(
     database.transaction(() => {
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
-      z.string().trim().min(1).parse(request.text);
+      const attachments = ComposerAttachmentsSchema.parse(request.attachments ?? []);
+      let attachmentBytes = 0;
+      for (const attachment of attachments) {
+        if (attachment.mimeType !== attachment.artifact.mediaType)
+          throw new Error("Attachment MIME does not match artifact");
+        assertStoredReference(db, attachment.artifact);
+        const byteLength = requiredNumber(
+          db
+            .prepare("SELECT byte_length FROM artifacts WHERE artifact_id = ?")
+            .get(attachment.artifact.artifactId),
+          "byte_length",
+        );
+        attachmentBytes += byteLength;
+        if (
+          byteLength > COMPOSER_ATTACHMENT_LIMITS.perFileBytes ||
+          attachmentBytes > COMPOSER_ATTACHMENT_LIMITS.totalBytes
+        )
+          throw new Error("Attachments exceed byte limit");
+      }
+      if (attachments.length === 0) z.string().trim().min(1).parse(request.text);
       const text = request.text;
       const targetTurnId = z.string().min(1).parse(request.targetTurnId);
       const createdAt = z.string().min(1).parse(request.createdAt);
       const promotedAt = z.string().min(1).parse(request.promotedAt);
-      const contentDigest = sha256(text);
+      const contentDigest = composerContentDigest(text, attachments);
       const existing = getUserIntent(intentId, sessionId);
       if (existing !== undefined) {
         if (
@@ -2620,13 +2702,14 @@ function createOperationalRepositories(
         "next_sequence",
       );
       db.prepare(`INSERT INTO user_intents(
-          intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+          intent_id, session_id, text, attachments_json, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
           held_at, promoted_at, delivered_at, unresolved_at, withdrawn_at, steer_origin, attempt_count
-        ) VALUES (?, ?, ?, ?, 'steer', 'dispatching', ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, 'explicit', 1)`).run(
+        ) VALUES (?, ?, ?, ?, ?, 'steer', 'dispatching', ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, NULL, 'explicit', 1)`).run(
         intentId,
         sessionId,
         text,
+        JSON.stringify(attachments),
         contentDigest,
         queueSequence,
         targetTurnId,
@@ -2652,12 +2735,31 @@ function createOperationalRepositories(
     database.transaction(() => {
       const intentId = z.string().min(1).parse(request.intentId);
       const sessionId = z.string().min(1).parse(request.sessionId);
-      z.string().trim().min(1).parse(request.text);
+      const attachments = ComposerAttachmentsSchema.parse(request.attachments ?? []);
+      let attachmentBytes = 0;
+      for (const attachment of attachments) {
+        if (attachment.mimeType !== attachment.artifact.mediaType)
+          throw new Error("Attachment MIME does not match artifact");
+        assertStoredReference(db, attachment.artifact);
+        const byteLength = requiredNumber(
+          db
+            .prepare("SELECT byte_length FROM artifacts WHERE artifact_id = ?")
+            .get(attachment.artifact.artifactId),
+          "byte_length",
+        );
+        attachmentBytes += byteLength;
+        if (
+          byteLength > COMPOSER_ATTACHMENT_LIMITS.perFileBytes ||
+          attachmentBytes > COMPOSER_ATTACHMENT_LIMITS.totalBytes
+        )
+          throw new Error("Attachments exceed byte limit");
+      }
+      if (attachments.length === 0) z.string().trim().min(1).parse(request.text);
       const text = request.text;
       const targetTurnId = z.string().min(1).parse(request.targetTurnId);
       const createdAt = z.string().min(1).parse(request.createdAt);
       const heldAt = z.string().min(1).parse(request.heldAt);
-      const contentDigest = sha256(text);
+      const contentDigest = composerContentDigest(text, attachments);
       const existing = getUserIntent(intentId, sessionId);
       if (existing !== undefined) {
         if (
@@ -2687,13 +2789,14 @@ function createOperationalRepositories(
         "next_sequence",
       );
       db.prepare(`INSERT INTO user_intents(
-          intent_id, session_id, text, content_digest, delivery_mode, status, queue_sequence,
+          intent_id, session_id, text, attachments_json, content_digest, delivery_mode, status, queue_sequence,
           queued_behind_turn_id, target_turn_id, created_at, updated_at,
           held_at, promoted_at, delivered_at, unresolved_at, withdrawn_at, steer_origin, attempt_count
-        ) VALUES (?, ?, ?, ?, 'steer', 'held', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'explicit', 0)`).run(
+        ) VALUES (?, ?, ?, ?, ?, 'steer', 'held', ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, 'explicit', 0)`).run(
         intentId,
         sessionId,
         text,
+        JSON.stringify(attachments),
         contentDigest,
         queueSequence,
         targetTurnId,
@@ -2977,7 +3080,7 @@ function createOperationalRepositories(
     database.transaction(() => {
       const current = getUserIntent(request.intentId, request.sessionId);
       if (current === undefined || current.targetTurnId !== request.targetTurnId) return undefined;
-      if (sha256(request.text) !== current.contentDigest)
+      if (composerContentDigest(request.text, request.attachments) !== current.contentDigest)
         throw new Error(`Steer delivery text for intent ${request.intentId} does not match its digest`);
       if (
         current.status !== "dispatching" &&
@@ -3012,6 +3115,9 @@ function createOperationalRepositories(
         turnId: request.targetTurnId,
         sourceIntentId: request.intentId,
         deliveryMode: "steer",
+        ...createConditionalObject({})
+          .addOptional(request.attachments?.length ? { attachments: request.attachments } : undefined)
+          .finish(),
       });
       const existingMessage = decodeOptional(
         db

@@ -67,6 +67,8 @@ export const HELP_LINES = [
   "/resume · /fork · /compact [FOCUS] · /steer [MESSAGE] · /queue resume",
   "enter queues behind active turns and commands · alt+↑ edits newest queued · esc esc interrupts",
   "shift+enter newline · ctrl+g external editor",
+  "ctrl+v copied files or image · /attach PATH adds a file · /detach NUMBER or all removes",
+  "pasted snippets and paths remain literal editable text",
   "ctrl+o inspect runs · space expand · enter open the run inspector",
   "/quit · learning, experiments, activation, and revert run ambiently",
 ] as const;

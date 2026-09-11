@@ -6,6 +6,8 @@ For current behavior, start with [the product documentation](../docs/README.md),
 
 ## Active implementation plans
 
+- [Composer attachments](noesis-composer-attachments.md), implemented compact image and file previews, clipboard input, and durable model delivery.
+
 - [Prompt cache and token efficiency implementation](noesis-token-efficiency-implementation.md) — active; implementation and review fixes in PR #43.
 - [Prompt caching and token efficiency audit](noesis-prompt-cache-token-efficiency-audit.md) — active design evidence for PR #43 and deferred measurement work.
 - [Pi and OpenCode caching comparison](noesis-pi-opencode-cache-comparison.md) — active research record supporting the token-efficiency implementation.

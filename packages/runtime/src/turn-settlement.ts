@@ -1,4 +1,4 @@
-import { createConditionalObject } from "@noesis/domain";
+import { createConditionalObject, type ComposerAttachment } from "@noesis/domain";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { EvidenceRef, ProjectRef } from "@noesis/domain";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
@@ -8,6 +8,7 @@ export interface TurnSettlementRequest {
   readonly sessionId: string;
   readonly turnId: string;
   readonly input: string;
+  readonly attachments?: readonly ComposerAttachment[];
   readonly sourceIntentId?: string;
   readonly occurredAt: string;
   readonly plan: FrozenTurnPlan;
@@ -50,6 +51,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
           createConditionalObject({
             turnId: request.turnId,
           } as const)
+            .addOptional(request.attachments?.length ? { attachments: request.attachments } : undefined)
             .addOptional(request.sourceIntentId ? { sourceIntentId: request.sourceIntentId } : undefined)
             .add({
               frozenTurnPlanId: request.plan.planId,

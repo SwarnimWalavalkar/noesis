@@ -109,6 +109,12 @@ export async function loadSkillSlashCommands(
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const NOESIS_SLASH_COMMANDS = [
   {
+    name: "attach",
+    description: "Attach a file or image (Ctrl+V reads copied files or images)",
+    argumentHint: "<path>",
+  },
+  { name: "detach", description: "Remove a composer attachment", argumentHint: "<number|all>" },
+  {
     name: "help",
     description: "Show commands and usage",
   },

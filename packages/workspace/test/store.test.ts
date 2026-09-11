@@ -2279,7 +2279,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 49 });
+    ).toEqual({ version: 50 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -3012,7 +3012,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(49);
+    expect(versions.at(-1)).toBe(50);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -4467,6 +4467,62 @@ describe("WorkspaceStore", () => {
         )
         .map((message) => message.metadata["sourceIntentId"]),
     ).toEqual(["intent-steer-second", "intent-steer-first"]);
+    store.close();
+  });
+  test("atomically transfers attachment-only steering refs into the canonical message", async () => {
+    const store = await createWorkspaceStore(await temporary("attachment-steering"));
+    await store.operational.sessions.put(session("attachment-steering"));
+    seedForegroundTurn(store, {
+      turnId: "attachment-turn",
+      sessionId: "attachment-steering",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const artifact = await store.artifacts.writeArtifact({
+      path: "composer/steer.txt",
+      mediaType: "text/plain",
+      bytes: text("steered bytes"),
+      actor,
+      relationshipRefs: [],
+    });
+    const attachments = [{ name: "steer.txt", mimeType: "text/plain", artifact }];
+    const request = {
+      intentId: "attachment-intent",
+      sessionId: "attachment-steering",
+      targetTurnId: "attachment-turn",
+      text: "",
+      attachments,
+      createdAt: "2026-01-01T00:01:00.000Z",
+      promotedAt: "2026-01-01T00:02:00.000Z",
+    };
+    const queued = await store.operational.userIntents.enqueueAndPromoteToSteer(request);
+    expect(queued?.attachments).toEqual(attachments);
+    await expect(
+      store.operational.userIntents.enqueueAndPromoteToSteer({
+        ...request,
+        attachments: [{ ...attachments[0], name: "changed.txt", mimeType: "text/plain", artifact }],
+      }),
+    ).rejects.toThrow(/different identity/);
+    const delivery = {
+      intentId: request.intentId,
+      sessionId: request.sessionId,
+      targetTurnId: request.targetTurnId,
+      text: "",
+      sensitivity: "normal" as const,
+      timelineSequence: 1,
+      deliveredAt: "2026-01-01T00:03:00.000Z",
+    };
+    await expect(store.operational.userIntents.recordSteerDelivery(delivery)).rejects.toThrow(/digest/);
+    const delivered = await store.operational.userIntents.recordSteerDelivery({ ...delivery, attachments });
+    expect(delivered).toMatchObject({ status: "delivered", attachments: [] });
+    expect(delivered?.text).toBeUndefined();
+    expect(await store.operational.messages.get("attachment-turn:steer:attachment-intent")).toMatchObject({
+      content: "",
+      metadata: { attachments },
+    });
+    await expect(
+      store.operational.userIntents.recordSteerDelivery({ ...delivery, attachments }),
+    ).resolves.toMatchObject({ status: "delivered" });
     store.close();
   });
   test("commits steer text to its canonical message atomically and protects intent identity", async () => {

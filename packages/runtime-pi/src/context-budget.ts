@@ -1,3 +1,4 @@
+import { imageSafeJson } from "./image-input.ts";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { calculateContextTokens } from "@earendil-works/pi-coding-agent";
 import {
@@ -219,7 +220,7 @@ function applyProjection(messages: readonly AgentMessage[], projected: ReadonlyS
 }
 
 function estimateMessageTokens(message: AgentMessage): number {
-  return estimateInputTokens(JSON.stringify(message));
+  return estimateInputTokens(imageSafeJson(message));
 }
 
 function heuristicMessageTokens(messages: readonly AgentMessage[]): number {

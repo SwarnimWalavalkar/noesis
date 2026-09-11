@@ -148,7 +148,7 @@ export interface WorkspaceReadPort {
   readonly readWorkingFile: (workingPath: string) => Promise<Uint8Array | undefined>;
   readonly readRevision: (ref: FileRevisionRef) => Promise<Uint8Array>;
   readonly readEvidence: <Kind extends EvidenceKind>(ref: EvidenceRevisionRef<Kind>) => Promise<Uint8Array>;
-  readonly readArtifact: (ref: ArtifactFileRef) => Promise<Uint8Array>;
+  readonly readArtifact: (ref: ArtifactFileRef, maxBytes?: number) => Promise<Uint8Array>;
 }
 
 export interface DefinitionFilePort {

@@ -1,3 +1,4 @@
+import { ComposerAttachmentsSchema } from "@noesis/domain";
 import type { DatabaseRow } from "./database.ts";
 import { validateFrozenSubAgentPlan } from "@noesis/agent-types";
 import {
@@ -176,6 +177,11 @@ export function decodeUserIntent(row: DatabaseRow | undefined): UserIntentRecord
       sessionId: requiredString(row, "session_id"),
     } as const)
       .addOptional(!(text === undefined) ? { text } : undefined)
+      .add({
+        attachments: ComposerAttachmentsSchema.parse(
+          JSON.parse(optionalString(row, "attachments_json") ?? "[]"),
+        ),
+      })
       .add({
         contentDigest: requiredString(row, "content_digest"),
         deliveryMode: UserIntentModeSchema.parse(requiredString(row, "delivery_mode")),

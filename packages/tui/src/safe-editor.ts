@@ -164,7 +164,11 @@ export function createSafeEditor(
 
   const insertSanitizedPaste = (text: string): void => {
     if (!text) return;
-    editor.insertTextAtCursor(sanitizeEditorText(text));
+    const safe = sanitizeEditorText(text);
+    // Pi's collapsed-paste expansion treats literal marker-looking text as owned
+    // snippets and recursively expands payloads. Keep text literal until its public
+    // editor API supports identity-aware snippets; cursor edits and undo stay native.
+    editor.insertTextAtCursor(safe);
     tui.requestRender();
   };
 

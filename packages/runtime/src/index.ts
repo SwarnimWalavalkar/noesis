@@ -9,7 +9,7 @@ import type {
   SubAgentSummary,
 } from "@noesis/agent-types";
 import type { ContextSnapshot } from "@noesis/context";
-import type { JsonValue, TrailStatus } from "@noesis/domain";
+import type { ComposerAttachment, JsonValue, TrailStatus } from "@noesis/domain";
 import type {
   InteractionCommand,
   InteractionDispatchOptions,
@@ -37,6 +37,7 @@ export * from "./subagent-supervisor.ts";
 
 export interface RuntimeTranscriptMessage {
   readonly kind: "message";
+  readonly attachments?: readonly ComposerAttachment[];
   readonly messageId: string;
   readonly turnId?: string;
   readonly role: "user" | "assistant" | "system";
@@ -179,3 +180,5 @@ export interface NoesisRuntime {
   ) => Promise<readonly RuntimeTranscriptEntry[]>;
   readonly subscribeSubAgents: (listener: (event: SubAgentRuntimeEvent) => void) => () => void;
 }
+
+export * from "./attachments.ts";

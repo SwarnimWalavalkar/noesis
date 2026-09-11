@@ -1,3 +1,4 @@
+import { attachmentLabel } from "./attachment-label.ts";
 import { type Component, visibleWidth } from "@earendil-works/pi-tui";
 import { formatCount } from "./action-summary.ts";
 import { renderRunInspectorFrame } from "./run-inspector.ts";
@@ -226,7 +227,7 @@ export function renderQueuedInputs(state: NoesisTuiState, width: number, maxVisi
       : []),
     ...shown.map((item, index) =>
       elideText(
-        `${styled(state.colorEnabled, ANSI.dim, `${String(hidden + index + 1)}${item.status === "held" ? "→" : item.status === "dispatching" ? "⇢" : " "} `)}${safeTerminalQueueText(item.text)}`,
+        `${styled(state.colorEnabled, ANSI.dim, `${String(hidden + index + 1)}${item.status === "held" ? "→" : item.status === "dispatching" ? "⇢" : " "} `)}${safeTerminalQueueText([item.text, attachmentLabel(item.attachments)].filter(Boolean).join(" "))}`,
         safeWidth,
       ),
     ),

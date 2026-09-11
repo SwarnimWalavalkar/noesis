@@ -1,6 +1,6 @@
-import { createConditionalObject } from "@noesis/domain";
+import { createConditionalObject, type ComposerAttachment } from "@noesis/domain";
 import type { RuntimeTranscriptAction, RuntimeTranscriptEntry } from "@noesis/runtime";
-import type { TuiTimelineEntry } from "./state.ts";
+import type { TuiTimelineEntry, TuiMessageEntry, NoesisTuiAction } from "./state.ts";
 
 function parsedTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
@@ -31,6 +31,7 @@ export function tuiTimelineFromRuntime(
         text: entry.text,
         messageId: entry.messageId,
       } as const)
+        .addOptional(entry.attachments ? { attachments: entry.attachments } : undefined)
         .addOptional(entry.turnId ? { turnId: entry.turnId } : undefined)
         .add({
           createdAt: entry.createdAt,
@@ -66,4 +67,23 @@ export function tuiTimelineFromRuntime(
       .addOptional(!(durationMs === undefined) ? { durationMs } : undefined)
       .finish();
   });
+}
+
+export function tuiUserMessage(
+  text: string,
+  attachments: readonly ComposerAttachment[] | undefined,
+): TuiMessageEntry {
+  return createConditionalObject({ kind: "message", role: "user", text } as const)
+    .addOptional(attachments ? { attachments } : undefined)
+    .finish();
+}
+
+export function tuiUserInputAction(
+  type: "prompt-submitted" | "steer-delivered",
+  text: string,
+  attachments: readonly ComposerAttachment[] | undefined,
+): NoesisTuiAction {
+  return createConditionalObject({ type, text })
+    .addOptional(attachments ? { attachments } : undefined)
+    .finish();
 }

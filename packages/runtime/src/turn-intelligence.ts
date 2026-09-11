@@ -21,13 +21,20 @@ import type {
   Capability,
   CapabilityRevision,
   CapabilityRevisionRef,
+  ComposerAttachment,
   EvidenceRef,
   FileRevisionRef,
   PermissionManifest,
   ProjectRef,
   WorkingAdjustment,
 } from "@noesis/domain";
-import { createConditionalObject, canonicalJson, sha256, toJsonValue } from "@noesis/domain";
+import {
+  ComposerAttachmentsSchema,
+  createConditionalObject,
+  canonicalJson,
+  sha256,
+  toJsonValue,
+} from "@noesis/domain";
 import { isCapabilityBindingAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 import { contextNotebookTokenBudget, resolveContextNotebook } from "./session-compaction.ts";
@@ -315,6 +322,7 @@ export interface TurnCapabilityRoutingCandidate {
   readonly intent: string;
 }
 export interface TurnRoutingHistoryMessage {
+  readonly attachments?: readonly ComposerAttachment[];
   readonly messageId: string;
   readonly role: "user" | "assistant";
   readonly content: string;
@@ -411,6 +419,11 @@ async function freezeConversationHistory(
       durable.createdAt !== message.createdAt
     )
       throw new Error(`Turn history message ${message.messageId} does not match authoritative SQLite state`);
+    const attachments = ComposerAttachmentsSchema.parse(durable.metadata["attachments"] ?? []);
+    if (canonicalJson(attachments) !== canonicalJson(message.attachments ?? []))
+      throw new Error(`Turn history message ${message.messageId} has stale attachments`);
+    if (attachments.length > 0 && message.role !== "user")
+      throw new Error(`Turn history message ${message.messageId} attaches files to a non-user message`);
     if (message.turnStatus !== undefined) {
       const turnId = durable.metadata["turnId"];
       if (typeof turnId !== "string" || turnId.length === 0)
@@ -435,6 +448,7 @@ async function freezeConversationHistory(
           contentDigest: sha256(message.content),
         } as const)
           .addOptional(!(message.turnStatus === undefined) ? { turnStatus: message.turnStatus } : undefined)
+          .addOptional(attachments.length > 0 ? { attachments } : undefined)
           .finish(),
       ),
     );

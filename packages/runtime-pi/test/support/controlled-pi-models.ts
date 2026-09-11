@@ -15,6 +15,7 @@ export interface ControlledPiPrompt {
   readonly context: Context;
 }
 export interface CreateControlledPiModelsOptions {
+  readonly imageInput?: boolean;
   readonly respond?: (
     prompt: ControlledPiPrompt,
   ) => string | AssistantMessage | Promise<string | AssistantMessage>;
@@ -39,7 +40,16 @@ export function createControlledPiModels(options: CreateControlledPiModelsOption
   const provider = fauxProvider(
     createConditionalObject({
       provider: CONTROLLED_PI_PROVIDER,
-      models: [{ id: CONTROLLED_PI_MODEL, contextWindow: 200_000, maxTokens: 1_000 }],
+      models: [
+        {
+          id: CONTROLLED_PI_MODEL,
+          contextWindow: 200_000,
+          maxTokens: 1_000,
+          input: options.imageInput
+            ? (["text", "image"] satisfies ("text" | "image")[])
+            : (["text"] satisfies ("text" | "image")[]),
+        },
+      ],
     })
       .addOptional(
         !(options.tokensPerSecond === undefined) ? { tokensPerSecond: options.tokensPerSecond } : undefined,

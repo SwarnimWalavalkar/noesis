@@ -1,6 +1,6 @@
+import { tuiUserInputAction } from "./timeline-adapter.ts";
 import { createConditionalObject } from "@noesis/domain";
 import {
-  type Component,
   Container,
   isKeyRelease,
   matchesKey,
@@ -19,7 +19,10 @@ import {
 } from "./commands.ts";
 import { createEscapeRouting } from "./escape-routing.ts";
 import { createExclusiveCommandBarrier, type ExclusiveCommandBarrier } from "./exclusive-command-barrier.ts";
-import { editTextInExternalEditor } from "./external-editor.ts";
+import { createExternalEditorAction } from "./external-editor-action.ts";
+import { createComposer, createComposerSlot } from "./composer.ts";
+import { createAttachmentPreview } from "./attachment-preview.ts";
+import { readAttachmentPath, readClipboardAttachment } from "./attachment-input.ts";
 import { learningDiagnosticNotice, reconcileSettledTurnPresentation } from "./learning-presentation.ts";
 import { boundedInspectorText, TUI_TIMINGS, type ShutdownSettlement } from "./lifecycle-utils.ts";
 import { createTuiInspectorOrchestration } from "./inspector-orchestration.ts";
@@ -113,6 +116,22 @@ export async function startNoesisTui(
     height: () => terminal.rows,
   });
   const optimisticPrompts = createOptimisticPromptEcho(view, () => tui.requestRender());
+  const composer = createComposer({
+    editor,
+    requestRender: () => tui.requestRender(),
+    notice: (text) => {
+      view.dispatch({ type: "system-message", text });
+      tui.requestRender();
+    },
+    readPath: readAttachmentPath,
+    readClipboard: readClipboardAttachment,
+    preview: (attachment) =>
+      createAttachmentPreview(attachment, () => tui.requestRender(), terminal instanceof ProcessTerminal),
+    canSubmit: () => phase === "main" && !exclusiveCommands?.activeWork(),
+    submit: async (text, attachments) => {
+      await submitPrompt({ type: "submit", text, attachments });
+    },
+  });
   const mcp = createTuiMcpOrchestration(
     createConditionalObject({
       runtime,
@@ -160,8 +179,7 @@ export async function startNoesisTui(
   let phase: "picker" | "main" | "stopped" = session.mode === "pick" ? "picker" : "main";
   enrichEditorSkills(editor, runtime.listSkills, () => phase !== "stopped");
   let exclusiveCommands: ExclusiveCommandBarrier | undefined;
-  let externalEditorActive = false,
-    turnGeneration = 0,
+  let turnGeneration = 0,
     inspectorGeneration = 0;
   let activeTurnToken: ActiveTurnToken | undefined;
   const isCurrentTurn = (token: ActiveTurnToken): boolean =>
@@ -226,6 +244,7 @@ export async function startNoesisTui(
       inspector.hideOverlay();
       optimisticPrompts.clear();
       view.dispatch({ type: "execution-changed", execution: "closing" });
+      composer.dispose();
       editor.disableSubmit = true;
       editor.onSubmit = (): void => undefined;
       removeExitInputListener();
@@ -357,8 +376,12 @@ export async function startNoesisTui(
         interactionEvent.sessionId,
         interactionEvent.text,
         interactionEvent.turnId,
+        interactionEvent.attachments,
       );
-      if (!echoed) view.dispatch({ type: "prompt-submitted", text: interactionEvent.text });
+      if (!echoed)
+        view.dispatch(
+          tuiUserInputAction("prompt-submitted", interactionEvent.text, interactionEvent.attachments),
+        );
       tui.requestRender();
       return;
     }
@@ -367,7 +390,9 @@ export async function startNoesisTui(
         reasoningDeltas.flush(activeTurnToken);
         streamDeltas.flush(activeTurnToken);
       }
-      view.dispatch({ type: "steer-delivered", text: interactionEvent.text });
+      view.dispatch(
+        tuiUserInputAction("steer-delivered", interactionEvent.text, interactionEvent.attachments),
+      );
       tui.requestRender();
       return;
     }
@@ -433,6 +458,22 @@ export async function startNoesisTui(
     if (!trailId) throw new Error("No active session is available for this interaction.");
     return await interactWithSession(trailId, command);
   };
+  const submitPrompt = async (command: Extract<TuiInteractionCommand, { type: "submit" }>): Promise<void> => {
+    const trailId = view.state.trailId;
+    if (!trailId) throw new Error("No active session is available for this interaction.");
+    const optimisticId = optimisticPrompts.echoIfIdle(
+      view.state.interaction,
+      trailId,
+      command.text,
+      command.attachments,
+    );
+    try {
+      await interactWithSession(trailId, command);
+    } catch (error) {
+      if (optimisticId) optimisticPrompts.reject(optimisticId);
+      throw error;
+    }
+  };
   exclusiveCommands = createExclusiveCommandBarrier({
     currentSessionId: () => view.state.trailId,
     canDeliver: () => phase === "main",
@@ -459,47 +500,23 @@ export async function startNoesisTui(
   });
   editor.createStandaloneEscapeHandler = escapeRouting.createStandaloneEscapeHandler;
   const restoreNewestQueuedInput = (): void => {
+    if (!composer.canRestore()) return;
     void interact({ type: "restore-newest" }).then((result) => {
-      if (result.effect !== "restored" || !result.restoredText) return;
+      if (result.effect !== "restored") return;
+      composer.restore(result.restoredAttachments ?? []);
       const draft = editor.getText();
-      editor.setText(draft ? `${draft}\n${result.restoredText}` : result.restoredText);
+      if (result.restoredText)
+        editor.setText(draft ? `${draft}\n${result.restoredText}` : result.restoredText);
       tui.requestRender();
     }, reportFailure);
   };
-  const openExternalEditor = (): void => {
-    if (externalEditorActive) return;
-    externalEditorActive = true;
-    const original = editor.getText();
-    editor.disableSubmit = true;
-    tui.stop();
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    void editTextInExternalEditor(
-      createConditionalObject({
-        content: original,
-      } as const)
-        .addOptional(
-          options.externalEditorCommand ? { configuredCommand: options.externalEditorCommand } : undefined,
-        )
-        .finish(),
-    )
-      .then((result) => {
-        if (phase !== "main") return;
-        if (result.status === "edited") editor.setText(result.content);
-        else
-          view.dispatch({
-            type: "system-message",
-            text: `External editor left the draft unchanged (${result.reason}).`,
-          });
-      })
-      .finally(() => {
-        externalEditorActive = false;
-        if (phase !== "main") return;
-        editor.disableSubmit = false;
-        tui.start();
-        tui.setFocus(editor);
-        tui.requestRender(true);
-      });
-  };
+  const openExternalEditor = createExternalEditorAction({
+    editor,
+    tui,
+    isActive: () => phase === "main",
+    configuredCommand: options.externalEditorCommand,
+    notice: (text) => view.dispatch({ type: "system-message", text }),
+  });
   removeExitInputListener = tui.addInputListener((data) => {
     // Pi filters Kitty key releases before focused components, but global listeners run first.
     // Consume releases here so transcript commands observe the same press-only key stream.
@@ -537,6 +554,7 @@ export async function startNoesisTui(
       return { consume: true };
     }
     if (handleTranscriptKey(data)) return { consume: true };
+    if (composer.handleKey(data)) return { consume: true };
     if (matchesKey(data, "ctrl+g")) {
       openExternalEditor();
       return { consume: true };
@@ -552,6 +570,7 @@ export async function startNoesisTui(
     return undefined;
   });
   editor.onSubmit = (text) => {
+    if (composer.handleSubmission(text)) return;
     const submittedTrailId = view.state.trailId;
     let ownedTrailId = submittedTrailId;
     const normalizedInput = text.trim();
@@ -606,6 +625,7 @@ export async function startNoesisTui(
         const feedback = steerFeedback(result, Boolean(steeringText));
         if (feedback) view.dispatch({ type: "system-message", text: feedback });
         if (result.restoredText) editor.setText(result.restoredText);
+        composer.restore(result.restoredAttachments ?? []);
         tui.requestRender();
         return;
       }
@@ -684,16 +704,13 @@ export async function startNoesisTui(
         }
         return;
       }
-      const optimisticId = optimisticPrompts.echoIfIdle(view.state.interaction, submittedTrailId, text);
-      try {
-        await interact({ type: "submit", text });
-      } catch (error) {
-        if (optimisticId) optimisticPrompts.reject(optimisticId);
-        throw error;
-      }
+      await submitPrompt({ type: "submit", text });
     };
     const reportSubmissionFailure = (cause: unknown): void => {
-      if (isCurrentSubmission()) reportFailure(cause);
+      if (isCurrentSubmission()) {
+        if (!editor.getText()) editor.setText(text);
+        reportFailure(cause);
+      }
     };
     if (exclusiveScope)
       exclusiveCommands?.start({
@@ -704,14 +721,10 @@ export async function startNoesisTui(
       });
     else void performSubmission().catch(reportSubmissionFailure);
   };
-  // Inspect mode pauses and hides the editor while keys navigate the transcript.
-  const editorSlot: Component = {
-    invalidate: () => editor.invalidate(),
-    render: (width) =>
-      view.state.actionCursor || view.state.subAgentCursor || view.state.inspector
-        ? []
-        : editor.render(width),
-  };
+  const editorSlot = createComposerSlot(editor, composer, {
+    hidden: () => Boolean(view.state.actionCursor || view.state.subAgentCursor || view.state.inspector),
+    showPreviews: () => terminal.rows >= 12,
+  });
   tui.addChild(root);
   const mountMain = (
     trail: TrailState,

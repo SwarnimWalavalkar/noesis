@@ -1,5 +1,6 @@
 import type {
   ArtifactFileRef,
+  ComposerAttachment,
   CapabilityRevisionRef,
   EvidenceRef,
   EvidenceRevisionRef,
@@ -11,6 +12,7 @@ import type {
 } from "@noesis/domain";
 import {
   ArtifactFileRefSchema,
+  ComposerAttachmentsSchema,
   createConditionalObject,
   CapabilityRevisionRefSchema,
   canonicalJson,
@@ -468,6 +470,7 @@ export interface FrozenCapabilitySelection {
   readonly permissionManifest: PermissionManifest;
 }
 export interface FrozenConversationHistoryEntry {
+  readonly attachments?: readonly ComposerAttachment[] | undefined;
   readonly messageId: string;
   readonly messageRef: {
     readonly kind: "database_row";
@@ -683,19 +686,27 @@ const FrozenCapabilitySelectionSchema = z.strictObject({
   router: FrozenRevisionMaterialSchema,
   permissionManifest: PermissionManifestSchema,
 });
-const FrozenConversationHistoryEntrySchema = z.strictObject({
-  messageId: z.string().min(1),
-  messageRef: z.strictObject({
-    kind: z.literal("database_row"),
-    table: z.literal("messages"),
-    rowId: z.string().min(1),
-  }),
-  role: z.enum(["user", "assistant"]),
-  content: z.string().min(1),
-  createdAt: z.string().min(1),
-  contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
-  turnStatus: z.enum(["completed", "failed", "aborted"]).optional(),
-});
+const FrozenConversationHistoryEntrySchema = z
+  .strictObject({
+    attachments: ComposerAttachmentsSchema.optional(),
+    messageId: z.string().min(1),
+    messageRef: z.strictObject({
+      kind: z.literal("database_row"),
+      table: z.literal("messages"),
+      rowId: z.string().min(1),
+    }),
+    role: z.enum(["user", "assistant"]),
+    content: z.string(),
+    createdAt: z.string().min(1),
+    contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+    turnStatus: z.enum(["completed", "failed", "aborted"]).optional(),
+  })
+  .refine(
+    (entry) =>
+      (entry.content.length > 0 || (entry.attachments?.length ?? 0) > 0) &&
+      (entry.role === "user" || (entry.attachments?.length ?? 0) === 0),
+    "History requires text or user attachments",
+  );
 const FrozenContextCheckpointSchema = z.strictObject({
   checkpointId: z.string().min(1),
   checkpointRef: z.strictObject({
@@ -1035,7 +1046,15 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     throw new Error(`Frozen turn plan ${plan.planId} failed canonical digest verification`);
   return plan;
 }
+/** Resolved only at the adapter boundary; never persisted in a frozen plan or trace. */
+export interface AgentRuntimeImage {
+  readonly mimeType: string;
+  readonly data: string;
+}
 export interface AgentRuntimeRequest {
+  /** Runtime-resolved artifact labels/paths, separate from authoritative user text. */
+  readonly attachmentText?: string;
+  readonly images?: readonly AgentRuntimeImage[];
   readonly trailId: string;
   readonly provider: string;
   readonly model: string;
@@ -1044,6 +1063,9 @@ export interface AgentRuntimeRequest {
   readonly prompt: string;
   /** Prior conversation preserved at its original instruction level. */
   readonly history?: readonly {
+    readonly attachmentText?: string;
+    readonly images?: readonly AgentRuntimeImage[];
+    readonly attachments?: readonly ComposerAttachment[] | undefined;
     readonly role: "user" | "assistant";
     readonly content: string;
     readonly createdAt?: string;
@@ -1174,7 +1196,12 @@ export interface NoesisAgentRuntime {
     request: AgentRuntimeRequest,
     emit: (event: AgentRuntimeEvent) => void,
   ) => Promise<AgentRuntimeResult>;
-  readonly steer: (trailId: string, text: string) => Promise<AgentSteerResult>;
+  readonly validateImages?: (provider: string, model: string, images: readonly AgentRuntimeImage[]) => void;
+  readonly steer: (
+    trailId: string,
+    text: string,
+    images?: readonly AgentRuntimeImage[],
+  ) => Promise<AgentSteerResult>;
   readonly abort: (trailId: string) => Promise<void>;
 }
 export interface StructuredInferencePort {

@@ -1,4 +1,5 @@
 import { realpath } from "node:fs/promises";
+import { resolveAttachmentHistory } from "./attachment-history.ts";
 import { resolve } from "node:path";
 import type {
   AgentActionEvent,
@@ -43,6 +44,7 @@ import {
   createConditionalObject,
   type CapabilityRevision,
   type CapabilityRevisionRef,
+  type ComposerAttachment,
   canonicalJson,
   capabilityRevisionRef,
   createId,
@@ -91,6 +93,10 @@ import {
   DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS,
   estimateContextTokens,
   loadRuntimeTranscript,
+  composerAttachmentsFromMetadata,
+  persistComposerAttachments,
+  resolveComposerAttachmentImages,
+  renderComposerAttachmentText,
   type NoesisRuntime,
   prepareCompactionWindow,
   renderContextCheckpointSummary,
@@ -5200,6 +5206,9 @@ export async function createApplicationRuntimeComposition(
             historySequence: index,
           } as const)
             .addOptional(historyTurnKey ? { historyTurnKey } : undefined)
+            .addOptional(
+              message.metadata["attachments"] ? { attachments: message.metadata["attachments"] } : undefined,
+            )
             .add({
               inheritedFromSessionId: trailId,
               inheritedFromMessageId: message.messageId,
@@ -5284,6 +5293,11 @@ export async function createApplicationRuntimeComposition(
             createdAt: message.createdAt,
             sensitivity: message.sensitivity,
             startsTurn: message.role === "user" && replayHistoryKind(message) === "turn",
+            attachmentText: renderComposerAttachmentText(
+              "",
+              composerAttachmentsFromMetadata(message.metadata),
+              workspace.paths.root,
+            ),
           } as const)
             .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
             .finish(),
@@ -5517,6 +5531,7 @@ export async function createApplicationRuntimeComposition(
       readonly onReady: () => void;
       readonly isInterruptRequested: () => boolean;
     },
+    attachments: readonly ComposerAttachment[] = [],
   ): Promise<TurnResult> => {
     const trail = getTrail(trailId);
     if (trail.status === "running") throw new Error("Trail is already running");
@@ -5566,6 +5581,7 @@ export async function createApplicationRuntimeComposition(
       const priorConversation = Object.freeze(
         historyMessages.map((message) => {
           const turnStatus = contextById.get(message.messageId)?.turnStatus;
+          const attachments = composerAttachmentsFromMetadata(message.metadata);
           // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
           return Object.freeze(
             createConditionalObject({
@@ -5575,6 +5591,7 @@ export async function createApplicationRuntimeComposition(
               createdAt: message.createdAt,
             } as const)
               .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
+              .addOptional(attachments.length > 0 ? { attachments } : undefined)
               .finish(),
           );
         }),
@@ -5670,6 +5687,7 @@ export async function createApplicationRuntimeComposition(
             input,
           } as const)
             .addOptional(sourceIntentId ? { sourceIntentId } : undefined)
+            .addOptional(attachments.length > 0 ? { attachments } : undefined)
             .add({
               occurredAt,
               plan,
@@ -5858,6 +5876,9 @@ export async function createApplicationRuntimeComposition(
                         thinkingLevel: plan.thinkingLevel,
                         systemPrompt: plan.renderedSystemPrompt,
                         prompt: input,
+                        images: await resolveComposerAttachmentImages(workspace, attachments),
+                        attachmentText: renderComposerAttachmentText("", attachments, workspace.paths.root),
+                        history: await resolveAttachmentHistory(workspace, plan),
                         activeCapabilities: plan.selectedCapabilities.map((selection) => ({
                           name: selection.name,
                           version: plan.activationRevision,
@@ -5960,6 +5981,16 @@ export async function createApplicationRuntimeComposition(
     intents: workspace.operational.userIntents,
     createIntentId: () => createId("intent"),
     createTurnId: () => createId("turn"),
+    prepareAttachments: async (sessionId, inputs) => {
+      const trail = getTrail(sessionId);
+      return await persistComposerAttachments(workspace, sessionId, inputs, (resolved) => {
+        const images = resolved.filter((input) => input.mimeType.startsWith("image/"));
+        if (images.length > 0) {
+          if (!agent.validateImages) throw new Error("This runtime does not support image attachments");
+          agent.validateImages(trail.provider, trail.model, images);
+        }
+      });
+    },
     runTurn: async ({
       sessionId,
       intentId,
@@ -5969,6 +6000,7 @@ export async function createApplicationRuntimeComposition(
       onEvent,
       onReady,
       isInterruptRequested,
+      attachments,
     }) => {
       try {
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -5983,6 +6015,7 @@ export async function createApplicationRuntimeComposition(
             .finish(),
           intentId,
           { onReady, isInterruptRequested },
+          attachments,
         );
         return Object.freeze({ outcome: result.outcome });
       } catch (error) {
@@ -5992,15 +6025,29 @@ export async function createApplicationRuntimeComposition(
         throw error;
       }
     },
-    steer: async (sessionId, text) => {
-      return await agent.steer(sessionId, text);
+    steer: async (sessionId, text, attachments = []) => {
+      const images = await resolveComposerAttachmentImages(workspace, attachments);
+      return await agent.steer(
+        sessionId,
+        renderComposerAttachmentText(text, attachments, workspace.paths.root),
+        images,
+      );
     },
-    recordSteerDelivery: async ({ sessionId, intentId, turnId, text, timelineSequence, deliveredAt }) => {
+    recordSteerDelivery: async ({
+      sessionId,
+      intentId,
+      turnId,
+      text,
+      attachments,
+      timelineSequence,
+      deliveredAt,
+    }) => {
       const delivered = await workspace.operational.userIntents.recordSteerDelivery({
         sessionId,
         intentId,
         targetTurnId: turnId,
         text,
+        attachments: attachments ?? [],
         sensitivity: "normal",
         timelineSequence,
         deliveredAt,

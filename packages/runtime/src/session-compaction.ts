@@ -17,6 +17,8 @@ export const DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS = 4096;
 const SUMMARY_INPUT_RESERVE_TOKENS = 4096;
 export const CONTEXT_NOTEBOOK_ENVELOPE_RESERVE_TOKENS = 256;
 export interface SessionContextMessage {
+  /** File references for continuity notes; binary image content is not summarized as text. */
+  readonly attachmentText?: string;
   readonly messageId: string;
   readonly role: "user" | "assistant";
   readonly content: string;
@@ -79,7 +81,7 @@ function estimateContextMessageTokens(message: SessionContextMessage): number {
   return estimateContextTokens(renderContextMessageContent(message));
 }
 function renderContextMessageContent(message: SessionContextMessage): string {
-  return renderFrozenConversationHistoryContent(message);
+  return [renderFrozenConversationHistoryContent(message), message.attachmentText].filter(Boolean).join("\n");
 }
 export function resolveContextTokenBudget(configured: number, limits: ModelContextLimits): number {
   if (!Number.isSafeInteger(configured) || configured <= 0)
@@ -305,6 +307,9 @@ export function serializeCompactionWindow(window: CompactionWindow, instructions
             createdAt: message.createdAt,
           } as const)
             .addOptional(!(message.turnStatus === undefined) ? { turnStatus: message.turnStatus } : undefined)
+            .addOptional(
+              message.attachmentText ? { attachmentReferences: message.attachmentText } : undefined,
+            )
             .finish(),
         ),
         outputContract: {

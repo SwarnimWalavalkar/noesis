@@ -1,11 +1,13 @@
+import { imageBlocks } from "./image-input.ts";
 import { installPromptCacheKey } from "./prompt-cache.ts";
-import { createConditionalObject } from "@noesis/domain";
+import { canonicalJson, createConditionalObject } from "@noesis/domain";
 import { AgentHarness, TODO_CONTEXT, type AgentLane, type Skill } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
 import {
   type AgentAssistantMessageBoundary,
   type AgentContextUsage,
   type AgentContextInspection,
+  type AgentRuntimeImage,
   type AgentRuntimeEvent,
   type AgentRuntimeRequest,
   type AgentRuntimeResult,
@@ -216,7 +218,7 @@ function historyForRequest(
 ): NonNullable<AgentRuntimeRequest["history"]> {
   if (!plan) return Object.freeze([...(request.history ?? [])]);
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const frozen = Object.freeze([
+  const frozen: NonNullable<AgentRuntimeRequest["history"]> = Object.freeze([
     ...(plan.contextCheckpoint
       ? [
           Object.freeze({
@@ -231,6 +233,7 @@ function historyForRequest(
         role: entry.role,
         content: renderFrozenConversationHistoryContent(entry),
         createdAt: entry.createdAt,
+        attachments: entry.attachments,
       }),
     ),
   ]);
@@ -241,11 +244,26 @@ function historyForRequest(
         (message, index) =>
           message.role === frozen[index]?.role &&
           message.content === frozen[index]?.content &&
-          message.createdAt === frozen[index]?.createdAt,
+          message.createdAt === frozen[index]?.createdAt &&
+          canonicalJson(message.attachments ?? []) === canonicalJson(frozen[index]?.attachments ?? []),
       );
     if (!matches) throw new Error(`Runtime history does not match frozen turn plan ${plan.planId}`);
   }
-  return frozen;
+  return frozen.map((entry, index) => {
+    const images = request.history?.[index]?.images ?? [];
+    const expected = (entry.attachments ?? []).filter((attachment) =>
+      attachment.mimeType.startsWith("image/"),
+    );
+    if (
+      images.length !== expected.length ||
+      images.some((image, i) => image.mimeType !== expected[i]?.mimeType)
+    )
+      throw new Error(`Runtime history images do not match frozen turn plan ${plan.planId}`);
+    const attachmentText = request.history?.[index]?.attachmentText;
+    return createConditionalObject({ ...entry, images })
+      .addOptional(attachmentText === undefined ? undefined : { attachmentText })
+      .finish();
+  });
 }
 export interface AssistantDeltaAggregator {
   /** Start the next Pi assistant message in the same tool-loop turn. */
@@ -285,10 +303,14 @@ function historyTimestamp(createdAt: string | undefined, fallback: number): numb
   const parsed = Date.parse(createdAt);
   return Number.isFinite(parsed) ? parsed : fallback;
 }
-function priorUserMessage(content: string, timestamp: number): UserMessage {
+function priorUserMessage(
+  content: string,
+  timestamp: number,
+  images?: readonly AgentRuntimeImage[],
+): UserMessage {
   const message: UserMessage = {
     role: "user",
-    content: [{ type: "text", text: content }],
+    content: [{ type: "text", text: content }, ...imageBlocks(images)],
     timestamp,
   };
   return Object.freeze(message);
@@ -353,6 +375,8 @@ export function createPiAgentRuntime(
 ): PiAgentRuntime {
   interface ActivePiExecution {
     readonly controller: AbortController;
+    readonly provider: string;
+    readonly model: string;
     readonly pendingSteers: PendingPiSteer[];
     acceptsSteering: boolean;
     hasQueuedSteering: boolean;
@@ -381,6 +405,16 @@ export function createPiAgentRuntime(
     const pending = execution.pendingSteers.splice(0);
     for (const receipt of pending) receipt.resolve(result);
   };
+  const validateImages = (provider: string, modelId: string, images: readonly AgentRuntimeImage[]): void => {
+    imageBlocks(images);
+    if (images.length === 0) return;
+    const model = models.getModel(provider, modelId);
+    if (!model) throw new Error(`Pi model not found: ${provider}/${modelId}`);
+    if (!model.input.includes("image"))
+      throw new Error(
+        `Model ${provider}/${modelId} does not support image input. Select an image-capable model.`,
+      );
+  };
   const active = new Map<string, ActivePiExecution>();
   const contextInspections = new Map<string, AgentContextInspection>();
   const run = async (
@@ -392,6 +426,8 @@ export function createPiAgentRuntime(
     if (active.has(request.trailId)) throw new Error(`Trail ${request.trailId} is already active`);
     const execution: ActivePiExecution = {
       controller: new AbortController(),
+      provider: request.provider,
+      model: request.model,
       pendingSteers: [],
       acceptsSteering: false,
       hasQueuedSteering: false,
@@ -430,6 +466,12 @@ export function createPiAgentRuntime(
         model: model.id,
         contextWindow: model.contextWindow,
       });
+      validateImages(request.provider, request.model, request.images ?? []);
+      for (const message of history) {
+        if (message.role !== "user" && message.images?.length)
+          throw new Error("Only user history may contain images");
+        validateImages(request.provider, request.model, message.images ?? []);
+      }
       const auth = await models.getAuth(model);
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
       if (!auth) {
@@ -699,7 +741,11 @@ export function createPiAgentRuntime(
         const timestamp = historyTimestamp(message.createdAt, historyBaseTimestamp + index);
         await lane.appendMessage(
           message.role === "user"
-            ? priorUserMessage(message.content, timestamp)
+            ? priorUserMessage(
+                [message.content, message.attachmentText].filter(Boolean).join("\n\n"),
+                timestamp,
+                message.images,
+              )
             : priorAssistantMessage(message.content, timestamp, model),
           TODO_CONTEXT,
         );
@@ -861,7 +907,11 @@ export function createPiAgentRuntime(
       emit({ type: "status", status: "started" });
       try {
         if (execution.controller.signal.aborted) return abortedBeforePrompt();
-        const runResult = await lane.prompt(explicitSkill?.prompt ?? request.prompt, undefined, TODO_CONTEXT);
+        const runResult = await lane.prompt(
+          [explicitSkill?.prompt ?? request.prompt, request.attachmentText].filter(Boolean).join("\n\n"),
+          imageBlocks(request.images),
+          TODO_CONTEXT,
+        );
         if (!runResult.ok) throw runResult.error;
         if (execution.controller.signal.aborted) return abortedBeforePrompt();
         if (runResult.value.status === "suspended") {
@@ -964,12 +1014,18 @@ export function createPiAgentRuntime(
       }
     }
   };
-  const steer = async (trailId: string, text: string): Promise<AgentSteerResult> => {
+  const steer = async (
+    trailId: string,
+    text: string,
+    images?: readonly AgentRuntimeImage[],
+  ): Promise<AgentSteerResult> => {
     const execution = active.get(trailId);
     const lane = execution?.lane;
     if (!execution || !lane) return notConsumed("not-running");
     if (!execution.acceptsSteering)
       return notConsumed(execution.controller.signal.aborted ? "aborted" : "turn-ended");
+    validateImages(execution.provider, execution.model, images ?? []);
+    const blocks = imageBlocks(images);
     const deferred = Promise.withResolvers<AgentSteerResult>();
     const receipt: PendingPiSteer = Object.freeze({
       text,
@@ -978,7 +1034,7 @@ export function createPiAgentRuntime(
     });
     execution.pendingSteers.push(receipt);
     try {
-      const queued = await lane.steer(text, undefined, TODO_CONTEXT);
+      const queued = await lane.steer(text, blocks, TODO_CONTEXT);
       if (!queued.ok) throw queued.error;
     } catch {
       // Pi can fail after queue insertion while notifying queue observers. Keep the receipt pending:
@@ -998,6 +1054,7 @@ export function createPiAgentRuntime(
     name: "pi-agent-harness-0.85.0",
     run,
     steer,
+    validateImages,
     abort,
     inspectContext: (trailId: string) => contextInspections.get(trailId),
   });
