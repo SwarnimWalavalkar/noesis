@@ -1,4 +1,9 @@
-export { attachmentImageDimensions, MAX_IMAGE_DIMENSION, MAX_IMAGE_PIXELS } from "./image-dimensions.ts";
+export {
+  imageProjectionTokens,
+  attachmentImageDimensions,
+  MAX_IMAGE_DIMENSION,
+  MAX_IMAGE_PIXELS,
+} from "./image-dimensions.ts";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ArtifactFileRefSchema } from "./storage-schemas.ts";
@@ -68,7 +73,9 @@ export function validateComposerAttachmentInputs(value: unknown): readonly Compo
 
 /** Text-only digests retain compatibility with existing durable intents. */
 export function composerContentDigest(text: string, attachments: readonly ComposerAttachment[] = []): string {
-  return createHash("sha256")
+  const hash = createHash("sha256");
+  if (attachments.length) hash.update(Buffer.from([0xff]));
+  return hash
     .update(
       attachments.length === 0
         ? text

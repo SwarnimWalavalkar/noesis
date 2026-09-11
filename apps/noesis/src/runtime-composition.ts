@@ -5541,7 +5541,11 @@ export async function createApplicationRuntimeComposition(
         `Trail ${trailId} is pinned to runtime ${trail.runtime}; active runtime is ${agent.name}.`,
       );
     const contextTokenBudget = effectiveContextBudget(trail);
-    const historyTokenBudget = effectiveHistoryBudget(trail, input);
+    const currentAttachmentText = renderComposerAttachmentText("", attachments, workspace.paths.root);
+    const historyTokenBudget = effectiveHistoryBudget(
+      trail,
+      [input, currentAttachmentText].filter(Boolean).join("\n"),
+    );
     if (options.config.context.autoCompact) await serializeCompaction(trail, "automatic", historyTokenBudget);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
@@ -5620,6 +5624,7 @@ export async function createApplicationRuntimeComposition(
       const estimatedCompleteRequestTokens =
         estimateContextTokens(plan.renderedSystemPrompt) +
         estimateContextTokens(input) +
+        estimateContextTokens(currentAttachmentText) +
         DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS +
         (plan.contextCheckpoint ? estimateContextTokens(plan.contextCheckpoint.summary) : 0) +
         (plan.conversationHistory ?? []).reduce(
@@ -5867,7 +5872,10 @@ export async function createApplicationRuntimeComposition(
                       readonly error: unknown;
                     };
                 try {
-                  const budget = { remainingBytes: COMPOSER_IMAGE_PROJECTION_LIMITS.totalBytes };
+                  const budget = {
+                    remainingBytes: COMPOSER_IMAGE_PROJECTION_LIMITS.totalBytes,
+                    remainingTokens: Math.max(0, contextTokenBudget - estimatedCompleteRequestTokens - 1024),
+                  };
                   const validateImages = (images: readonly { mimeType: string; data: string }[]) => {
                     if (!agent.validateImages) throw new Error("This runtime does not support inline images");
                     agent.validateImages(plan.provider, plan.model, images);

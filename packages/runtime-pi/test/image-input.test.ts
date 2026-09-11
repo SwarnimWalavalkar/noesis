@@ -66,6 +66,13 @@ function plan(): FrozenTurnPlan {
         createdAt: "2026-01-01T00:00:00.000Z",
         contentDigest: sha256("Previous image"),
         attachments: [attachment],
+        attachmentText: "Attached file: /workspace/.noesis/artifacts/pixel.png",
+        imageDigests: [
+          {
+            artifactId: attachment.artifact.artifactId,
+            contentDigest: sha256(Buffer.from(image.data, "base64")),
+          },
+        ],
       },
     ],
   };
@@ -83,6 +90,7 @@ describe("Pi image input", () => {
         expect(users).toHaveLength(2);
         for (const user of users) expect(user.content).toContainEqual({ type: "image", ...image });
         expect(JSON.stringify(users[0])).toContain("/workspace/.noesis/artifacts/pixel.png");
+        expect(JSON.stringify(users[0])).not.toContain("injected override");
         return "Saw both images";
       },
     });
@@ -99,11 +107,11 @@ describe("Pi image input", () => {
         history: [
           {
             role: "user",
-            content: "Previous image",
+            content: "Previous image\nAttached file: /workspace/.noesis/artifacts/pixel.png",
             createdAt: frozen.createdAt,
             attachments: [attachment],
             images: [image],
-            attachmentText: "Attached file: /workspace/.noesis/artifacts/pixel.png",
+            attachmentText: "injected override",
           },
         ],
       },
@@ -130,7 +138,7 @@ describe("Pi image input", () => {
           history: [
             {
               role: "user",
-              content: "Previous image",
+              content: "Previous image\nAttached file: /workspace/.noesis/artifacts/pixel.png",
               createdAt: plan().createdAt,
               attachments: [{ ...attachment, name: "changed.png" }],
               images: [image],
@@ -140,6 +148,24 @@ describe("Pi image input", () => {
         () => {},
       ),
     ).rejects.toThrow("history does not match");
+    await expect(
+      runtime.run(
+        {
+          ...request,
+          frozenTurnPlan: plan(),
+          history: [
+            {
+              role: "user",
+              content: "Previous image\nAttached file: /workspace/.noesis/artifacts/pixel.png",
+              createdAt: plan().createdAt,
+              attachments: [attachment],
+              images: [{ ...image, data: Buffer.from("different same-MIME bytes").toString("base64") }],
+            },
+          ],
+        },
+        () => {},
+      ),
+    ).rejects.toThrow("history images do not match");
     const tampered = {
       ...plan(),
       conversationHistory: plan().conversationHistory?.map((entry) => ({
@@ -216,7 +242,7 @@ describe("Pi image input", () => {
     expect(await running).toMatchObject({ outcome: "completed", text: "Text only" });
   });
 
-  test("omits encoded bytes from visible inspections and text-token estimates", () => {
+  test("redacts bytes from inspections while reserving dimension-aware image context", () => {
     const message = { role: "user" as const, content: [{ type: "image" as const, ...image }], timestamp: 0 };
     const larger = {
       ...message,
@@ -227,13 +253,25 @@ describe("Pi image input", () => {
       systemPrompt: "",
       activeToolMaterial: "",
       activeToolCount: 0,
-      tokenBudget: 1000,
+      tokenBudget: 10000,
       planId: "image-budget",
     };
     const smallProjection = createPiRequestBudgetProjector().project({ ...budget, messages: [message] });
     const largeProjection = createPiRequestBudgetProjector().project({ ...budget, messages: [larger] });
     expect(largeProjection.estimatedTokens).toBe(smallProjection.estimatedTokens);
     expect(largeProjection.messages[0]).toEqual(larger);
+    const highResolution = Buffer.from(image.data, "base64");
+    highResolution.writeUInt32BE(1024, 16);
+    highResolution.writeUInt32BE(1024, 20);
+    expect(() =>
+      createPiRequestBudgetProjector().project({
+        ...budget,
+        messages: [
+          { ...message, content: [{ type: "image", ...image, data: highResolution.toString("base64") }] },
+        ],
+      }),
+    ).toThrow();
+    expect(smallProjection.estimatedTokens).toBeGreaterThan(1024);
     const components = requestContextComponents({
       systemPrompt: "",
       skillsPrompt: "",

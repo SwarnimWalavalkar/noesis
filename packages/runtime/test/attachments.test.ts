@@ -78,7 +78,9 @@ test("persists immutable bytes, validates restored refs and rejects corruption o
     ]),
   ).rejects.toThrow(/artifact reference/);
   await writeFile(join(root, first.artifact.path), "changed");
-  expect(await persistComposerAttachments(workspace, "source", [first])).toEqual([first]);
+  await expect(persistComposerAttachments(workspace, "source", [first])).rejects.toThrow(
+    "authoritative metadata",
+  );
   await expect(workspace.reads.readArtifact(first.artifact, 100)).rejects.toThrow(/digest mismatch/);
   await workspace.close();
 });
@@ -166,6 +168,28 @@ test("image resolution never reads generic artifacts, but validates MIME referen
     await expect(
       resolveComposerAttachmentImages(instrumented, [{ ...generic, mimeType: "application/pdf" }]),
     ).rejects.toThrow("MIME differs");
+  } finally {
+    await workspace.close();
+  }
+});
+
+test("attachment digests cannot collide with literal serialization in text-only intents", async () => {
+  const { workspace } = await setup();
+  try {
+    const refs = await persistComposerAttachments(workspace, "source", [input]);
+    const literal = JSON.stringify({ text: "", attachments: refs });
+    expect(composerContentDigest("", refs)).not.toBe(composerContentDigest(literal));
+    const options = {
+      intentId: "separated",
+      sessionId: "source",
+      createdAt: "2026-01-01",
+      text: "",
+      attachments: refs,
+    };
+    await workspace.operational.userIntents.enqueue(options);
+    await expect(
+      workspace.operational.userIntents.enqueue({ ...options, text: literal, attachments: [] }),
+    ).rejects.toThrow();
   } finally {
     await workspace.close();
   }

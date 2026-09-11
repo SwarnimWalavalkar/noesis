@@ -7,11 +7,24 @@ type Dimensions = Readonly<{ width: number; height: number }>;
 
 /** Header inspection only: never decode untrusted pixels on the admission thread. */
 function headerDimensions(bytes: Buffer, mimeType: string): Dimensions | undefined {
-  if (mimeType === "image/png" && bytes.length >= 24 && bytes.toString("ascii", 12, 16) === "IHDR")
+  if (
+    mimeType === "image/png" &&
+    bytes.length >= 24 &&
+    bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) &&
+    bytes.toString("ascii", 12, 16) === "IHDR"
+  )
     return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
-  if (mimeType === "image/gif" && bytes.length >= 10)
+  if (
+    mimeType === "image/gif" &&
+    bytes.length >= 10 &&
+    ["GIF87a", "GIF89a"].includes(bytes.toString("ascii", 0, 6))
+  )
     return { width: bytes.readUInt16LE(6), height: bytes.readUInt16LE(8) };
-  if (mimeType === "image/webp") {
+  if (
+    mimeType === "image/webp" &&
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WEBP"
+  ) {
     const chunk = bytes.toString("ascii", 12, 16);
     if (chunk === "VP8 " && bytes.length >= 30)
       return { width: bytes.readUInt16LE(26) & 0x3fff, height: bytes.readUInt16LE(28) & 0x3fff };
@@ -22,7 +35,7 @@ function headerDimensions(bytes: Buffer, mimeType: string): Dimensions | undefin
     if (chunk === "VP8X" && bytes.length >= 30)
       return { width: bytes.readUIntLE(24, 3) + 1, height: bytes.readUIntLE(27, 3) + 1 };
   }
-  if (mimeType === "image/jpeg") {
+  if (mimeType === "image/jpeg" && bytes[0] === 0xff && bytes[1] === 0xd8) {
     let offset = 2;
     while (offset + 1 < bytes.length) {
       if (bytes[offset] !== 0xff) return undefined;
@@ -60,4 +73,12 @@ export function validateImageDimensions(bytes: Buffer, mimeType: string): Dimens
 
 export function attachmentImageDimensions(input: ComposerAttachmentInput): Dimensions {
   return validateImageDimensions(Buffer.from(input.data, "base64"), input.mimeType);
+}
+
+/** Conservative provider-neutral projection allowance, not a claim of provider billing. */
+export function imageProjectionTokens(input: ComposerAttachmentInput): number {
+  if (Buffer.byteLength(input.data, "base64") > 10 * 1024 * 1024)
+    throw new Error("Inline image exceeds the bounded projection working set.");
+  const { width, height } = attachmentImageDimensions(input);
+  return 1024 + Math.ceil((width * height) / 64);
 }

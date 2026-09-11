@@ -1,3 +1,4 @@
+import { renderComposerAttachmentText } from "./attachments.ts";
 import {
   type AgentThinkingLevel,
   type FrozenBaselineRef,
@@ -432,6 +433,15 @@ async function freezeConversationHistory(
       if (!turn || turn.sessionId !== sessionId || turn.status !== message.turnStatus)
         throw new Error(`Turn history message ${message.messageId} has a stale terminal turn status`);
     }
+    const imageDigests = [];
+    for (const attachment of attachments)
+      if (attachment.mimeType.startsWith("image/")) {
+        const metadata = await workspace.reads.inspectArtifact(attachment.artifact);
+        imageDigests.push({
+          artifactId: attachment.artifact.artifactId,
+          contentDigest: metadata.contentDigest,
+        });
+      }
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     frozen.push(
       Object.freeze(
@@ -448,7 +458,15 @@ async function freezeConversationHistory(
           contentDigest: sha256(message.content),
         } as const)
           .addOptional(!(message.turnStatus === undefined) ? { turnStatus: message.turnStatus } : undefined)
-          .addOptional(attachments.length > 0 ? { attachments } : undefined)
+          .addOptional(
+            attachments.length > 0
+              ? {
+                  attachments,
+                  attachmentText: renderComposerAttachmentText("", attachments, workspace.paths.root),
+                  imageDigests,
+                }
+              : undefined,
+          )
           .finish(),
       ),
     );
@@ -604,17 +622,18 @@ export function createTurnIntelligencePlanner(
                     }),
                   ]
                 : []),
-              ...conversationHistory.map(({ messageId, role, content, createdAt, turnStatus }) =>
-                Object.freeze(
-                  createConditionalObject({
-                    messageId,
-                    role,
-                    content,
-                    createdAt,
-                  } as const)
-                    .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
-                    .finish(),
-                ),
+              ...conversationHistory.map(
+                ({ messageId, role, content, attachmentText, createdAt, turnStatus }) =>
+                  Object.freeze(
+                    createConditionalObject({
+                      messageId,
+                      role,
+                      content: [content, attachmentText].filter(Boolean).join("\n"),
+                      createdAt,
+                    } as const)
+                      .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
+                      .finish(),
+                  ),
               ),
             ]),
             candidates: Object.freeze(

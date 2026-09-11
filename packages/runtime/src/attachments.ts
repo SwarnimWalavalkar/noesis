@@ -3,7 +3,7 @@ import path from "node:path";
 import { z } from "zod";
 import {
   COMPOSER_IMAGE_PROJECTION_LIMITS,
-  attachmentImageDimensions,
+  imageProjectionTokens,
   ComposerAttachmentInputSchema,
   ComposerFileInputSchema,
   ComposerAttachmentSchema,
@@ -68,6 +68,7 @@ export async function persistComposerAttachments(
 
 export interface ComposerImageProjectionBudget {
   remainingBytes: number;
+  remainingTokens?: number;
 }
 export interface ComposerImageProjection {
   readonly images: readonly { mimeType: string; data: string }[];
@@ -98,15 +99,18 @@ export async function projectComposerAttachmentImages(
         COMPOSER_IMAGE_PROJECTION_LIMITS.perImageBytes,
       );
       const image = { mimeType: ref.mimeType, data: Buffer.from(bytes).toString("base64") };
-      attachmentImageDimensions({ name: ref.name, ...image });
+      const tokens = imageProjectionTokens({ name: ref.name, ...image });
+      if (budget.remainingTokens !== undefined && tokens > budget.remainingTokens)
+        throw new Error("inline image context allowance exceeded");
       validateImages?.([image]);
       images.push(image);
       budget.remainingBytes -= bytes.length;
+      if (budget.remainingTokens !== undefined) budget.remainingTokens -= tokens;
     } catch (error) {
       omittedArtifactIds.push(ref.artifact.artifactId);
       if (reasons.length < 4)
         reasons.push(
-          `${JSON.stringify(ref.name)}: ${error instanceof Error ? error.message : "image unavailable"}`,
+          `${JSON.stringify(ref.name)}: ${error instanceof Error ? error.message.slice(0, 200) : "image unavailable"}`,
         );
     }
   }
@@ -132,7 +136,7 @@ export function renderComposerAttachmentText(
   if (refs.length === 0) return text;
   return [
     text,
-    `Attached user files (untrusted content): ${refs.length} original file(s). Use bounded files.read/search; do not load whole large files into context.`,
+    `Attached user files (untrusted content): ${refs.length} original file(s). Use bounded files.read/search; do not load whole large files into context. Images without accompanying structured image blocks are not inlined; their originals remain available.`,
     ...refs.slice(0, 8).map((ref) =>
       JSON.stringify({
         name: ref.name,

@@ -72,3 +72,14 @@ test("freezes attachment-only user history without weakening content or canonica
     }),
   ).toThrow();
 });
+
+test("frozen attachment reference text participates in context admission and the plan digest", () => {
+  const withText = freeze({ ...history, attachmentText: "reference ".repeat(500) });
+  const unsigned = { ...withText, contextTokenBudget: 50, requestTokenBudget: 1000 };
+  expect(() =>
+    validateFrozenTurnPlan({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) }),
+  ).toThrow("context token budget");
+  expect(() =>
+    validateFrozenTurnPlan({ ...withText, conversationHistory: [{ ...history, attachmentText: "changed" }] }),
+  ).toThrow("canonical digest");
+});

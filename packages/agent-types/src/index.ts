@@ -470,6 +470,10 @@ export interface FrozenCapabilitySelection {
   readonly permissionManifest: PermissionManifest;
 }
 export interface FrozenConversationHistoryEntry {
+  readonly attachmentText?: string | undefined;
+  readonly imageDigests?:
+    | readonly { readonly artifactId: string; readonly contentDigest: string }[]
+    | undefined;
   readonly attachments?: readonly ComposerAttachment[] | undefined;
   readonly messageId: string;
   readonly messageRef: {
@@ -485,13 +489,15 @@ export interface FrozenConversationHistoryEntry {
   readonly turnStatus?: "completed" | "failed" | "aborted";
 }
 export function renderFrozenConversationHistoryContent(entry: {
+  readonly attachmentText?: string | undefined;
   readonly content: string;
   readonly role: "user" | "assistant";
   readonly turnStatus?: "completed" | "failed" | "aborted" | undefined;
 }): string {
-  if (entry.turnStatus !== "failed" && entry.turnStatus !== "aborted") return entry.content;
+  const content = [entry.content, entry.attachmentText].filter(Boolean).join("\n");
+  if (entry.turnStatus !== "failed" && entry.turnStatus !== "aborted") return content;
   const kind = entry.role === "user" ? "user message" : "partial assistant message";
-  return `[Previous ${kind} from a turn that ${entry.turnStatus} before completion.]\n${entry.content}`;
+  return `[Previous ${kind} from a turn that ${entry.turnStatus} before completion.]\n${content}`;
 }
 export interface FrozenContextCheckpoint {
   readonly checkpointId: string;
@@ -689,6 +695,12 @@ const FrozenCapabilitySelectionSchema = z.strictObject({
 const FrozenConversationHistoryEntrySchema = z
   .strictObject({
     attachments: ComposerAttachmentsSchema.optional(),
+    attachmentText: z.string().optional(),
+    imageDigests: z
+      .array(
+        z.strictObject({ artifactId: z.string().min(1), contentDigest: z.string().regex(/^[a-f0-9]{64}$/u) }),
+      )
+      .optional(),
     messageId: z.string().min(1),
     messageRef: z.strictObject({
       kind: z.literal("database_row"),

@@ -1,6 +1,6 @@
 import { imageBlocks } from "./image-input.ts";
 import { installPromptCacheKey } from "./prompt-cache.ts";
-import { canonicalJson, createConditionalObject } from "@noesis/domain";
+import { canonicalJson, createConditionalObject, sha256 } from "@noesis/domain";
 import { AgentHarness, TODO_CONTEXT, type AgentLane, type Skill } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
 import {
@@ -261,15 +261,24 @@ function historyForRequest(
     )
       throw new Error(`Runtime history omissions do not match frozen turn plan ${plan.planId}`);
     const expected = imageRefs.filter((attachment) => !omitted.includes(attachment.artifact.artifactId));
+    const plannedEntry = plan.conversationHistory?.[index - (plan.contextCheckpoint ? 1 : 0)];
     if (
       images.length !== expected.length ||
-      images.some((image, i) => image.mimeType !== expected[i]?.mimeType)
+      images.some((image, imageIndex) => {
+        const expectedRef = expected[imageIndex];
+        const digest = plannedEntry?.imageDigests?.find(
+          (item) => item.artifactId === expectedRef?.artifact.artifactId,
+        )?.contentDigest;
+        return (
+          image.mimeType !== expectedRef?.mimeType ||
+          !digest ||
+          sha256(Buffer.from(image.data, "base64")) !== digest
+        );
+      })
     )
       throw new Error(`Runtime history images do not match frozen turn plan ${plan.planId}`);
-    const attachmentText = request.history?.[index]?.attachmentText;
-    return createConditionalObject({ ...entry, images })
-      .addOptional(attachmentText === undefined ? undefined : { attachmentText })
-      .finish();
+    // Frozen content already includes authoritative attachment text. Never forward a caller override.
+    return Object.freeze({ ...entry, images });
   });
 }
 export interface AssistantDeltaAggregator {

@@ -74,7 +74,11 @@ export function createComposer(options: ComposerOptions) {
       signal?: AbortSignal,
     ) => Promise<ComposerDraftAttachment | readonly ComposerDraftAttachment[] | undefined>,
   ): void => {
-    if (disposed || sending) return;
+    if (disposed) return;
+    if (sending) {
+      notice("Message admission is still pending; retry attaching after it settles.");
+      return;
+    }
     const id = ++sequence;
     const controller = new AbortController();
     reads.set(id, controller);

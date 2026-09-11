@@ -62,3 +62,12 @@ Typechecking and changed-file lint/format checks passed. The release build passe
 - Clipboard pixels spool with backpressure, with cancellation and source ownership through pending admission. Preview queue jobs/payload bytes remain bounded and cancellable.
 - Validation: **924 tests / 73 files passed** on explicit domain, agent-types, runtime-pi, runtime, workspace, TUI, tools, and affected app test paths with `--maxWorkers=4`. This includes 12 files with two >16MiB originals and empty files, source deletion, complete manifests, mutation detection, retry dedup, real import cancellation, and clipboard spool/lifetime regressions.
 - Original checkpoint CI failed only lint issues; fixing those before the next push. Final-head CI and bot reviews—not original-head results—remain the merge gate.
+
+## Final-head bot corrections
+
+- Domain-separated attached-intent digests cannot collide with literal JSON text-only input; legacy text-only hashes remain unchanged. SQL again rejects embedded-NUL digests and delivered rows retaining attachment copies.
+- Frozen history now pins authoritative attachment text and image content digests. Pi ignores caller attachment-text overrides and verifies decoded replay image bytes against frozen digests without filesystem authority.
+- History/current attachment text participates in context admission. Optional image projection reserves a conservative dimension-based context allowance independently of storage admission; images that do not fit remain original files with explicit notices.
+- Metadata-only restore additionally checks file existence/type/length (not whole generic-file hashes). Partial successful imports remain registered session-linked artifacts, and identical retries reuse identities rather than destructive cleanup.
+- Pending clipboard/path requests receive an explicit retry notice; empty transcript projections and reasoning-only entries no longer carry irrelevant attachment arrays.
+- Full affected suite: **927 tests / 73 files passed** before the additional standalone SQL invariant regression. Formatting, lint, and typecheck pass. All final-head CI and bot reviews remain mandatory before merge.

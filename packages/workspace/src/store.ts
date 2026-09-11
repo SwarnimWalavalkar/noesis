@@ -1608,10 +1608,19 @@ export async function createWorkspaceStore(
           .prepare("SELECT byte_length, content_digest FROM artifacts WHERE artifact_id = ?")
           .get(ref.artifactId);
         if (!row) throw new Error("Missing artifact");
-        return {
-          byteLength: requiredNumber(row, "byte_length"),
-          contentDigest: requiredString(row, "content_digest"),
-        };
+        const byteLength = requiredNumber(row, "byte_length");
+        const file = await open(
+          pathInside(paths.root, ref.path),
+          fsConstants.O_RDONLY | fsConstants.O_NONBLOCK,
+        );
+        try {
+          const info = await file.stat();
+          if (!info.isFile() || info.size !== byteLength)
+            throw new Error("Artifact file does not match authoritative metadata");
+        } finally {
+          await file.close();
+        }
+        return { byteLength, contentDigest: requiredString(row, "content_digest") };
       },
       readArtifact: async (ref: ArtifactFileRef, maxBytes?: number) => {
         ArtifactFileRefSchema.parse(ref);

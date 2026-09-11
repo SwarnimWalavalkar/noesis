@@ -269,3 +269,15 @@ test("disposing composer preserves submitted clipboard sources until admission s
     })
     .toBe(true);
 });
+
+test("clipboard and path attachment requests explain pending admission instead of disappearing", () => {
+  const pending = Promise.withResolvers<void>();
+  const f = fixture(undefined, () => pending.promise);
+  f.composer.restore([file]);
+  f.enter("send");
+  f.composer.handleKey("\u0016");
+  f.enter("/attach later.txt");
+  expect(f.notice).toHaveBeenCalledWith(expect.stringContaining("retry attaching"));
+  expect(f.readClipboard).not.toHaveBeenCalled();
+  pending.resolve();
+});

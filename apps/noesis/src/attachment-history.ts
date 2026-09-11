@@ -1,7 +1,7 @@
 import type { AgentRuntimeRequest, FrozenTurnPlan } from "@noesis/agent-types";
 import { renderFrozenConversationHistoryContent } from "@noesis/agent-types";
 import { createConditionalObject } from "@noesis/domain";
-import { renderComposerAttachmentText, projectComposerAttachmentImages } from "@noesis/runtime";
+import { projectComposerAttachmentImages } from "@noesis/runtime";
 import type { NoesisWorkspaceStore } from "@noesis/workspace";
 
 /** Resolve only retained image bytes, once per request. Frozen plans retain artifact references. */
@@ -35,11 +35,6 @@ export async function resolveAttachmentHistory(
                 attachments,
                 images: projection.images,
                 omittedImageArtifactIds: projection.omittedArtifactIds,
-                attachmentText: renderComposerAttachmentText(
-                  projection.notice,
-                  attachments,
-                  workspace.paths.root,
-                ),
               }
             : undefined,
         )

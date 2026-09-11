@@ -287,7 +287,6 @@ export async function loadRuntimeTranscript(
           kind: "reasoning" as const,
           reasoningId: message.messageId,
           text: message.content,
-          attachments: composerAttachmentsFromMetadata(message.metadata),
           createdAt: message.createdAt,
         } as const)
           .addOptional(turnId ? { turnId } : undefined)

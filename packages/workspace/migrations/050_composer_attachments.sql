@@ -6,6 +6,7 @@ CREATE TABLE user_intents_with_attachments (
   content_digest TEXT NOT NULL CHECK (
     length(content_digest) = 64
     AND content_digest NOT GLOB '*[^0-9a-f]*'
+    AND instr(content_digest, char(0)) = 0
   ),
   delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('turn', 'steer')),
   status TEXT NOT NULL CHECK (
@@ -45,6 +46,7 @@ CREATE TABLE user_intents_with_attachments (
       AND target_turn_id IS NOT NULL
       AND delivered_at IS NULL AND unresolved_at IS NOT NULL AND withdrawn_at IS NULL) OR
     (status = 'delivered'
+      AND attachments_json = '[]'
       AND text IS NULL
       AND target_turn_id IS NOT NULL
       AND delivered_at IS NOT NULL AND unresolved_at IS NULL AND withdrawn_at IS NULL) OR

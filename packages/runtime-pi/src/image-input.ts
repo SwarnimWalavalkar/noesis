@@ -1,11 +1,12 @@
 import type { AgentRuntimeImage } from "@noesis/agent-types";
-import { validateComposerAttachmentInputs } from "@noesis/domain";
+import { imageProjectionTokens, validateComposerAttachmentInputs } from "@noesis/domain";
 import type { ImageContent } from "@earendil-works/pi-ai";
 
 export function imageBlocks(images: readonly AgentRuntimeImage[] = []): ImageContent[] {
   if (images.some((image) => !image.mimeType.startsWith("image/")))
     throw new Error("Image input requires a supported image MIME type");
   validateComposerAttachmentInputs(images.map((image, index) => ({ ...image, name: `image-${index}` })));
+  for (const image of images) imageProjectionTokens({ ...image, name: "model-image" });
   return images.map(({ mimeType, data }) => ({ type: "image", mimeType, data }));
 }
 
