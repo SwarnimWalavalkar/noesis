@@ -31,7 +31,10 @@ export function renderMessageBlock(message: TuiMessage, width: number, colorEnab
   const source = message.text || (message.role === "assistant" ? "…" : "");
   const renderedBody = renderRichText(source, bodyWidth, colorEnabled);
   const attachments = attachmentLabel(message.attachments);
-  const body = [...renderedBody, ...(attachments ? [elideText(attachments, bodyWidth)] : [])];
+  const body = [
+    ...(attachments ? [elideText(attachments, bodyWidth), ...(source ? [""] : [])] : []),
+    ...renderedBody,
+  ];
   if (body.length === 0) body.push("");
   return [
     styled(colorEnabled, `${ANSI.bold}${labelColor}`, shownLabel),
