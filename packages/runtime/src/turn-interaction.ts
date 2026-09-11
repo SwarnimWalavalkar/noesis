@@ -708,7 +708,11 @@ export function createTurnInteractionController(
     if (command.type === "steer" && command.text === undefined && command.attachments?.length)
       command = { ...command, text: "" };
     const state = stateFor(sessionId);
-    if (command.type === "interrupt" || command.type === "pause-queue") state.preparation?.abort();
+    if (command.type === "interrupt" || command.type === "pause-queue") {
+      state.cancellationGeneration += 1;
+      state.preparation?.abort();
+    }
+    const cancellationGeneration = state.cancellationGeneration;
     if (dispatchOptions.onEvent) {
       if (observedSessionId && observedSessionId !== sessionId) delete stateFor(observedSessionId).observer;
       observedSessionId = sessionId;
@@ -727,6 +731,8 @@ export function createTurnInteractionController(
       if (closed) throw new Error("Turn interaction controller is closed");
       let attachments: readonly ComposerAttachment[] = [];
       if (attachmentInputs.length) {
+        if (state.cancellationGeneration !== cancellationGeneration)
+          throw new Error("Attachment preparation cancelled");
         const preparation = new AbortController();
         state.preparation = preparation;
         try {
@@ -734,6 +740,8 @@ export function createTurnInteractionController(
             ? await options.prepareAttachments(sessionId, attachmentInputs, preparation.signal)
             : ComposerAttachmentsSchema.parse(attachmentInputs);
           preparation.signal.throwIfAborted();
+          if (state.cancellationGeneration !== cancellationGeneration)
+            throw new Error("Attachment preparation cancelled");
         } finally {
           delete state.preparation;
         }
@@ -793,7 +801,6 @@ export function createTurnInteractionController(
         const queueWasHeld = state.queuePaused && (await snapshot(sessionId, state)).pending.length > 0;
         state.preparation?.abort();
         state.queuePaused = true;
-        state.cancellationGeneration += 1;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         const current = await snapshot(sessionId, state);
@@ -858,7 +865,6 @@ export function createTurnInteractionController(
         if (!command.turnId) throw new Error("Interrupt requires a visible active turn identity");
         state.preparation?.abort();
         state.queuePaused = true;
-        state.cancellationGeneration += 1;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         const active = state.active;
@@ -1118,7 +1124,6 @@ export function createTurnInteractionController(
       for (const [sessionId, state] of sessions) {
         state.preparation?.abort();
         state.queuePaused = true;
-        state.cancellationGeneration += 1;
         state.cancelScheduled?.();
         delete state.cancelScheduled;
         if (state.active) state.phase = "interrupting";

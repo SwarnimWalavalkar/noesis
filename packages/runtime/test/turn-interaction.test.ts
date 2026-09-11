@@ -1545,3 +1545,54 @@ test("pause cancels attachment preparation before waiting for serialized command
     await controller.close();
   }
 }, 1000);
+
+test.each(["pause-queue", "interrupt"] as const)(
+  "%s cancels attachment submissions waiting for recovery",
+  async (type) => {
+    const recoveryStarted = deferred<void>();
+    const recovery = deferred<void>();
+    const intents = createIntentStore();
+    let preparations = 0;
+    const controller = createTurnInteractionController({
+      intents: {
+        ...intents,
+        recoverDispatching: async () => {
+          recoveryStarted.resolve();
+          await recovery.promise;
+          return { released: 0, delivered: 0, unresolved: 0 };
+        },
+      },
+      recordSteerDelivery: async () => {},
+      createIntentId: () => "cancelled-input",
+      createTurnId: () => "unused-turn",
+      runTurn: async () => ({ outcome: "completed" }),
+      steer: async () => consumedSteer(),
+      interrupt: async () => {},
+      prepareAttachments: async () => {
+        preparations += 1;
+        return [];
+      },
+    });
+    try {
+      const submitted = controller.dispatch("session-1", {
+        type: "submit",
+        text: "file",
+        attachments: [{ name: "empty", mimeType: "text/plain", data: "" }],
+      });
+      const rejected = expect(submitted).rejects.toThrow("Attachment preparation cancelled");
+      await recoveryStarted.promise;
+      const cancelled = controller.dispatch(
+        "session-1",
+        type === "interrupt" ? { type, turnId: "unused-turn" } : { type },
+      );
+      recovery.resolve();
+      await Promise.all([rejected, cancelled]);
+      expect(preparations).toBe(0);
+      expect(intents.records()).toEqual([]);
+    } finally {
+      recovery.resolve();
+      await controller.close();
+    }
+  },
+  1000,
+);
