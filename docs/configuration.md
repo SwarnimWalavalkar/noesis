@@ -108,6 +108,32 @@ A newly connected server can be used in the same turn through `mcp.call_tool`, u
 
 Connected MCP tools join the same catalog as built-in tools. The model can call them through `execute` or use them from a saved Program.
 
+## Built-in skills
+
+Noesis installs its built-in skills into the configured home when starting a session or running a
+`noesis skills` command:
+
+- `~/.noesis/skills/builtin/noesis/SKILL.md` (also invoked through `/refine`)
+- `~/.noesis/skills/builtin/execute/SKILL.md`
+
+`--home` and `NOESIS_HOME` relocate these files along with the rest of the configuration. You can edit
+the skill bodies directly; subsequent turn snapshots load the local files. Built-in command names,
+aliases, and catalog descriptions remain application-defined.
+
+Existing installations receive these local files automatically on their next session startup or
+`noesis skills` command after upgrading. No manual migration is needed.
+
+When a shipped skill's contents change, Noesis installs the new canonical body. If you edited the
+previous body, Noesis first saves it in that skill's `backups/SKILL.<timestamp>.<unique-id>.md.bak` file.
+You can compare that backup with `SKILL.md` and manually reapply the changes you want. Backups are
+retained across later updates; a failed backup prevents replacement. An existing local file without
+known installation metadata is also backed up before installing the canonical version.
+
+Restarting with unchanged bundled contents preserves local edits, including your reconciled changes.
+The adjacent `.bundled-digest` tracks the last installed canonical contents. Delete `SKILL.md` and
+restart Noesis to restore the current bundled default. Learned skills keep their existing Capability
+storage and revision behavior.
+
 ## Upgrade or uninstall
 
 Upgrade to the latest published version:

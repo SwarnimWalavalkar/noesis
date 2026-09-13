@@ -42,7 +42,7 @@ import {
   resolveActiveProject,
 } from "./runtime-composition.ts";
 import { createApplicationMcpIntegration } from "./mcp-integration.ts";
-import { NOESIS_BUILT_IN_SKILLS } from "./noesis-skill.ts";
+import { prepareNoesisBuiltInSkills } from "./noesis-skill.ts";
 interface CliInput {
   readonly args: readonly string[];
   readonly command: string;
@@ -308,7 +308,7 @@ async function createRuntime(
     cwd: project.root,
     agentDirectory: join(config.home, "agent"),
     workspaceTrusted: options.workspaceTrusted,
-    builtInSkills: NOESIS_BUILT_IN_SKILLS,
+    builtInSkills: await prepareNoesisBuiltInSkills(config.home),
   });
   const mcpInteractionBridge = createTuiMcpInteractionBridge();
   const mcp = options.enableMcp
@@ -522,7 +522,7 @@ async function runSkills(input: CliInput): Promise<void> {
     cwd: process.cwd(),
     agentDirectory: join(input.home, "agent"),
     workspaceTrusted: input.workspaceTrusted,
-    builtInSkills: NOESIS_BUILT_IN_SKILLS,
+    builtInSkills: await prepareNoesisBuiltInSkills(input.home),
   });
   const action = input.subcommand ?? "list";
   if (action === "list") {
