@@ -1,3 +1,4 @@
+import { renderUpdateNotice } from "./update-notice.ts";
 import { createConditionalObject } from "@noesis/domain";
 import {
   Container,
@@ -92,18 +93,26 @@ export function onboardingHeaderLines(
     readonly subtitle?: string;
     readonly trueColor?: boolean;
     readonly note?: string;
+    readonly updateNotice?: string | undefined;
   } = {},
 ): string[] {
   const collapsed = options.collapsed ?? false;
   const subtitle = options.subtitle ?? "first-launch setup";
   const trueColor = options.trueColor ?? false;
   const note = options.note ?? NOESIS_STARTUP_NOTES[0];
+  const updateLines = collapsed ? [] : renderUpdateNotice(options.updateNotice, width, height, colorEnabled);
   const brand = (text: string): string => brandGradient(text, colorEnabled, trueColor);
   const muted = (text: string): string => styled(colorEnabled, ANSI.dim, text);
   if (width < 30 || height < 8) return [];
   if (!collapsed && width >= 60 && height >= 22)
-    return [...NOESIS_WORDMARK.map(brand), muted(note), muted(subtitle), muted("─".repeat(width))];
-  return [`${brand("NOESIS")}${muted(`  ${subtitle}`)}`, muted("─".repeat(width))];
+    return [
+      ...NOESIS_WORDMARK.map(brand),
+      muted(note),
+      ...updateLines,
+      muted(subtitle),
+      muted("─".repeat(width)),
+    ];
+  return [`${brand("NOESIS")}${muted(`  ${subtitle}`)}`, ...updateLines, muted("─".repeat(width))];
 }
 function chunkByWidth(value: string, width: number): string[] {
   if (width <= 0) return [];
@@ -204,6 +213,7 @@ export interface SetupTuiOptions {
   readonly subtitle?: string;
   /** One application-owned invitation shared across first-launch setup and the main shell. */
   readonly startupNote?: string;
+  readonly updateNotice?: Promise<string | undefined>;
 }
 export async function runNoesisOnboardingTui<T>(
   run: (surface: OnboardingSurface) => Promise<T>,
@@ -225,6 +235,14 @@ export async function runNoesisOnboardingTui<T>(
   let elapsedTimer: NodeJS.Timeout | undefined;
   let loader: Loader | undefined;
   let stopped = false;
+  let updateNotice: string | undefined;
+  void options.updateNotice
+    ?.then((notice) => {
+      if (stopped || !notice) return;
+      updateNotice = notice;
+      tui.requestRender();
+    })
+    .catch(() => undefined);
   const abortController = new AbortController();
   let interrupt: (() => void) | undefined;
   const interrupted = new Promise<never>((_resolve, reject) => {
@@ -243,6 +261,7 @@ export async function runNoesisOnboardingTui<T>(
         subtitle,
         trueColor: colorEnabled && detectTrueColor(process.env),
         note: startupNote,
+        updateNotice,
       });
       const hintRows = height >= 8 && active ? 1 : 0;
       // Questions wrap rather than elide: an authentication prompt can carry a long placeholder

@@ -1392,3 +1392,19 @@ describe("Noesis transcript rendering", () => {
     expect(inputModeLine(state, 90)).not.toContain("› message");
   });
 });
+
+test("boxes the update notice with space beneath the startup greeting", () => {
+  const notice = "Update available: 0.0.2 → 0.0.3. Run noesis update";
+  const lines = renderHeader(false, 120, 35, false, "Hello there", notice);
+  const greetingIndex = lines.indexOf("Hello there");
+  expect(lines[greetingIndex + 1]).toBe("");
+  expect(lines[greetingIndex + 2]).toMatch(/^╭─+╮$/u);
+  expect(lines[greetingIndex + 3]).toBe(`│ ${notice} │`);
+  expect(lines[greetingIndex + 4]).toMatch(/^╰─+╯$/u);
+  expect(lines[greetingIndex + 5]).toBe("");
+  expect(renderHeader(false, 120, 35, false, "Hello there").join("\n")).not.toContain("Update available");
+  expect(renderHeader(false, 60, 20, false, "Hello", notice).join("\n")).toContain("noesis update");
+  expect(renderHeader(false, 34, 12, false, "Hello", notice).every((line) => visibleWidth(line) <= 34)).toBe(
+    true,
+  );
+});

@@ -275,3 +275,19 @@ describe("first-launch onboarding surface", () => {
     await expect(running).resolves.toBe("openai-codex");
   });
 });
+
+test("setup stays interactive while the update check is pending and renders its result", async () => {
+  const terminal = createTestTerminal();
+  const update = Promise.withResolvers<string | undefined>();
+  const running = runNoesisOnboardingTui(async (surface) => await surface.text("Model ID", "model"), {
+    terminal,
+    startupNote: "Hello there",
+    updateNotice: update.promise,
+  });
+  await waitForOutput(terminal, "Model ID");
+  expect(terminal.output).not.toContain("Update available");
+  update.resolve("Update available: 0.0.2 → 0.0.3. Run noesis update");
+  await waitForOutput(terminal, "noesis update");
+  terminal.send(ENTER);
+  await expect(running).resolves.toBe("model");
+});

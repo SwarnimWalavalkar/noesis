@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -404,3 +404,29 @@ describe("Noesis CLI grammar", () => {
     });
   });
 });
+
+test.skipIf(process.platform === "win32")(
+  "update invokes npm without needing configuration and propagates failures",
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "noesis-cli-update-"));
+    const npm = join(directory, "npm");
+    const home = join(directory, "unconfigured");
+    await writeFile(npm, '#!/bin/sh\nprintf "%s\\n" "$@"\nexit 0\n');
+    await chmod(npm, 0o755);
+    const environment = { PATH: directory, NOESIS_HOME: home };
+    const success = await runCli(["update"], directory, environment);
+    expect(success.code, success.output).toBe(0);
+    expect(success.output).toContain("install\n--global\nnoesisai@latest");
+    expect(success.output).toContain("Noesis updated");
+    await expect(readFile(join(home, "config.json"))).rejects.toMatchObject({ code: "ENOENT" });
+    await writeFile(npm, "#!/bin/sh\nexit 7\n");
+    const failure = await runCli(["update"], directory, environment);
+    expect(failure.code).toBe(1);
+    expect(failure.output).toContain("npm exit 7");
+    expect(failure.output).not.toContain("Noesis updated");
+    const help = await runCli(["update", "--help"], directory, environment);
+    expect(help.code).toBe(0);
+    expect(help.output).toContain("noesis update");
+    expect(help.output).not.toContain("Updating Noesis");
+  },
+);

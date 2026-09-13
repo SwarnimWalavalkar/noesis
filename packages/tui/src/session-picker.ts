@@ -22,6 +22,8 @@ export interface TuiStartOptions {
   readonly thinkingLevel?: RuntimeAgentDefaults["thinkingLevel"];
   /** One application-owned invitation shared across first-launch setup and the main shell. */
   readonly startupNote?: string;
+  /** Best-effort application update notice, resolved without blocking startup. */
+  readonly updateNotice?: Promise<string | undefined>;
   /** Application cleanup runs before the closing surface relinquishes the terminal. */
   readonly onShutdown?: () => Promise<void>;
   /** Overrides $VISUAL/$EDITOR for Ctrl+G composer editing. */

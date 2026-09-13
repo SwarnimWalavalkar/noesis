@@ -102,12 +102,13 @@ export async function startNoesisTui(
     view.dispatch({ type: "system-message", text: learningDiagnosticNotice(cause) });
     tui.requestRender();
   };
-  const startupNote = options.startupNote ?? pickStartupNote();
   const headerView = createHeaderView(
     colorEnabled,
     () => terminal.rows,
     colorEnabled && detectTrueColor(process.env),
-    startupNote,
+    options.startupNote ?? pickStartupNote(),
+    options.updateNotice,
+    () => phase !== "stopped" && tui.requestRender(),
   );
   const inspector = createTuiInspectorOrchestration({
     runtime,

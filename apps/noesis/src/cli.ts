@@ -43,6 +43,7 @@ import {
 } from "./runtime-composition.ts";
 import { createApplicationMcpIntegration } from "./mcp-integration.ts";
 import { prepareNoesisBuiltInSkills } from "./noesis-skill.ts";
+import { checkForUpdate, updateNoesis } from "./update.ts";
 interface CliInput {
   readonly args: readonly string[];
   readonly command: string;
@@ -69,7 +70,17 @@ interface CliInput {
       };
 }
 type SessionStartup = CliInput["session"];
-const COMMANDS = new Set(["tui", "onboard", "inspect", "rebuild", "config", "auth", "skills", "help"]);
+const COMMANDS = new Set([
+  "tui",
+  "onboard",
+  "inspect",
+  "rebuild",
+  "config",
+  "auth",
+  "skills",
+  "update",
+  "help",
+]);
 const CONFIG_COMMANDS = new Set(["show", "init", "set"]);
 const AUTH_COMMANDS = new Set(["status", "login", "logout"]);
 const SKILL_COMMANDS = new Set(["list", "install", "update", "remove"]);
@@ -131,7 +142,7 @@ function parseArgs(argv: readonly string[]): CliInput {
   const command = args[0] === undefined || args[0].startsWith("--") ? "tui" : args[0];
   if (!COMMANDS.has(command))
     throw new Error(
-      `Unknown command ${command}. Use tui, onboard, inspect, rebuild, config, auth, skills, or help.`,
+      `Unknown command ${command}. Use tui, onboard, inspect, rebuild, config, auth, skills, update, or help.`,
     );
   const commandIndex = command === "tui" && args[0]?.startsWith("--") ? -1 : 0;
   const consumed = new Set<number>();
@@ -190,7 +201,7 @@ function parseArgs(argv: readonly string[]): CliInput {
     throw new Error(`Unexpected ${command} argument ${operands[0]}`);
   }
   const allowedOptions = new Set<string>(["--help"]);
-  if (command !== "help") allowedOptions.add("--home");
+  if (command !== "help" && command !== "update") allowedOptions.add("--home");
   if (command === "tui" || command === "inspect" || command === "rebuild")
     for (const name of AGENT_OPTIONS) allowedOptions.add(name);
   if (command === "config" && (subcommand === "show" || subcommand === "set"))
@@ -263,7 +274,12 @@ Usage:
   noesis skills list [--workspace] [--trust-workspace] [--home PATH]
   noesis skills install|remove SOURCE [--workspace] [--trust-workspace] [--home PATH]
   noesis skills update [SOURCE] [--workspace] [--trust-workspace] [--home PATH]
+  noesis update
   noesis help
+
+Updates:
+  noesis update               Install the newest release on your current npm channel globally
+  NOESIS_NO_UPDATE_CHECK=1     Disable the background startup update check
 
 Session startup:
   noesis                       Start a new independent session
@@ -411,6 +427,7 @@ async function runSetupSurface<T>(
     readonly cancelMessage: string;
     readonly requiresTerminal: string;
     readonly startupNote?: string;
+    readonly updateNotice?: Promise<string | undefined>;
   },
 ): Promise<T> {
   requireInteractiveTerminal(options.requiresTerminal);
@@ -418,6 +435,7 @@ async function runSetupSurface<T>(
     return await runNoesisOnboardingTui(
       run,
       createConditionalObject({ subtitle: options.subtitle })
+        .addOptional(options.updateNotice ? { updateNotice: options.updateNotice } : undefined)
         .addOptional(options.startupNote ? { startupNote: options.startupNote } : undefined)
         .finish(),
     );
@@ -437,7 +455,11 @@ function hasExplicitAgentSettings(input: CliInput): boolean {
     )
   );
 }
-async function runOnboarding(input: CliInput, startupNote?: string): Promise<void> {
+async function runOnboarding(
+  input: CliInput,
+  startupNote?: string,
+  updateNotice?: Promise<string | undefined>,
+): Promise<void> {
   const services = await createPiModelServices(input.home);
   await runSetupSurface(
     async (surface) =>
@@ -455,6 +477,7 @@ async function runOnboarding(input: CliInput, startupNote?: string): Promise<voi
       requiresTerminal:
         "First-launch onboarding requires an interactive terminal. Run `noesis config init` for non-interactive setup.",
     })
+      .addOptional(updateNotice ? { updateNotice } : undefined)
       .addOptional(startupNote ? { startupNote } : undefined)
       .finish(),
   );
@@ -566,6 +589,10 @@ async function main(): Promise<void> {
     console.log(CLI_HELP);
     return;
   }
+  if (input.command === "update") {
+    await updateNoesis();
+    return;
+  }
   if (input.command === "config") {
     await runConfig(input);
     return;
@@ -579,6 +606,10 @@ async function main(): Promise<void> {
     await runSkills(input);
     return;
   }
+  const updateNotice =
+    (input.command === "tui" || input.command === "onboard") && process.stdout.isTTY
+      ? checkForUpdate()
+      : Promise.resolve(undefined);
   const loaded = await readNoesisConfig(input.home);
   if (!loaded.ok) throw loaded.error;
   const configExists = loaded.value.raw !== undefined;
@@ -587,7 +618,7 @@ async function main(): Promise<void> {
       throw new Error(
         `${input.home}/config.json already exists. Use \`noesis config set\` and \`noesis auth login\` to change setup.`,
       );
-    await runOnboarding(input, startupNote);
+    await runOnboarding(input, startupNote, updateNotice);
     return;
   }
   const autoOnboard = shouldAutoOnboard({
@@ -596,7 +627,7 @@ async function main(): Promise<void> {
     interactive: Boolean(process.stdin.isTTY && process.stdout.isTTY),
     hasExplicitAgentSettings: hasExplicitAgentSettings(input),
   });
-  if (autoOnboard) await runOnboarding(input, startupNote);
+  if (autoOnboard) await runOnboarding(input, startupNote, updateNotice);
   else if (
     input.command === "tui" &&
     !configExists &&
@@ -637,6 +668,7 @@ async function main(): Promise<void> {
         model: config.agent.model,
         thinkingLevel: config.agent.thinkingLevel,
         startupNote,
+        updateNotice,
         mcpInteractionBridge: created.mcpInteractionBridge,
         onShutdown: () => runtime.shutdown(),
         openUrl: async (url) => {

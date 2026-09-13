@@ -25,6 +25,14 @@ The public beta targets macOS and Linux. Start in a directory you are comfortabl
 
 See [configuration and everyday use](docs/configuration.md) for provider keys, session commands, upgrades, and MCP setup.
 
+To update your global npm installation, run:
+
+```sh
+noesis update
+```
+
+At interactive startup, Noesis checks npm in the background and shows available updates beneath the greeting. Offline or failed checks stay silent. Set `NOESIS_NO_UPDATE_CHECK=1` to disable checks. The update command uses npm's configured global prefix and preserves the release channel (`latest` for stable versions, `beta` for prereleases). Source checkouts continue to use their existing development workflow.
+
 ## What you can do today
 
 If a problem is unclear, Noesis thinks with you. If the outcome is clear, it does the work. You can change that balance in the course of your conversation.

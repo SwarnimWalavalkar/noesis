@@ -1,3 +1,4 @@
+import { renderUpdateNotice } from "./update-notice.ts";
 import { attachmentLabel } from "./attachment-label.ts";
 import { type Component, visibleWidth } from "@earendil-works/pi-tui";
 import { formatCount } from "./action-summary.ts";
@@ -389,6 +390,7 @@ export function renderHeader(
   height: number,
   trueColorEnabled = false,
   note: string = NOESIS_STARTUP_NOTES[0],
+  updateNotice?: string,
 ): string[] {
   const terminalWidth = Math.max(0, Math.floor(width));
   const inner = terminalWidth > 2 ? terminalWidth - 2 : terminalWidth;
@@ -408,7 +410,11 @@ export function renderHeader(
             terminalWidth >= 52 && height >= 16 ? `  ${note}` : "",
           )}`,
         ];
-  return [...lines, styled(colorEnabled, ANSI.dim, "─".repeat(inner))].map((line) => elideText(line, inner));
+  return [
+    ...lines,
+    ...renderUpdateNotice(updateNotice, inner, height, colorEnabled),
+    styled(colorEnabled, ANSI.dim, "─".repeat(inner)),
+  ].map((line) => elideText(line, inner));
 }
 
 function paneLines(state: NoesisTuiState, layout: TuiLayout): readonly string[] {
@@ -523,10 +529,20 @@ export function createHeaderView(
   height: () => number,
   trueColorEnabled = false,
   note: string = NOESIS_STARTUP_NOTES[0],
+  updateNotice?: Promise<string | undefined>,
+  onUpdate: () => void = () => undefined,
 ): Component {
+  let resolvedNotice: string | undefined;
+  void updateNotice
+    ?.then((notice) => {
+      if (!notice) return;
+      resolvedNotice = notice;
+      onUpdate();
+    })
+    .catch(() => undefined);
   return {
     invalidate() {},
-    render: (width) => renderHeader(colorEnabled, width, height(), trueColorEnabled, note),
+    render: (width) => renderHeader(colorEnabled, width, height(), trueColorEnabled, note, resolvedNotice),
   };
 }
 
