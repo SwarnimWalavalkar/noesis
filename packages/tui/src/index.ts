@@ -68,6 +68,8 @@ export async function startNoesisTui(
   runtime: NoesisTuiRuntime,
   options: TuiStartOptions = {},
   terminal: Terminal = new ProcessTerminal(),
+  waitForClosingFeedback: () => Promise<void> = () =>
+    new Promise((resolve) => setTimeout(resolve, TUI_TIMINGS.closingFeedbackMs)),
 ): Promise<void> {
   const session = resolveTuiSessionRequest(runtime, options.session);
   const tui = new TuiMainScreen(terminal);
@@ -251,7 +253,7 @@ export async function startNoesisTui(
       removeExitInputListener();
       removeSubAgentListener();
       tui.requestRender();
-      await new Promise<void>((resolve) => setTimeout(resolve, TUI_TIMINGS.closingFeedbackMs));
+      await waitForClosingFeedback();
       const shutdownFailures: unknown[] = [];
       const attemptCleanup = async (cleanup: () => void | Promise<void>): Promise<void> => {
         try {

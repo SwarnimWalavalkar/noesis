@@ -1,7 +1,7 @@
 import { access, readFile, readdir } from "node:fs/promises";
 import { dirname, extname, relative, resolve } from "node:path";
 import * as ts from "typescript";
-import { describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import {
   PERSISTED_AUTHORITIES,
   PERSISTED_AUTHORITY_BY_DATUM,
@@ -28,12 +28,27 @@ async function filesBelow(directory: string): Promise<readonly string[]> {
   ).flat();
 }
 
-async function firstPartyFiles(): Promise<readonly string[]> {
-  return (
+let repositoryFiles: readonly string[] = [];
+const parsedSources = new Map<string, ts.SourceFile>();
+
+beforeAll(async () => {
+  repositoryFiles = (
     await Promise.all(
       ["apps", "packages"].map(async (root) => await filesBelow(resolve(repositoryRoot, root))),
     )
   ).flat();
+});
+
+function firstPartyFiles(): readonly string[] {
+  return repositoryFiles;
+}
+
+async function sourceAt(path: string): Promise<ts.SourceFile> {
+  const cached = parsedSources.get(path);
+  if (cached) return cached;
+  const parsed = parseSource(path, await readFile(path, "utf8"));
+  parsedSources.set(path, parsed);
+  return parsed;
 }
 
 function relativePath(path: string): string {
@@ -80,11 +95,11 @@ function moduleSpecifiers(sourceFile: ts.SourceFile): readonly string[] {
 
 describe("first-party architecture boundaries", () => {
   test("keeps exactly the declared native Error subclasses as first-party classes", async () => {
-    const files = (await firstPartyFiles()).filter((path) => /\.tsx?$/.test(path));
+    const files = firstPartyFiles().filter((path) => /\.tsx?$/.test(path));
     const found = new Set<string>();
     const violations: string[] = [];
     for (const path of files) {
-      const sourceFile = parseSource(path, await readFile(path, "utf8"));
+      const sourceFile = await sourceAt(path);
       const visit = (node: ts.Node): void => {
         if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
           const name = node.name?.text ?? "<anonymous>";
@@ -104,11 +119,11 @@ describe("first-party architecture boundaries", () => {
   });
 
   test("owns Pi runtime and model imports only in runtime-pi and Pi TUI primitives only in tui", async () => {
-    const files = (await firstPartyFiles()).filter((path) => /\.tsx?$/.test(path));
+    const files = firstPartyFiles().filter((path) => /\.tsx?$/.test(path));
     const violations: string[] = [];
     for (const path of files) {
       const localPath = relativePath(path);
-      const sourceFile = parseSource(path, await readFile(path, "utf8"));
+      const sourceFile = await sourceAt(path);
       for (const specifier of moduleSpecifiers(sourceFile)) {
         if (!specifier.startsWith("@earendil-works/pi-")) continue;
         const allowedRuntimePi =
@@ -129,7 +144,7 @@ describe("first-party architecture boundaries", () => {
 
     const manifests = [
       resolve(repositoryRoot, "package.json"),
-      ...(await firstPartyFiles()).filter((path) => path.endsWith("package.json")),
+      ...firstPartyFiles().filter((path) => path.endsWith("package.json")),
     ];
     const dependencyViolations: string[] = [];
     for (const path of manifests) {
@@ -185,7 +200,7 @@ describe("first-party architecture boundaries", () => {
       for (const path of (await filesBelow(resolve(packageRoot, "src"))).filter((file) =>
         /\.tsx?$/.test(file),
       )) {
-        const sourceFile = parseSource(path, await readFile(path, "utf8"));
+        const sourceFile = await sourceAt(path);
         for (const specifier of moduleSpecifiers(sourceFile)) {
           if (!specifier.startsWith(".")) continue;
           const target = resolve(dirname(path), specifier);
@@ -233,6 +248,8 @@ describe("first-party architecture boundaries", () => {
     ]);
     const forbiddenMembers = new Set([
       "artifacts",
+      "authority",
+      "policy",
       "capabilities",
       "ledger",
       "memory",
@@ -241,7 +258,7 @@ describe("first-party architecture boundaries", () => {
     ]);
     const violations: string[] = [];
     for (const path of (await filesBelow(resolve(tuiRoot, "src"))).filter((file) => /\.tsx?$/.test(file))) {
-      const sourceFile = parseSource(path, await readFile(path, "utf8"));
+      const sourceFile = await sourceAt(path);
       for (const specifier of moduleSpecifiers(sourceFile))
         if (forbiddenModules.has(specifier)) violations.push(`${relativePath(path)}:import:${specifier}`);
       const visit = (node: ts.Node): void => {
@@ -271,7 +288,7 @@ describe("first-party architecture boundaries", () => {
     for (const path of (await filesBelow(resolve(runtimeRoot, "src"))).filter((file) =>
       /\.tsx?$/.test(file),
     )) {
-      const sourceFile = parseSource(path, await readFile(path, "utf8"));
+      const sourceFile = await sourceAt(path);
       for (const specifier of moduleSpecifiers(sourceFile))
         if (specifier === "@noesis/runtime-pi" || specifier.startsWith("@noesis/runtime-pi/"))
           sourceViolations.push(`${relativePath(path)}:${specifier}`);
@@ -304,9 +321,7 @@ describe("first-party architecture boundaries", () => {
     for (const removedManifest of ["packages/ledger/package.json", "packages/memory/package.json"])
       await expect(access(resolve(repositoryRoot, removedManifest))).rejects.toThrow();
 
-    const sourceFiles = (await firstPartyFiles()).filter(
-      (path) => path.includes("/src/") && /\.tsx?$/.test(path),
-    );
+    const sourceFiles = firstPartyFiles().filter((path) => path.includes("/src/") && /\.tsx?$/.test(path));
     const sourceEntries = await Promise.all(
       sourceFiles.map(async (path) => ({
         path: relativePath(path),
@@ -350,7 +365,7 @@ describe("first-party architecture boundaries", () => {
     );
     const manifests = [
       resolve(repositoryRoot, "package.json"),
-      ...(await firstPartyFiles()).filter((path) => path.endsWith("package.json")),
+      ...firstPartyFiles().filter((path) => path.endsWith("package.json")),
     ];
     const removedDependencyReferences: string[] = [];
     for (const path of manifests) {
@@ -381,7 +396,7 @@ describe("first-party architecture boundaries", () => {
     const config = JSON.parse(await readFile(resolve(repositoryRoot, "tsconfig.json"), "utf8")) as {
       readonly compilerOptions?: { readonly noEmit?: boolean };
     };
-    const emittedJavaScript = (await firstPartyFiles())
+    const emittedJavaScript = firstPartyFiles()
       .map(relativePath)
       .filter((path) => path.endsWith(".js"));
     const emittedRootJavaScript = (await readdir(repositoryRoot, { withFileTypes: true }))
@@ -395,10 +410,10 @@ describe("first-party architecture boundaries", () => {
   });
 
   test("forbids first-party TypeBox imports and direct dependencies", async () => {
-    const files = await firstPartyFiles();
+    const files = firstPartyFiles();
     const sourceViolations: string[] = [];
     for (const path of files.filter((candidate) => /\.tsx?$/.test(candidate))) {
-      const sourceFile = parseSource(path, await readFile(path, "utf8"));
+      const sourceFile = await sourceAt(path);
       for (const specifier of moduleSpecifiers(sourceFile))
         if (
           specifier === "@sinclair/typebox" ||

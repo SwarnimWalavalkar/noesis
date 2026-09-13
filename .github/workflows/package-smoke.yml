@@ -1,0 +1,82 @@
+name: Package smoke
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "package.json"
+      - "**/package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "npm-shrinkwrap.json"
+      - ".npmrc"
+      - ".npmignore"
+      - "vite.release.config.ts"
+      - "tsconfig*.json"
+      - "LICENSE"
+      - "apps/noesis/skills/**"
+      - "apps/noesis/src/cli.ts"
+      - "apps/noesis/src/process-warnings.ts"
+      - "apps/noesis/src/noesis-skill.ts"
+      - "packages/workspace/migrations/**"
+      - "packages/codemode/src/runner.mjs"
+      - "scripts/test-package.mjs"
+      - "scripts/verify-release*"
+      - ".github/workflows/**"
+  push:
+    branches:
+      - main
+    paths:
+      - "package.json"
+      - "**/package.json"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - "npm-shrinkwrap.json"
+      - ".npmrc"
+      - ".npmignore"
+      - "vite.release.config.ts"
+      - "tsconfig*.json"
+      - "LICENSE"
+      - "apps/noesis/skills/**"
+      - "apps/noesis/src/cli.ts"
+      - "apps/noesis/src/process-warnings.ts"
+      - "apps/noesis/src/noesis-skill.ts"
+      - "packages/workspace/migrations/**"
+      - "packages/codemode/src/runner.mjs"
+      - "scripts/test-package.mjs"
+      - "scripts/verify-release*"
+      - ".github/workflows/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+jobs:
+  package:
+    name: Package smoke (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux, minimum Node
+            os: ubuntu-latest
+            node: 22.19.0
+          - label: macOS, current Node
+            os: macos-latest
+            node: 24
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.29.3
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm package:smoke

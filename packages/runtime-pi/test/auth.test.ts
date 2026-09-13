@@ -302,33 +302,44 @@ describe("Pi authentication", () => {
     ).toThrow("Supported providers: anthropic, openai-codex, opencode, opencode-go, openrouter");
   });
 
-  test("resolves OpenCode Zen and Go from separate environment keys", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-environment-"));
+  test("isolates OpenCode provider keys and prefers each stored credential over its environment", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-auth-"));
     vi.stubEnv("OPENCODE_API_KEY", "zen-environment-secret");
-    vi.stubEnv("OPENCODE_GO_API_KEY", "go-environment-secret");
+    vi.stubEnv("OPENCODE_GO_API_KEY", undefined);
     const services = await createPiModelServices(home);
     const zen = services.models.getModel("opencode", "kimi-k2.6");
     const go = services.models.getModel("opencode-go", "kimi-k2.6");
     if (!zen || !go) throw new Error("Expected both OpenCode model routes");
-
     await expect(services.models.getAuth(zen)).resolves.toMatchObject({
       auth: { apiKey: "zen-environment-secret" },
       source: "OPENCODE_API_KEY",
     });
+    await expect(services.models.getAuth(go)).resolves.toBeUndefined();
+    vi.stubEnv("OPENCODE_GO_API_KEY", "go-environment-secret");
     await expect(services.models.getAuth(go)).resolves.toMatchObject({
       auth: { apiKey: "go-environment-secret" },
       source: "OPENCODE_GO_API_KEY",
     });
-  });
-
-  test("does not treat the OpenCode Zen environment key as OpenCode Go authentication", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-go-isolation-"));
-    vi.stubEnv("OPENCODE_API_KEY", "zen-environment-secret");
-    const services = await createPiModelServices(home);
-    const go = services.models.getModel("opencode-go", "kimi-k2.6");
-    if (!go) throw new Error("Expected the OpenCode Go model route");
-
-    await expect(services.models.getAuth(go)).resolves.toBeUndefined();
+    await services.auth.login("opencode", {
+      prompt: async () => "zen-stored-secret",
+      notify: () => undefined,
+    });
+    await services.auth.login("opencode-go", {
+      prompt: async () => "go-stored-secret",
+      notify: () => undefined,
+    });
+    const stored = JsonValueSchema.parse(JSON.parse(await readFile(piAuthPath(home), "utf8")));
+    if (!isJsonObject(stored)) throw new Error("Expected the credential file to contain an object");
+    expect(stored["opencode"]).toMatchObject({ type: "api_key", key: "zen-stored-secret" });
+    expect(stored["opencode-go"]).toMatchObject({ type: "api_key", key: "go-stored-secret" });
+    await expect(services.models.getAuth(zen)).resolves.toMatchObject({
+      auth: { apiKey: "zen-stored-secret" },
+      source: "stored credential",
+    });
+    await expect(services.models.getAuth(go)).resolves.toMatchObject({
+      auth: { apiKey: "go-stored-secret" },
+      source: "stored credential",
+    });
   });
 
   test("applies Pi model override headers at the projected request boundary", async () => {
@@ -413,25 +424,6 @@ describe("Pi authentication", () => {
     });
   });
 
-  test("prefers a stored OpenCode Go credential over either OpenCode environment key", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-go-stored-priority-"));
-    const credentials = createSecurePiCredentialStore(piAuthPath(home));
-    await credentials.modify("opencode-go", async () => ({
-      type: "api_key",
-      key: "go-stored-secret",
-    }));
-    vi.stubEnv("OPENCODE_API_KEY", "zen-environment-secret");
-    vi.stubEnv("OPENCODE_GO_API_KEY", "go-environment-secret");
-    const services = await createPiModelServices(home, { credentials });
-    const go = services.models.getModel("opencode-go", "kimi-k2.6");
-    if (!go) throw new Error("Expected the OpenCode Go model route");
-
-    await expect(services.models.getAuth(go)).resolves.toMatchObject({
-      auth: { apiKey: "go-stored-secret" },
-      source: "stored credential",
-    });
-  });
-
   test("composes OpenCode Go identity and auth without replacing Pi provider behavior", async () => {
     const base = fauxProvider({ provider: "opencode-go", api: "opencode-go-test" }).provider;
     const refreshModels: NonNullable<Provider["refreshModels"]> = vi.fn(async () => undefined);
@@ -467,30 +459,6 @@ describe("Pi authentication", () => {
     ).resolves.toMatchObject({
       auth: { apiKey: "go-environment-secret" },
       source: "OPENCODE_GO_API_KEY",
-    });
-  });
-
-  test("stores OpenCode Zen and Go credentials under separate provider keys", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-provider-opencode-stored-"));
-    const services = await createPiModelServices(home);
-    await services.auth.login("opencode", {
-      prompt: async () => "zen-stored-secret",
-      notify: () => undefined,
-    });
-    await services.auth.login("opencode-go", {
-      prompt: async () => "go-stored-secret",
-      notify: () => undefined,
-    });
-
-    const stored = JsonValueSchema.parse(JSON.parse(await readFile(piAuthPath(home), "utf8")));
-    if (!isJsonObject(stored)) throw new Error("Expected the credential file to contain an object");
-    expect(stored["opencode"]).toMatchObject({
-      type: "api_key",
-      key: "zen-stored-secret",
-    });
-    expect(stored["opencode-go"]).toMatchObject({
-      type: "api_key",
-      key: "go-stored-secret",
     });
   });
 

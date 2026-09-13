@@ -36,5 +36,5 @@
       "@noesis/workspace": ["packages/workspace/src/index.ts"]
     }
   },
-  "include": ["apps/**/*.ts", "packages/**/*.ts", "vitest.config.ts"]
+  "include": ["apps/**/*.ts", "packages/**/*.ts", "vitest*.config.ts"]
 }

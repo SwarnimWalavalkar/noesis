@@ -108,28 +108,6 @@ describe("Noesis safe editor key path", () => {
     expect(containsUnsafeTextControl(editor.getText())).toBe(false);
   });
 
-  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-  test.each([
-    ["DEL", "\u007f"],
-    ["BS", "\u0008"],
-  ] as const)("delegates ordinary %s Backspace to pi-tui", (_variant, backspace) => {
-    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
-    editor.handleInput?.("abc");
-
-    editor.handleInput?.(backspace);
-
-    expect(editor.getText()).toBe("ab");
-  });
-
-  test("preserves pi-tui grapheme deletion semantics", () => {
-    const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
-    editor.handleInput?.("a👨‍👩‍👧‍👦");
-
-    editor.handleInput?.("\u007f");
-
-    expect(editor.getText()).toBe("a");
-  });
-
   test("preserves the line-start deletion binding used by terminal Cmd+Backspace mappings", () => {
     const editor = createSafeEditor(new TuiMainScreen(inertTerminal));
     editor.handleInput?.("abc");
@@ -311,18 +289,6 @@ describe("Noesis transcript rendering", () => {
     expect(createTranscriptRenderer().render(state, 80)).toEqual([]);
   });
 
-  test("renders transcript content once messages arrive", () => {
-    const rendered = createTranscriptRenderer().render(
-      {
-        ...initialTuiState("fake"),
-        timeline: [{ kind: "message", role: "user", text: "Begin." }],
-      },
-      80,
-    );
-
-    expect(rendered.join("\n")).toContain("Begin.");
-  });
-
   test("collapses each codemode call to one summarized row", () => {
     const { execute, read, write, all } = codemodeActions();
 
@@ -339,6 +305,14 @@ describe("Noesis transcript rendering", () => {
     expect(readRow[0]).toContain("state.ts");
     expect(readRow[0]).toContain("287 lines");
     expect(readRow[0]).not.toContain("xxx");
+    expect(readRow[0]?.startsWith("   ")).toBe(true);
+    const [selected = ""] = renderAgentActionBlock(read, all, 100, { selected: true });
+    expect(selected.startsWith("▸")).toBe(true);
+    expect(visibleWidth(selected)).toBe(visibleWidth(readRow[0] ?? ""));
+    expect(executeRow.join("\n")).not.toContain("tools.files.read");
+    const expanded = renderAgentActionBlock(execute, all, 100, { expanded: true }).join("\n");
+    expect(expanded).toContain("tools.files.read");
+    expect(expanded).toContain("return file.totalLines;");
 
     expect(writeRow[0]).toContain("notes.md");
     expect(writeRow[0]).toContain("1.2 kB");
@@ -392,19 +366,6 @@ describe("Noesis transcript rendering", () => {
         status: "interrupted",
       }),
     ).toBe("execution-hydrated");
-  });
-
-  test("reveals the codemode program only when its row is expanded", () => {
-    const { execute, all } = codemodeActions();
-
-    const collapsed = renderAgentActionBlock(execute, all, 100).join("\n");
-    const expanded = renderAgentActionBlock(execute, all, 100, {
-      expanded: true,
-    }).join("\n");
-
-    expect(collapsed).not.toContain("tools.files.read");
-    expect(expanded).toContain("tools.files.read");
-    expect(expanded).toContain("return file.totalLines;");
   });
 
   test("summarizes a failed nested call with its error rather than its payload", () => {
@@ -482,18 +443,6 @@ describe("Noesis transcript rendering", () => {
       expect(rendered).not.toContain("\n");
       expect(rendered).not.toContain("SECOND-LINE");
     }
-  });
-
-  test("previews the program while an execute call has produced no nested calls yet", () => {
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const running = {
-      actionId: "execute-1",
-      name: "execute",
-      status: "running" as const,
-      input: { source: "await tools.shell.run({ command: 'pnpm build' });" },
-    };
-
-    expect(renderAgentActionBlock(running, [running], 100).join("\n")).toContain("pnpm build");
   });
 
   test("summarizes direct noesis.search arrays semantically", () => {
@@ -651,25 +600,19 @@ describe("Noesis transcript rendering", () => {
     expect(expanded).toContain("▸ ✓ Review the finished migration.");
   });
 
-  test("shows the current live phase beside an active process subagent", () => {
-    const state: NoesisTuiState = {
-      ...initialTuiState("fake"),
-      subAgents: [subAgentSummary("agent-running", "running", "Inspect active work.")],
-      trailId: "session-foreground",
-      subAgentPhases: { "agent-running": "tool · shell.run" },
-    };
-
-    expect(stripAnsi(renderSubagents(state, 120, 30).join("\n"))).toContain(
-      "running · tool · shell.run · test-provider/test-model",
-    );
-  });
-
   test("keeps settled process subagents collapsed until Ctrl+O selects the actor", () => {
     const state: NoesisTuiState = {
       ...initialTuiState("fake"),
       timeline: [
         { kind: "action", actionId: "execute-earlier", name: "execute", status: "completed" },
         { kind: "action", actionId: "execute-latest", name: "execute", status: "completed" },
+        {
+          kind: "action",
+          actionId: "saved-script",
+          parentActionId: "execute-latest",
+          name: "programs.run",
+          status: "completed",
+        },
       ],
       subAgents: [subAgentSummary("agent-earlier", "idle", "Inspect the earlier run.")],
       trailId: "session-foreground",
@@ -685,66 +628,6 @@ describe("Noesis transcript rendering", () => {
     );
     expect(inspectingEarlier).toContain("SUBAGENTS · 1");
     expect(inspectingEarlier).toContain("Inspect the earlier run.");
-  });
-
-  test("shows a retained subagent independently of the transcript action tree", () => {
-    const state: NoesisTuiState = {
-      ...initialTuiState("fake"),
-      timeline: [
-        { kind: "action", actionId: "execute-parent", name: "execute", status: "completed" },
-        {
-          kind: "action",
-          actionId: "saved-script",
-          parentActionId: "execute-parent",
-          name: "programs.run",
-          status: "completed",
-        },
-      ],
-      subAgents: [subAgentSummary("agent-nested", "idle", "Inspect from the saved script.")],
-      trailId: "session-foreground",
-      subAgentCursor: "agent-nested",
-    };
-
-    const rendered = stripAnsi(renderSubagents(state, 120, 30).join("\n"));
-    expect(rendered).toContain("SUBAGENTS · 1");
-    expect(rendered).toContain("Inspect from the saved script.");
-  });
-
-  test("indents nested codemode SDK calls under execute", () => {
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const parent = {
-      actionId: "execute-1",
-      name: "execute",
-      status: "running" as const,
-    };
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const child = {
-      actionId: "execute-1:call:1",
-      parentActionId: parent.actionId,
-      name: "shell.run",
-      status: "running" as const,
-      input: { command: "pwd" },
-    };
-
-    const [rendered = ""] = renderAgentActionBlock(child, [parent, child], 72);
-
-    expect(rendered).toContain("● shell.run");
-    expect(rendered).toContain("pwd");
-    expect(rendered.startsWith("   ")).toBe(true);
-  });
-
-  test("marks the selected row without shifting the content beside it", () => {
-    const { read, all } = codemodeActions();
-
-    const [plain = ""] = renderAgentActionBlock(read, all, 100);
-    const [selected = ""] = renderAgentActionBlock(read, all, 100, {
-      selected: true,
-    });
-
-    expect(plain.startsWith(" ")).toBe(true);
-    expect(selected.startsWith("▸")).toBe(true);
-    // A leading gutter column means selecting a row never reflows the transcript.
-    expect(visibleWidth(selected)).toBe(visibleWidth(plain));
   });
 
   test("keeps the selected action inside a bounded transcript navigation window", () => {

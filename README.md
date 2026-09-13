@@ -143,13 +143,13 @@ noesis-dev
 
 The installer links `scripts/noesis-dev` into `~/.local/bin`. Set `NOESIS_DEV_BIN_DIR` to install the link elsewhere. The command runs the current checkout directly through its pinned `tsx`, works from any directory, and keeps its config, credentials, sessions, and other development state in this repository's ignored `.noesis/` directory. Run it without installing the link with `pnpm dev`.
 
-Run the complete local check before sending a change:
+Run static checks before sending a change:
 
 ```sh
 pnpm check
 ```
 
-The check verifies formatting, lints, type-checks, and tests the repository. Tests use controlled providers and do not require paid credentials.
+The check verifies formatting, lint, and types. Normal CI also runs `pnpm test:unit`; use `pnpm test:watch` while editing. `pnpm test` runs the complete suite and is required before release publishing. Tests use controlled providers and do not require paid credentials. Also run explicit integration test paths for the changed behavior and affected consumers. See [testing guidance](docs/testing.md) for coverage choices and runtime measurement.
 
 The checked-in VS Code workspace recommends the Oxc extension. `Format Document` uses Oxfmt, while saving runs Oxfmt followed by Oxlint's safe fixes. Both read the same repository configuration as `pnpm check`.
 

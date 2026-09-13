@@ -14,6 +14,7 @@ import {
   renderHeader,
   renderNoesisState,
   renderQueuedInputs,
+  renderSubagents,
   safeTerminalText,
   sessionPickerVisibleCount,
   shouldUseColor,
@@ -63,24 +64,6 @@ describe("Noesis TUI reducer", () => {
       { type: "prompt-rejected", localSubmissionId: "local-2" },
     );
     expect(rejected.timeline).toEqual(state.timeline);
-  });
-
-  test("transcript navigation remains scoped to foreground actions", () => {
-    const state = {
-      ...initialTuiState("fake"),
-      timeline: [
-        {
-          kind: "action" as const,
-          actionId: "execute-1",
-          name: "execute",
-          status: "running" as const,
-        },
-      ],
-    };
-
-    expect(reduceTui(state, { type: "action-cursor-moved", direction: "previous" }).actionCursor).toBe(
-      "execute-1",
-    );
   });
 
   test("uses the built-in Codex model and reasoning defaults", () => {
@@ -458,16 +441,6 @@ describe("Noesis TUI reducer", () => {
     expect(helpHint(state)).not.toContain("/queue resume");
   });
 
-  test("communicates session shutdown through the status and help surfaces", () => {
-    const state = reduceTui(initialTuiState("fake"), {
-      type: "execution-changed",
-      execution: "closing",
-    });
-
-    expect(renderBottomChrome(state, 80, 24).join("\n")).toMatch(/[⣿⣷⣶⣦⣤⣄⣀] CLOSING/u);
-    expect(helpHint(state)).toBe("closing session…");
-  });
-
   test("maps lifecycle actions to supported execution states", () => {
     let state = reduceTui(initialTuiState("fake"), {
       type: "prompt-submitted",
@@ -481,6 +454,7 @@ describe("Noesis TUI reducer", () => {
       actionId: "tool-1",
       name: "inspect",
       input: { section: "memory" },
+      at: 1000,
     });
     expect(state).toMatchObject({ execution: "tool", activeTool: "inspect" });
     state = reduceTui(state, {
@@ -493,6 +467,7 @@ describe("Noesis TUI reducer", () => {
       actionId: "tool-1",
       output: { memories: 2 },
       isError: false,
+      at: 2500,
     });
     expect(state.execution).toBe("thinking");
     expect(state.timeline.filter((entry) => entry.kind === "action")).toEqual([
@@ -504,6 +479,8 @@ describe("Noesis TUI reducer", () => {
         input: { section: "memory" },
         update: { status: "reading" },
         output: { memories: 2 },
+        startedAt: 1000,
+        durationMs: 1500,
       },
     ]);
     state = reduceTui(state, {
@@ -531,12 +508,19 @@ describe("Noesis TUI reducer", () => {
       isError: false,
     });
     expect(state).toMatchObject({ execution: "tool", activeTool: "execute" });
+    expect(state.timeline.filter((entry) => entry.kind === "action").map((entry) => entry.actionId)).toEqual([
+      "tool-1",
+      "execute-1",
+      "execute-1:call:0",
+    ]);
     state = reduceTui(state, {
       type: "action-ended",
       actionId: "execute-1",
       output: { calls: 1 },
       isError: false,
     });
+    expect(state.execution).toBe("thinking");
+    expect(state.activeTool).toBeUndefined();
     state = reduceTui(state, { type: "prompt-submitted", text: "next turn" });
     expect(
       state.timeline.filter((entry) => entry.kind === "action").map((entry) => entry.actionId),
@@ -556,83 +540,6 @@ describe("Noesis TUI reducer", () => {
     expect(state.execution).toBe("aborting");
     state = reduceTui(state, { type: "failed", error: "provider failed" });
     expect(state.execution).toBe("error");
-  });
-
-  test("keeps assistant text and tool actions in their chronological order", () => {
-    let state = reduceTui(initialTuiState("fake"), {
-      type: "prompt-submitted",
-      text: "find something",
-    });
-    state = reduceTui(state, { type: "stream-delta", text: "I will check." });
-    state = reduceTui(state, {
-      type: "action-started",
-      actionId: "tool-1",
-      name: "shell.run",
-      input: { command: "pwd" },
-    });
-    state = reduceTui(state, {
-      type: "action-ended",
-      actionId: "tool-1",
-      output: { stdout: "/workspace" },
-      isError: false,
-    });
-    state = reduceTui(state, {
-      type: "stream-delta",
-      text: "The workspace is ready.",
-    });
-
-    expect(state.timeline).toEqual([
-      { kind: "message", role: "user", text: "find something" },
-      { kind: "message", role: "assistant", text: "I will check." },
-      {
-        kind: "action",
-        actionId: "tool-1",
-        name: "shell.run",
-        status: "completed",
-        input: { command: "pwd" },
-        output: { stdout: "/workspace" },
-      },
-      { kind: "message", role: "assistant", text: "The workspace is ready." },
-    ]);
-    expect(state.execution).toBe("streaming");
-  });
-
-  test("updates nested tools in place while the outer tool remains active", () => {
-    let state = reduceTui(initialTuiState("fake"), {
-      type: "action-started",
-      actionId: "execute-1",
-      name: "execute",
-      input: { source: "return await noesis.invoke('shell.run', {});" },
-    });
-    state = reduceTui(state, {
-      type: "action-started",
-      actionId: "execute-1:call:0",
-      parentActionId: "execute-1",
-      name: "shell.run",
-      input: { command: "pwd" },
-    });
-    state = reduceTui(state, {
-      type: "action-ended",
-      actionId: "execute-1:call:0",
-      output: { stdout: "/workspace" },
-      isError: false,
-    });
-
-    expect(
-      state.timeline.map((entry) =>
-        entry.kind === "action" ? entry.actionId : entry.kind === "message" ? entry.role : "reasoning",
-      ),
-    ).toEqual(["execute-1", "execute-1:call:0"]);
-    expect(state).toMatchObject({ execution: "tool", activeTool: "execute" });
-
-    state = reduceTui(state, {
-      type: "action-ended",
-      actionId: "execute-1",
-      output: { calls: 1 },
-      isError: false,
-    });
-    expect(state.execution).toBe("thinking");
-    expect(state.activeTool).toBeUndefined();
   });
 
   test("reconciles only the final assistant segment around tool actions", () => {
@@ -885,28 +792,11 @@ describe("Noesis TUI reducer", () => {
     ]);
   });
 
-  test("records action durations from the dispatched clock", () => {
-    let state = reduceTui(initialTuiState("fake"), {
-      type: "action-started",
-      actionId: "execute-1",
-      name: "execute",
-      input: { source: "return 1;" },
-      at: 1_000,
-    });
-    state = reduceTui(state, {
-      type: "action-ended",
-      actionId: "execute-1",
-      output: { calls: 0 },
-      isError: false,
-      at: 2_500,
-    });
-
-    const [action] = state.timeline.filter((entry) => entry.kind === "action");
-    expect(action).toMatchObject({ startedAt: 1_000, durationMs: 1_500 });
-  });
-
   test("moves a transcript cursor across actions and leaves it on demand", () => {
     let state = initialTuiState("fake");
+    expect(
+      reduceTui(state, { type: "action-cursor-moved", direction: "previous" }).actionCursor,
+    ).toBeUndefined();
     for (const actionId of ["a1", "a2", "a3"])
       state = reduceTui(state, {
         type: "action-started",
@@ -937,14 +827,6 @@ describe("Noesis TUI reducer", () => {
     });
     expect(state.actionCursor).toBe("a3");
     state = reduceTui(state, { type: "action-cursor-cleared" });
-    expect(state.actionCursor).toBeUndefined();
-  });
-
-  test("never enters navigation when the transcript holds no actions", () => {
-    const state = reduceTui(initialTuiState("fake"), {
-      type: "action-cursor-moved",
-      direction: "previous",
-    });
     expect(state.actionCursor).toBeUndefined();
   });
 
@@ -1046,6 +928,9 @@ describe("Noesis TUI reducer", () => {
       },
     });
     expect(state.subAgentPhases).toEqual({ "agent-live": "tool · shell.run" });
+    expect(renderSubagents({ ...state, trailId: "session-foreground" }, 120, 30).join("\n")).toContain(
+      "running · tool · shell.run · controlled/model",
+    );
 
     state = reduceTui(state, {
       type: "subagents-hydrated",

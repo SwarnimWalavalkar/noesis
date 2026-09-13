@@ -101,7 +101,7 @@ describe("atomic capability registry", () => {
       ),
     ).toThrow("predecessor");
   });
-  test("freezes the complete recorded revision bundle", () => {
+  test("freezes the recorded revision bundle and rejects identity reuse", () => {
     const registry = createAtomicCapabilityRegistry();
     registry.registerCapability(capability);
     const ref = registry.constructRevision(
@@ -115,6 +115,9 @@ describe("atomic capability registry", () => {
     expect(Object.isFrozen(revision?.toolset.routerRevision)).toBe(true);
     expect(Object.isFrozen(revision?.permissionManifest.effects)).toBe(true);
     expect(Object.isFrozen(revision?.requestedPermissionDelta)).toBe(true);
+    expect(() =>
+      registry.constructRevision(construction("revision-1", { prompt: "9", tool: "2", router: "3" })),
+    ).toThrow("identity collision");
   });
   test("keeps candidate definitions separate from externally owned active state", async () => {
     let externallyActive: ReturnType<typeof capabilityRevisionRef> | null = null;
@@ -374,13 +377,5 @@ describe("atomic capability registry", () => {
         evaluationRefs: [],
       }),
     ).rejects.toThrow("canonical Experiment");
-  });
-  test("rejects a reused revision id with different coupled bytes", () => {
-    const registry = createAtomicCapabilityRegistry();
-    registry.registerCapability(capability);
-    registry.constructRevision(construction("revision-1", { prompt: "1", tool: "2", router: "3" }));
-    expect(() =>
-      registry.constructRevision(construction("revision-1", { prompt: "9", tool: "2", router: "3" })),
-    ).toThrow("identity collision");
   });
 });

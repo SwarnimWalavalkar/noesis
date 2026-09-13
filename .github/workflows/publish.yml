@@ -12,8 +12,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  package:
+    name: Release package compatibility
+    uses: ./.github/workflows/package-smoke.yml
+
   publish:
     name: Verify and publish
+    needs: package
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: npm
@@ -45,6 +50,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm audit --prod
       - run: pnpm check
+      - run: pnpm test
       - run: pnpm package:smoke
       - name: Preserve tested package for recovery
         uses: actions/upload-artifact@v4

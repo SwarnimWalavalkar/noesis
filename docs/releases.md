@@ -4,11 +4,11 @@ Publishing a GitHub release is the approval to publish its npm package. Saving a
 
 ## Ship a version
 
-1. Update the root `package.json` version, run `pnpm check` and `pnpm package:smoke`, and commit the version bump to `main`.
+1. Update the root `package.json` version, run `pnpm check`, `pnpm test`, and `pnpm package:smoke`, and commit the version bump to `main`.
 2. [Create a GitHub release](https://github.com/SwarnimWalavalkar/noesis/releases/new). Create a tag named `v` followed by that exact version, targeting the version-bump commit on `main`. Add release notes and publish the release.
 3. Watch the **Publish npm release** workflow in Actions. The GitHub release appears before npm publishing finishes; wait for the workflow to pass before announcing the package.
 
-The workflow verifies the tag, package name, version, and commit's membership in `main`. It runs the dependency audit, formatting, lint, types, tests, and fresh-install package smoke test. It attaches the tested tarball to the GitHub release and publishes those same bytes with npm provenance. It never rebuilds between testing and publishing.
+The workflow verifies the tag, package name, version, and commit's membership in `main`. It requires the Linux/minimum-Node and macOS/current-Node package-smoke matrix, then runs the dependency audit, formatting, lint, types, full test suite, and fresh-install package smoke test. It attaches the tested tarball to the GitHub release and publishes those same bytes with npm provenance. It never rebuilds between testing and publishing.
 
 The version determines the npm channel, independently of GitHub's prerelease checkbox:
 
@@ -29,10 +29,11 @@ The GitHub `npm` environment allows tags matching `v*`, with no required reviewe
 
 ```sh
 pnpm check
+pnpm test
 PACKAGE_OUTPUT_DIR="$(mktemp -d)" pnpm package:smoke
 ```
 
-The smoke test builds and installs the package in a temporary directory, exercises the installed CLI and runtime, and copies the exact tested tarball to `PACKAGE_OUTPUT_DIR` only after success. It refuses to overwrite an existing archive. Without that variable, it removes the temporary package after testing. Neither command publishes to npm or creates a GitHub release.
+The smoke test builds and installs the package in a temporary directory, exercises the installed CLI and runtime, and copies the exact tested tarball to `PACKAGE_OUTPUT_DIR` only after success. It refuses to overwrite an existing archive. Without that variable, it removes the temporary package after testing. None of these commands publishes to npm or creates a GitHub release.
 
 ## Failed releases
 

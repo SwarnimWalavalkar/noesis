@@ -110,36 +110,10 @@ describe("protected activation contract", () => {
     await expect(activationIsBoundToPreflight(request, preflights)).resolves.toBe(false);
     reports.set(report.preflightId, { ...report, decision: "approval_required" });
     await expect(activationIsBoundToPreflight(request, preflights)).resolves.toBe(false);
-  });
-
-  test("rejects non-report evidence at the storage boundary", async () => {
-    const revision = materializedRevision();
-    const report = passingReport(revision);
-    const request: ActivationWriteRequest = {
-      activationId: "activation-1",
-      expectedRevision: 1,
-      materializedRevision: revision,
-      previousActivationId: null,
-      preflightReportRef: {
-        kind: "database_row",
-        table: "preflight_reports",
-        rowId: report.preflightId,
-      },
-    };
-
-    const reports = new Map<string, unknown>([
-      [
-        report.preflightId,
-        {
-          ...report,
-          reportEvidence: { ...report.reportEvidence, evidenceKind: "judgment" },
-        },
-      ],
-    ]);
-    const preflights: RecordedPreflightReportReadPort = {
-      readPreflightReport: async (ref) => reports.get(ref.rowId),
-    };
-
+    reports.set(report.preflightId, {
+      ...report,
+      reportEvidence: { ...report.reportEvidence, evidenceKind: "judgment" },
+    });
     await expect(activationIsBoundToPreflight(request, preflights)).resolves.toBe(false);
   });
 });

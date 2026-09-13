@@ -13,7 +13,7 @@ import {
 } from "@noesis/domain";
 import { experimentBriefPublicationCollisionError } from "@noesis/learning";
 import { createWorkspaceStore } from "@noesis/workspace";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import {
   authorizeScheduledJob,
@@ -1185,23 +1185,29 @@ describe("automatic runtime coordinator", () => {
       authority: f.authority,
       workingAdjustments: f.workingAdjustments,
       research: f.research,
-      config: config({ leaseMs: 100, heartbeatMs: 25 }),
+      // This case tests heartbeat cancellation, not lease expiry under machine load.
+      config: config({ leaseMs: 10_000, heartbeatMs: 25 }),
     });
-    await coordinator.observeCompletedTurn(f.turn("turn-stop-heartbeat"));
-    for (let attempt = 0; attempt < 20 && f.counts().reflectCalls === 0; attempt += 1)
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(f.counts().reflectCalls).toBe(1);
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(renewCalls).toBeGreaterThan(0);
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      await coordinator.observeCompletedTurn(f.turn("turn-stop-heartbeat"));
+      await expect.poll(() => f.counts().reflectCalls).toBe(1);
+      await vi.advanceTimersByTimeAsync(60);
+      expect(renewCalls).toBeGreaterThan(0);
 
-    const stopping = coordinator.stop();
-    const renewCallsAtStop = renewCalls;
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(renewCalls).toBe(renewCallsAtStop);
+      const stopping = coordinator.stop();
+      const renewCallsAtStop = renewCalls;
+      await vi.advanceTimersByTimeAsync(80);
+      expect(renewCalls).toBe(renewCallsAtStop);
 
-    release?.();
-    await stopping;
-    f.workspace.close();
+      release?.();
+      await stopping;
+    } finally {
+      release?.();
+      await coordinator.stop();
+      vi.useRealTimers();
+      f.workspace.close();
+    }
   });
 
   test("does not launch a claimed job when stop lands while the claim is pending", async () => {

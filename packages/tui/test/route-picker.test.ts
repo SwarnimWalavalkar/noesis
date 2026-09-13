@@ -53,6 +53,9 @@ describe("route picker", () => {
     overlay.focused = true;
 
     expect(overlay.render(80).join("\n")).toContain("alpha-current  ✓ current");
+    expect(overlay.render(80).join("\n")).toContain(
+      "New empty session · previous preserved · history not replayed",
+    );
     for (const character of "second") overlay.handleInput(character);
     const filtered = overlay.render(80).join("\n");
     expect(filtered).toContain("alpha-second");
@@ -67,27 +70,6 @@ describe("route picker", () => {
         thinkingLevel: "medium",
       },
     ]);
-  });
-
-  test("keeps the cache consequence visible at ordinary terminal widths", () => {
-    const overlay = createTuiRoutePickerOverlay({
-      routes,
-      intent: {
-        kind: "model",
-        currentProvider: "alpha",
-        currentModel: "alpha-current",
-        currentThinkingLevel: "high",
-      },
-      colorEnabled: false,
-      height: () => 24,
-      requestRender: () => undefined,
-      select: () => undefined,
-      cancel: () => undefined,
-    });
-
-    expect(overlay.render(80).join("\n")).toContain(
-      "New empty session · previous preserved · history not replayed",
-    );
   });
 
   test("changes reasoning for the current model without claiming a new session", () => {

@@ -94,14 +94,8 @@ describe("execute progressive disclosure", () => {
     expect(baseline).toContain("fullOutputComplete:boolean");
     expect(Buffer.byteLength(baseline, "utf8")).toBeLessThanOrEqual(1024);
     expect(baseline).not.toContain("docs<&");
-  });
-
-  test("keeps SDK and Program guidance progressively disclosed", () => {
-    const description = executeDescription();
-    expect(description).toContain("Load the `execute` skill");
-    expect(description).not.toContain("programs.save");
-    expect(description).not.toContain("agents.run");
-    expect(description).not.toContain("noesis.search");
-    expect(description).not.toContain("available_workflows");
+    expect(baseline).toContain("Load the `execute` skill");
+    for (const guidance of ["programs.save", "agents.run", "noesis.search", "available_workflows"])
+      expect(baseline).not.toContain(guidance);
   });
 });

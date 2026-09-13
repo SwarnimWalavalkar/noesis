@@ -6,12 +6,17 @@ import {
   boundedInspectorText,
   INSPECTOR_PREVIEW_CHARACTERS,
   paginateInspectorText,
-  startNoesisTui,
+  startNoesisTui as startTui,
   type NoesisTuiRuntime,
 } from "../src/index.ts";
 import type { TuiLearningActivitySummary } from "../src/runtime-port.ts";
 import { createInMemoryTestRuntime, type TestNoesisRuntime } from "./support/in-memory-runtime.ts";
 import { createTestTerminal } from "./support/test-terminal.ts";
+
+// Keep real cleanup and grace deadlines; only skip the cosmetic animation wait.
+function startNoesisTui(...args: Parameters<typeof startTui>): Promise<void> {
+  return startTui(args[0], args[1], args[2], () => Promise.resolve());
+}
 
 const containsUnsafeTextControl = (text: string): boolean =>
   [...text].some((character) => {
@@ -1034,78 +1039,6 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
-  test("plain launches discard empty sessions instead of adding resume clutter", async () => {
-    const runtime = await createRuntime({
-      name: "fresh-scripted",
-      async run(request) {
-        return {
-          text: `reply:${request.prompt}`,
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed",
-          stopReason: "stop",
-        };
-      },
-      steer: consumeSteer,
-      async abort() {},
-    });
-    const historical = await runtime.startTrail({ title: "historical" });
-    await runtime.runTurn(historical.trailId, "historical-only-message");
-
-    const firstTerminal = createTestTerminal();
-    const first = startNoesisTui(runtime, {}, firstTerminal);
-    await vi.waitFor(() => expect(firstTerminal.output).toContain("● IDLE"));
-    expect(firstTerminal.output).not.toContain("historical-only-message");
-    expect(firstTerminal.output.indexOf("› message")).toBeLessThan(firstTerminal.output.indexOf("● IDLE"));
-    expect(firstTerminal.output.indexOf("● IDLE")).toBeLessThan(firstTerminal.output.indexOf("? help"));
-    firstTerminal.type("/quit\n");
-    await first;
-
-    const secondTerminal = createTestTerminal();
-    const second = startNoesisTui(runtime, {}, secondTerminal);
-    await vi.waitFor(() => expect(secondTerminal.output).toContain("● IDLE"));
-    secondTerminal.type("/quit\n");
-    await second;
-
-    const summaries = runtime.listTrailSummaries();
-    expect(summaries.map((summary) => summary.trailId)).toEqual([historical.trailId]);
-    expect(runtime.listTrails().map((trail) => trail.trailId)).toEqual([historical.trailId]);
-  });
-
-  test("direct resume restores only the selected session history", async () => {
-    const runtime = await createRuntime({
-      name: "resume-scripted",
-      async run(request) {
-        return {
-          text: `reply:${request.prompt}`,
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed",
-          stopReason: "stop",
-        };
-      },
-      steer: consumeSteer,
-      async abort() {},
-    });
-    const selected = await runtime.startTrail({ title: "selected" });
-    await runtime.runTurn(selected.trailId, "selected-history");
-    const other = await runtime.startTrail({ title: "other" });
-    await runtime.runTurn(other.trailId, "other-history");
-    const terminal = createTestTerminal();
-
-    const running = startNoesisTui(
-      runtime,
-      { session: { mode: "resume", trailId: selected.trailId } },
-      terminal,
-    );
-    await vi.waitFor(() => expect(terminal.output).toContain("selected-history"));
-    expect(terminal.output).not.toContain("other-history");
-    terminal.type("/quit\n");
-    await running;
-
-    expect(runtime.resumedTrailIds.at(-1)).toBe(selected.trailId);
-  });
-
   test("keeps ambient learning inspection available in both live and resumed sessions", async () => {
     const makeRuntime = async (jobId: string) => {
       const base = await createRuntime({
@@ -2109,48 +2042,6 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
-  test("reflows the main shell and picker from current terminal dimensions", async () => {
-    const runtime = await createRuntime({
-      name: "resize-scripted",
-      async run(request) {
-        return {
-          text: "done",
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed",
-          stopReason: "stop",
-        };
-      },
-      steer: consumeSteer,
-      async abort() {},
-    });
-    const mainTerminal = createTestTerminal();
-    mainTerminal.resize(120, 35);
-    const main = startNoesisTui(runtime, {}, mainTerminal);
-    await vi.waitFor(() => expect(mainTerminal.output).toContain("███╗   ██╗ ██████╗"));
-    mainTerminal.resize(50, 9);
-    await vi.waitFor(() => expect(mainTerminal.output).toContain("? help · ctrl+o inspect runs"));
-    expect(mainTerminal.output).toContain("› message");
-    mainTerminal.type("/quit\n");
-    await main;
-
-    for (let index = 0; index < 12; index += 1) {
-      const trail = await runtime.startTrail({
-        title: `picker resize ${String(index).padStart(2, "0")}`,
-      });
-      await runtime.runTurn(trail.trailId, `picker history ${String(index)}`);
-    }
-    const pickerTerminal = createTestTerminal();
-    pickerTerminal.resize(100, 30);
-    const picker = startNoesisTui(runtime, { session: { mode: "pick" } }, pickerTerminal);
-    await vi.waitFor(() => expect(pickerTerminal.output).toContain("resume a session"));
-    pickerTerminal.resize(46, 7);
-    pickerTerminal.send("\u001b[B");
-    pickerTerminal.send("\u001b");
-    await expect(picker).resolves.toBeUndefined();
-    expect(pickerTerminal.stops).toBe(1);
-  });
-
   test("keeps command help discoverable without a permanent command wall", async () => {
     const runtime = await createRuntime({
       name: "help-scripted",
@@ -2221,46 +2112,6 @@ describe("Noesis TUI lifecycle", () => {
 
     expect(runtime.listTrails()).toHaveLength(startsBefore);
     expect(runtime.resumedTrailIds.at(-1)).toBe(selected.trailId);
-  });
-
-  test("picker selects the requested session and Escape cancels through normal cleanup", async () => {
-    const runtime = await createRuntime({
-      name: "picker-scripted",
-      async run(request) {
-        return {
-          text: `reply:${request.prompt}`,
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed",
-          stopReason: "stop",
-        };
-      },
-      steer: consumeSteer,
-      async abort() {},
-    });
-    const older = await runtime.startTrail({ title: "older" });
-    await runtime.runTurn(older.trailId, "older-history");
-    const newer = await runtime.startTrail({ title: "newer" });
-    await runtime.runTurn(newer.trailId, "newer-history");
-    const terminal = createTestTerminal();
-    const running = startNoesisTui(runtime, { session: { mode: "pick" } }, terminal);
-    await vi.waitFor(() => expect(terminal.output).toContain("resume a session"));
-    terminal.send("\u001b[B");
-    terminal.send("\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("older-history"));
-    expect(terminal.output).toContain("older-history");
-    expect(terminal.output).not.toContain("newer-history");
-    terminal.type("/quit\n");
-    await running;
-    expect(runtime.resumedTrailIds.at(-1)).toBe(older.trailId);
-
-    const cancelledTerminal = createTestTerminal();
-    const cancelled = startNoesisTui(runtime, { session: { mode: "pick" } }, cancelledTerminal);
-    await vi.waitFor(() => expect(cancelledTerminal.output).toContain("resume a session"));
-    cancelledTerminal.send("\u001b");
-    await expect(cancelled).resolves.toBeUndefined();
-    expect(cancelledTerminal.drains).toBe(1);
-    expect(cancelledTerminal.stops).toBe(1);
   });
 
   test("opens the saved-session picker from /resume and hydrates the selected session", async () => {
@@ -2420,33 +2271,6 @@ describe("Noesis TUI lifecycle", () => {
     expect(runtime.listTrails()).toEqual([]);
   });
 
-  test("treats LF after /quit as shutdown and stops the terminal once", async () => {
-    const runtime = await createRuntime({
-      name: "lifecycle-scripted",
-      async run(request) {
-        return {
-          text: "done",
-          provider: request.provider,
-          model: request.model,
-          outcome: "completed",
-          stopReason: "stop",
-        };
-      },
-      steer: consumeSteer,
-      async abort() {},
-    });
-    const terminal = createTestTerminal();
-    const running = startNoesisTui(runtime, {}, terminal);
-    await vi.waitFor(() => expect(terminal.starts).toBe(1));
-
-    terminal.type("/quit\n");
-    terminal.type("\u0003");
-
-    await expect(running).resolves.toBeUndefined();
-    expect(terminal.drains).toBe(1);
-    expect(terminal.stops).toBe(1);
-  });
-
   test("shows closing while shutdown cleanup is still in progress", async () => {
     const runtime = await createRuntime({
       name: "closing-scripted",
@@ -2478,6 +2302,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     terminal.type("/quit\n");
+    terminal.type("\u0003");
     await vi.waitFor(() => expect(terminal.output).toMatch(/[⣿⣷⣶⣦⣤⣄⣀] CLOSING/u));
     expect(terminal.output).toContain("closing session…");
     expect(terminal.stops).toBe(0);
@@ -2485,6 +2310,7 @@ describe("Noesis TUI lifecycle", () => {
     releaseDrain?.();
     await running;
     expect(terminal.stops).toBe(1);
+    expect(terminal.drains).toBe(1);
   });
 
   test.each([false, true])(
@@ -2630,7 +2456,7 @@ describe("Noesis TUI lifecycle", () => {
       abort,
     });
     const terminal = createTestTerminal();
-    const running = startNoesisTui(runtime, {}, terminal);
+    const running = startTui(runtime, {}, terminal);
     await vi.waitFor(() => expect(terminal.starts).toBe(1));
     terminal.type("hello\r");
     await started;

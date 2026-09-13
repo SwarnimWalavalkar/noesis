@@ -78,6 +78,11 @@ test("bounds preview characters without bounding the token count", () => {
 });
 
 test("cache accounting includes cache writes in input, never as hits", () => {
+  expect(inspectCacheUsage({ input: 1000, cacheRead: 0, cacheWrite: 0 })).toEqual({
+    inputTokens: 1000,
+    readTokens: 0,
+    writeTokens: 0,
+  });
   expect(inspectCacheUsage({ input: 300, cacheRead: 9200, cacheWrite: 500 })).toEqual({
     inputTokens: 10000,
     readTokens: 9200,
@@ -87,14 +92,6 @@ test("cache accounting includes cache writes in input, never as hits", () => {
     inputTokens: 800,
     readTokens: 0,
     writeTokens: 500,
-  });
-});
-
-test("retains zero cache hits when input usage is available", () => {
-  expect(inspectCacheUsage({ input: 1000, cacheRead: 0, cacheWrite: 0 })).toEqual({
-    inputTokens: 1000,
-    readTokens: 0,
-    writeTokens: 0,
   });
 });
 

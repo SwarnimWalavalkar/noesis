@@ -32,7 +32,7 @@
   "scripts": {
     "build": "tsc --noEmit",
     "build:release": "vite build --config vite.release.config.ts",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test",
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck",
     "dev": "./scripts/noesis-dev",
     "dev:install": "./scripts/install-noesis-dev",
     "format": "oxfmt --write .",
@@ -43,6 +43,8 @@
     "release:verify": "node scripts/verify-release.mjs",
     "start": "tsx apps/noesis/src/cli.ts",
     "test": "vitest run",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:watch": "vitest watch --config vitest.unit.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

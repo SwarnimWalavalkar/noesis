@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkspaceStore } from "@noesis/workspace";
@@ -18,7 +18,7 @@ describe("Barrier F WorkspaceStore criterion integration", () => {
     root = undefined;
   });
 
-  test("migrates, edits, and pins a criterion while preserving its immutable cited revision", async () => {
+  test("revises, pins, scopes, and retires criteria while preserving immutable history", async () => {
     root = await mkdtemp(join(tmpdir(), "noesis-barrier-criteria-"));
     const firstStore = await createWorkspaceStore(root);
     await firstStore.operational.sessions.put({
@@ -50,6 +50,7 @@ describe("Barrier F WorkspaceStore criterion integration", () => {
       scope: "writing",
       evaluatorInstruction: "Preserve the author's sentence rhythm.",
       evidenceRefs: [citation],
+      promptOwnership: { owner: "user", layer: "user_constitution" },
       actor: user,
     });
     if (!created.ok) throw new Error(created.error.message);
@@ -86,8 +87,101 @@ describe("Barrier F WorkspaceStore criterion integration", () => {
       revision: 3,
       definitionRevision: current.value.metadata.definitionRevision,
     });
-    expect("activate" in reopened).toBe(false);
+    for (const forbidden of ["activate", "promote", "grant"]) expect(forbidden in reopened).toBe(false);
+    await expect(
+      reopened.revise({
+        criterionId: "preserve-rhythm",
+        evaluatorInstruction: "Replace the voice.",
+        actor: noesis,
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "pinned" } });
+    await expect(reopened.pin("preserve-rhythm", false, noesis)).resolves.toMatchObject({
+      ok: false,
+      error: { code: "pinned" },
+    });
+    const other = createUserCriterionRepository({
+      ...createWorkspaceUserCriterionPorts(reopenedStore),
+      nextCriterionId: () => "research",
+    });
+    await expect(
+      other.create({
+        source: "expert_command",
+        scope: "research",
+        evaluatorInstruction: "Cite primary sources.",
+        evidenceRefs: [originalRevision],
+        actor: user,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    const snapshot = await reopened.snapshotRelevant({
+      snapshotId: "criteria-snapshot",
+      scope: "writing/email",
+      candidateRevision: {
+        kind: "capability_revision",
+        capabilityId: "writing",
+        capabilityRevisionId: "revision-1",
+        bundleDigest: "b".repeat(64),
+      },
+    });
+    if (!snapshot.ok) throw new Error(snapshot.error.message);
+    expect(snapshot.value.selectedCriterionIds).toEqual(["preserve-rhythm"]);
+    expect(snapshot.value.criteria[0]).toMatchObject({
+      criterionId: "preserve-rhythm",
+      revision: 3,
+      promptOwnership: { owner: "user", layer: "user_constitution" },
+      evidenceRefs: [citation],
+    });
+    expect(snapshot.value.snapshotDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(Object.isFrozen(snapshot.value.criteria)).toBe(true);
+    expect(Object.isFrozen(snapshot.value.criteria[0])).toBe(true);
+    expect(Object.isFrozen(snapshot.value.criteria[0]?.evidenceRefs)).toBe(true);
+    await expect(
+      reopened.revise({
+        criterionId: "preserve-rhythm",
+        evaluatorInstruction: "Preserve voice, rhythm, and structure.",
+        actor: user,
+      }),
+    ).resolves.toMatchObject({ ok: true, value: { definition: { revision: 4, pinned: true } } });
+    await expect(reopened.retire("preserve-rhythm", user, "No longer applies")).resolves.toMatchObject({
+      ok: true,
+      value: { definition: { revision: 5, status: "retired" } },
+    });
+    const history = await reopenedStore.definitionMetadata.listRevisions("user_criterion", "preserve-rhythm");
+    expect(history).toHaveLength(5);
+    expect(new Set(history.map((entry) => entry.definitionRevision.revisionId)).size).toBe(5);
+    expect(await reopenedStore.reads.readRevision(originalRevision)).toEqual(originalBytes);
+    await expect(reopened.inspect("preserve-rhythm", 1)).resolves.toMatchObject({
+      ok: true,
+      value: { definition: { revision: 1, status: "active", pinned: false } },
+    });
     reopenedStore.close();
+  });
+
+  test("fails closed on malformed criterion JSON and corrupted revision bytes", async () => {
+    root = await mkdtemp(join(tmpdir(), "noesis-criterion-corrupt-"));
+    const store = await createWorkspaceStore(root);
+    try {
+      const published = await store.definitionPublications.publish({
+        namespace: "user_criterion",
+        definitionId: "corrupt",
+        revision: 1,
+        workingPath: "config/criteria/corrupt.json",
+        bytes: Buffer.from("{not-json"),
+        activity: { kind: "criterion.created", actor: user },
+      });
+      if (!published.ok) throw new Error(published.error.message);
+      const repository = createUserCriterionRepository(createWorkspaceUserCriterionPorts(store));
+      await expect(repository.inspect("corrupt")).resolves.toMatchObject({
+        ok: false,
+        error: { code: "invalid_definition", criterionId: "corrupt", revision: 1 },
+      });
+      await writeFile(join(root, published.value.definitionRevision.snapshotPath), "changed recorded bytes");
+      await expect(repository.inspect("corrupt")).resolves.toMatchObject({
+        ok: false,
+        error: { code: "storage_error", criterionId: "corrupt", revision: 1 },
+      });
+    } finally {
+      store.close();
+    }
   });
 
   test("publishes only the criterion revision that wins a concurrent pointer CAS", async () => {
