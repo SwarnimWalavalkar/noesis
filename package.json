@@ -1,6 +1,6 @@
 {
   "name": "noesisai",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "The self-evolving agent harness for tinkerers.",
   "keywords": [
     "agent",
