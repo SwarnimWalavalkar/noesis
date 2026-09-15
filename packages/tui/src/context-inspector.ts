@@ -15,6 +15,12 @@ const number = (value: number): string => Math.round(value).toLocaleString("en-U
 const compact = (value: number): string =>
   value >= 1000 ? `${Number((value / 1000).toFixed(1))}k` : number(value);
 
+/** A zero-token cache has no measurable hit rate; never render NaN% or Infinity%. */
+const cacheHitRate = (
+  cache: { readonly inputTokens: number; readonly readTokens: number } | undefined,
+): string =>
+  cache && cache.inputTokens > 0 ? `${Math.round((cache.readTokens / cache.inputTokens) * 100)}%` : "—";
+
 const contextTools = type({
   name: "string",
   description: "string",
@@ -117,9 +123,7 @@ export function renderContextOverview(
 ): string[] {
   const used = snapshot.components.reduce((sum, component) => sum + component.tokens, 0);
   const percentage = snapshot.inputBudget > 0 ? Math.round((used / snapshot.inputBudget) * 100) : 0;
-  const cache = snapshot.cache
-    ? `${Math.round((snapshot.cache.readTokens / snapshot.cache.inputTokens) * 100)}%`
-    : "—";
+  const cache = cacheHitRate(snapshot.cache);
   const map = contextMap([used, Math.max(0, snapshot.inputBudget - used)], width)
     .map((part) => styled(color, part === 0 ? ANSI.cyan : ANSI.dim, part === 0 ? "█" : "░"))
     .join("");
@@ -174,7 +178,7 @@ export function renderContextDetails(snapshot: AgentContextInspection, width: nu
     "LAST REQUEST CACHE",
     ...(cache
       ? [
-          `Cache hit rate    ${Math.round((cache.readTokens / cache.inputTokens) * 100)}%`,
+          `Cache hit rate    ${cacheHitRate(cache)}`,
           `Cache reads       ${number(cache.readTokens)} tokens`,
           `Cache writes      ${number(cache.writeTokens)} tokens`,
           `Uncached input    ${number(cache.inputTokens - cache.readTokens - cache.writeTokens)} tokens`,
