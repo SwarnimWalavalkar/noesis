@@ -400,8 +400,12 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (command.startsWith("/skill ")) {
-    const name = command.slice("/skill ".length).trim();
+  if (command === "/skill" || command.startsWith("/skill ")) {
+    const name = command.slice("/skill".length).trim();
+    if (!name) {
+      publishInspector("Usage: /skill <name>. Use /skills to list available skills.");
+      return true;
+    }
     if (!runtime.inspectSkill) {
       publishInspector("Skill detail inspection is unavailable in this runtime.");
       return true;
@@ -444,8 +448,8 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (command.startsWith("/program ")) {
-    const [mode, ...nameParts] = command.slice("/program ".length).trim().split(/\s+/u);
+  if (command === "/program" || command.startsWith("/program ")) {
+    const [mode, ...nameParts] = command.slice("/program".length).trim().split(/\s+/u);
     const name = nameParts.join(" ");
     if ((mode !== "script" && mode !== "workflow") || name.length === 0) {
       publishInspector("Usage: /program <script|workflow> <name>");
@@ -507,8 +511,12 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     return true;
   }
 
-  if (command.startsWith("/run ")) {
-    const executionId = command.slice("/run ".length).trim();
+  if (command === "/run" || command.startsWith("/run ")) {
+    const executionId = command.slice("/run".length).trim();
+    if (!executionId) {
+      publishInspector("Usage: /run <execution-id>. Use /runs to list recent runs.");
+      return true;
+    }
     if (!runtime.inspectExecution) {
       publishInspector("Run detail inspection is unavailable in this runtime.");
       return true;

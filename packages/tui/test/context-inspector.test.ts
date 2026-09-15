@@ -232,5 +232,17 @@ describe("context visualization", () => {
     expect(
       renderContextOverview({ ...cached, cache: { ...cached.cache, readTokens: 0 } }, 80, false).join("\n"),
     ).toContain("0% cache hit rate");
+    expect(
+      renderContextOverview(
+        { ...cached, cache: { inputTokens: 0, readTokens: 0, writeTokens: 0 } },
+        80,
+        false,
+      ).join("\n"),
+    ).toContain("— cache hit rate");
+    expect(
+      renderContextDetails({ ...cached, cache: { inputTokens: 0, readTokens: 0, writeTokens: 0 } }, 100).join(
+        "\n",
+      ),
+    ).toContain("Cache hit rate    —");
   });
 });
