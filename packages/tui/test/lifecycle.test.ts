@@ -98,7 +98,7 @@ describe("Noesis TUI lifecycle", () => {
     });
   });
 
-  test("drops stale inspector results when a prompt supersedes them", async () => {
+  test("keeps requested inspector results when a prompt runs before they resolve", async () => {
     const base = await createRuntime({
       name: "inspector-race-scripted",
       async run(request) {
@@ -149,7 +149,7 @@ describe("Noesis TUI lifecycle", () => {
     releaseInspector?.();
     await new Promise<void>((resolve) => setTimeout(resolve, 30));
 
-    expect(terminal.output).not.toContain("STALE_INSPECTOR_RESULT");
+    await vi.waitFor(() => expect(terminal.output).toContain("STALE_INSPECTOR_RESULT"));
     terminal.type("/quit\n");
     await running;
   });

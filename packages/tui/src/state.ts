@@ -6,7 +6,12 @@ import type { RuntimeAgentDefaults, RuntimeTranscriptEntry, TrailState } from "@
 import { appendReasoningDelta, reconcileReasoning } from "./reasoning-timeline.ts";
 import type { TuiExecutionDetail } from "./runtime-port.ts";
 import { reduceSubAgentPhase, retainActiveSubAgentPhases } from "./subagent-presentation-state.ts";
-import { tuiTimelineFromRuntime, tuiUserMessage } from "./timeline-adapter.ts";
+import {
+  isLocalSystemMessage,
+  lastContentEntryIndex,
+  tuiTimelineFromRuntime,
+  tuiUserMessage,
+} from "./timeline-adapter.ts";
 export { tuiTimelineFromRuntime };
 export type Pane = "trail" | "context" | "capabilities";
 export type TuiAttachmentLabel = Pick<ComposerAttachment, "name" | "mimeType">;
@@ -440,7 +445,10 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       if (state.trailId !== action.trailId) return state;
       return {
         ...state,
-        timeline: tuiTimelineFromRuntime(action.transcript),
+        timeline: [
+          ...tuiTimelineFromRuntime(action.transcript),
+          ...state.timeline.filter(isLocalSystemMessage),
+        ],
         expandedActionIds: NO_EXPANDED_ACTIONS,
       };
     case "prompt-submitted": {
@@ -485,9 +493,10 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       };
     case "stream-delta": {
       const timeline = [...state.timeline];
-      const last = timeline.at(-1);
+      const index = lastContentEntryIndex(timeline);
+      const last = timeline[index];
       if (last?.kind === "message" && last.role === "assistant") {
-        timeline[timeline.length - 1] = {
+        timeline[index] = {
           ...last,
           text: last.text + action.text,
         };
@@ -502,9 +511,10 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     }
     case "stream-reconciled": {
       const timeline = [...state.timeline];
-      const last = timeline.at(-1);
+      const index = lastContentEntryIndex(timeline);
+      const last = timeline[index];
       if (last?.kind === "message" && last.role === "assistant") {
-        timeline[timeline.length - 1] = { ...last, text: action.text };
+        timeline[index] = { ...last, text: action.text };
       } else {
         timeline.push({
           kind: "message",
@@ -756,8 +766,9 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     }
     case "turn-aborted": {
       const timeline = [...state.timeline];
-      const last = timeline.at(-1);
-      if (last?.kind === "message" && last.role === "assistant" && !last.text) timeline.pop();
+      const index = lastContentEntryIndex(timeline);
+      const last = timeline[index];
+      if (last?.kind === "message" && last.role === "assistant" && !last.text) timeline.splice(index, 1);
       return { ...state, execution: "idle", animationFrame: 0, timeline };
     }
     case "compacted": {

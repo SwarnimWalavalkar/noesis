@@ -69,7 +69,7 @@ describe("Noesis slash commands", () => {
   test("routes learning only from column zero", () => {
     expect(isSlashCommandSubmission("/learning")).toBe(true);
     expect(isSlashCommandSubmission("  /learning")).toBe(false);
-    expect(isSlashCommandSubmission("  /script reusable-research")).toBe(true);
+    expect(isSlashCommandSubmission("  /script reusable-research")).toBe(false);
   });
 
   test("opens MCP management through the interactive surface and explains unsupported runtimes", async () => {
@@ -857,5 +857,25 @@ describe("Noesis slash commands", () => {
     if (dispatched[0]?.type !== "trail-selected" || dispatched[1]?.type !== "transcript-hydrated")
       throw new Error("expected a selected and hydrated fork");
     expect(dispatched[1].trailId).toBe(dispatched[0].trail.trailId);
+  });
+
+  test("guides bare inspect commands toward usage instead of treating them as prompts", async () => {
+    const runtime = createInMemoryTestRuntime(agent);
+    for (const [input, expected] of [
+      ["/skill", "Usage: /skill <name>. Use /skills to list available skills."],
+      ["/program", "Usage: /program <script|workflow> <name>"],
+      ["/run", "Usage: /run <execution-id>. Use /runs to list recent runs."],
+    ] as const) {
+      const published: string[] = [];
+      const handled = await runSlashCommand(input, {
+        runtime,
+        trailId: "trail_test",
+        publishInspector: (message) => published.push(message),
+        dispatch: () => undefined,
+        requestRender: () => undefined,
+      });
+      expect(handled).toBe(true);
+      expect(published).toEqual([expected]);
+    }
   });
 });

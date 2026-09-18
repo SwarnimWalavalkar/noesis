@@ -1,3 +1,4 @@
+import { lastContentEntryIndex } from "./timeline-adapter.ts";
 import type { TuiTimelineEntry } from "./state.ts";
 
 export function appendReasoningDelta(
@@ -5,8 +6,9 @@ export function appendReasoningDelta(
   text: string,
 ): readonly TuiTimelineEntry[] {
   const next = [...timeline];
-  const last = next.at(-1);
-  if (last?.kind === "reasoning") next[next.length - 1] = { ...last, text: last.text + text };
+  const index = lastContentEntryIndex(next);
+  const last = next[index];
+  if (last?.kind === "reasoning") next[index] = { ...last, text: last.text + text };
   else next.push({ kind: "reasoning", text });
   return next;
 }
