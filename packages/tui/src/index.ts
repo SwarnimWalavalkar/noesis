@@ -10,13 +10,8 @@ import {
 } from "@earendil-works/pi-tui";
 import type { RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
 import { tuiActionForAgentEvent } from "./agent-event.ts";
-import {
-  exclusiveSlashCommandScope,
-  isExclusiveSlashCommand,
-  isSlashCommandSubmission,
-  runSlashCommand,
-  steerFeedback,
-} from "./commands.ts";
+import { runSlashCommand, steerFeedback } from "./commands.ts";
+import { routeSubmission } from "./submission-routing.ts";
 import { createEscapeRouting } from "./escape-routing.ts";
 import { createExclusiveCommandBarrier, type ExclusiveCommandBarrier } from "./exclusive-command-barrier.ts";
 import { createExternalEditorAction } from "./external-editor-action.ts";
@@ -578,7 +573,8 @@ export async function startNoesisTui(
     let ownedTrailId = submittedTrailId;
     const normalizedInput = text.trim();
     if (!submittedTrailId || !normalizedInput) return;
-    if (normalizedInput === "/quit") {
+    const route = routeSubmission(text);
+    if (route.kind === "control" && route.name === "quit") {
       void shutdown();
       return;
     }
@@ -593,29 +589,28 @@ export async function startNoesisTui(
       }
       return;
     }
-    inspectorGeneration += 1;
-    const submittedInspectorGeneration = inspectorGeneration;
+    let submittedInspectorGeneration = inspectorGeneration;
     const isCurrentSubmission = (): boolean =>
       phase === "main" &&
       inspectorGeneration === submittedInspectorGeneration &&
       view.state.trailId === ownedTrailId;
     const publishInspector = (message: string): void => {
-      if (!isCurrentSubmission() || view.state.interaction.phase !== "idle") return;
+      if (!isCurrentSubmission()) return;
       view.dispatch({
         type: "system-message",
         text: boundedInspectorText(message),
       });
       tui.requestRender();
     };
-    const exclusiveScope = exclusiveSlashCommandScope(normalizedInput);
+    const exclusiveScope = route.kind === "exclusive" ? route.scope : undefined;
     const performSubmission = async (): Promise<void> => {
-      if (normalizedInput === "/abort") {
+      if (route.kind === "control" && route.name === "abort") {
         const result = await interruptActiveTurn();
         if (result.effect === "idle") view.dispatch({ type: "system-message", text: "No turn is active." });
         tui.requestRender();
         return;
       }
-      if (normalizedInput === "/steer" || normalizedInput.startsWith("/steer ")) {
+      if (route.kind === "control" && route.name === "steer") {
         const steeringText = normalizedInput.slice("/steer".length).trim();
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const result = await interact(
@@ -639,12 +634,12 @@ export async function startNoesisTui(
         tui.requestRender();
         return;
       }
-      if (normalizedInput === "/queue" || normalizedInput.startsWith("/queue ")) {
+      if (route.kind === "control" && route.name === "queue") {
         view.dispatch({ type: "system-message", text: "Use /queue resume." });
         tui.requestRender();
         return;
       }
-      if (view.state.interaction.phase !== "idle" && isExclusiveSlashCommand(normalizedInput)) {
+      if (view.state.interaction.phase !== "idle" && route.kind === "exclusive") {
         view.dispatch({
           type: "system-message",
           text: "That command changes the session. Wait for the turn to finish or press Esc to interrupt it.",
@@ -653,7 +648,7 @@ export async function startNoesisTui(
         return;
       }
       let handled = false;
-      if (isSlashCommandSubmission(text)) {
+      if (route.kind === "local" || route.kind === "exclusive") {
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
         const commandWork = runSlashCommand(
           normalizedInput,
@@ -666,7 +661,12 @@ export async function startNoesisTui(
             dispatch: (action: NoesisTuiAction) => {
               if (!isCurrentSubmission()) return;
               view.dispatch(action);
-              if (action.type === "trail-selected") ownedTrailId = action.trail.trailId;
+              if (action.type === "trail-selected") {
+                ownedTrailId = action.trail.trailId;
+                // Only a session selection or shutdown invalidates pending local feedback.
+                inspectorGeneration += 1;
+                submittedInspectorGeneration = inspectorGeneration;
+              }
             },
             requestRender: () => {
               if (isCurrentSubmission()) tui.requestRender();
@@ -705,6 +705,10 @@ export async function startNoesisTui(
             applyInteractionSnapshot(interaction);
           }
         }
+        return;
+      }
+      if (route.kind !== "prompt") {
+        publishInspector("That command is unavailable in this runtime.");
         return;
       }
       await submitPrompt({ type: "submit", text });

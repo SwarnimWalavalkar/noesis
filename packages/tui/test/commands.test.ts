@@ -69,7 +69,7 @@ describe("Noesis slash commands", () => {
   test("routes learning only from column zero", () => {
     expect(isSlashCommandSubmission("/learning")).toBe(true);
     expect(isSlashCommandSubmission("  /learning")).toBe(false);
-    expect(isSlashCommandSubmission("  /script reusable-research")).toBe(true);
+    expect(isSlashCommandSubmission("  /script reusable-research")).toBe(false);
   });
 
   test("opens MCP management through the interactive surface and explains unsupported runtimes", async () => {

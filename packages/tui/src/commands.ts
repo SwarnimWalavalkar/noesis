@@ -1,3 +1,4 @@
+import { routeSubmission } from "./submission-routing.ts";
 import { paginateInspectorText } from "./lifecycle-utils.ts";
 import type { AgentThinkingLevel } from "@noesis/agent-types";
 import type {
@@ -35,7 +36,7 @@ export interface TuiRoutePickerSelection {
 export interface SlashCommandContext {
   readonly runtime: NoesisTuiRuntime;
   readonly trailId: string;
-  /** Publishes bounded read-only output, dropping results from superseded submissions. */
+  /** Publishes bounded read-only output, dropping results from superseded sessions. */
   readonly publishInspector: (message: string) => void;
   readonly dispatch: (action: NoesisTuiAction) => void;
   /** Completes durable queued-intent handoff before a new session becomes visible. */
@@ -298,35 +299,16 @@ function learningActivityLine(activity: TuiLearningActivitySummary): string {
   ].join("\n");
 }
 
-/** Commands that change the active trail or its context must not overlap another submission. */
+/** Session-changing commands serialize against other session changes and queued prompts. */
 export function isExclusiveSlashCommand(text: string): boolean {
-  const command = text.trim();
-  return (
-    command === "/compact" ||
-    command.startsWith("/compact ") ||
-    command === "/resume" ||
-    command === "/fork" ||
-    command === "/model" ||
-    command.startsWith("/model ") ||
-    command === "/provider" ||
-    command.startsWith("/provider ") ||
-    command === "/reasoning" ||
-    command.startsWith("/reasoning ")
-  );
+  return routeSubmission(text).kind === "exclusive";
 }
 
 export function exclusiveSlashCommandScope(
   text: string,
 ): "current-session" | "resulting-session" | undefined {
-  const command = text.trim();
-  if (
-    command === "/compact" ||
-    command.startsWith("/compact ") ||
-    command === "/reasoning" ||
-    command.startsWith("/reasoning ")
-  )
-    return "current-session";
-  return isExclusiveSlashCommand(command) ? "resulting-session" : undefined;
+  const route = routeSubmission(text);
+  return route.kind === "exclusive" ? route.scope : undefined;
 }
 
 export function steerFeedback(result: TuiInteractionResult, explicit: boolean): string | undefined {
@@ -337,10 +319,7 @@ export function steerFeedback(result: TuiInteractionResult, explicit: boolean): 
 }
 
 export function isSlashCommandSubmission(text: string): boolean {
-  const command = text.trim();
-  return (
-    command === "?" || (command.startsWith("/") && (command !== "/learning" || text === text.trimStart()))
-  );
+  return routeSubmission(text).kind !== "prompt";
 }
 
 /**
@@ -349,7 +328,9 @@ export function isSlashCommandSubmission(text: string): boolean {
  */
 export async function runSlashCommand(text: string, context: SlashCommandContext): Promise<boolean> {
   const { runtime, trailId, publishInspector, dispatch, requestRender } = context;
-  const command = text.trim();
+  const route = routeSubmission(text);
+  if (route.kind !== "local" && route.kind !== "exclusive") return false;
+  const command = route.command;
 
   if (command === "?" || command === "/help") {
     dispatch({ type: "system-message", text: HELP_LINES.join("\n") });

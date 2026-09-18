@@ -2,7 +2,7 @@ import { disposeAttachmentInput } from "./attachment-capture.ts";
 import type { ComposerDraftAttachment } from "@noesis/domain";
 import { matchesKey, type Component } from "@earendil-works/pi-tui";
 import type { SafeEditor } from "./safe-editor.ts";
-import { NOESIS_SLASH_COMMANDS } from "./command-autocomplete.ts";
+import { routeSubmission } from "./submission-routing.ts";
 import { elideText, safeTerminalText } from "./theme.ts";
 
 export interface ComposerPreview extends Component {
@@ -180,6 +180,13 @@ export function createComposer(options: ComposerOptions) {
         remove(command.slice(7).trim());
         return true;
       }
+      const route = routeSubmission(text);
+      if (route.kind !== "prompt") {
+        if (route.name !== "steer" || items.length === 0) return false;
+        editor.setText(text);
+        notice("Attachments stay in this draft. Send them with Enter without /steer, or /detach all first.");
+        return true;
+      }
       if (sending || items.some((item) => !item.attachment)) {
         editor.setText(text);
         notice(
@@ -189,14 +196,7 @@ export function createComposer(options: ComposerOptions) {
         );
         return true;
       }
-      if (items.length === 0 || command === "?") return false;
-      const name = command.split(/\s/u)[0]?.slice(1);
-      if (command.startsWith("/") && NOESIS_SLASH_COMMANDS.some((entry) => entry.name === name)) {
-        if (name !== "steer") return false;
-        editor.setText(text);
-        notice("Attachments stay in this draft. Send them with Enter without /steer, or /detach all first.");
-        return true;
-      }
+      if (items.length === 0) return false;
       editor.setText(text);
       if (!options.canSubmit()) {
         notice("Wait for the current command before sending attachments.");

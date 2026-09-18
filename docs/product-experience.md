@@ -33,6 +33,14 @@ The user's words take priority. Phrases such as "just do it," "think this throug
 
 The approach can change during a session. A build can expose something the user needs to learn. Reflection can turn into execution. An open discussion can end with a concrete task. Noesis should preserve why the change happened.
 
+### Slash commands and literal text
+
+Only recognized command syntax is handled by the TUI. Unknown slash prefixes, paths such as `/tmp/report.txt`, and slash mentions within prose remain ordinary message text. No-argument commands match the whole message, so `/help explain this` is text rather than a help invocation. To discuss an exact command literally, quote it or put it in a sentence.
+
+Inspection commands and their feedback stay outside the model's conversation. They remain available during active turns and session changes, even when draft attachments are still preparing. A later prompt does not cancel a pending inspection result; switching sessions discards results belonging to the old session.
+
+Turn controls keep their own semantics. `/steer MESSAGE` delivers its payload to the active turn, and bare `/steer` promotes queued input. Skill invocations, including `/skill:NAME` and `/refine`, go to the runtime rather than being consumed as local commands. Session-changing commands remain serialized and explain when the user must wait or interrupt. `/queue resume` cannot release a queue while a session command owns it.
+
 ### Composer attachments
 
 `Ctrl+V` attaches local copied files or a clipboard image; `/attach <path>` attaches an image or file. A compact strip above the editor shows a small image preview where supported and numbered text labels everywhere else. `/detach` removes items. Original files travel with the durable message through the queue, restoration, and session replay. Failed admission retains the draft. See [composer attachments](composer-attachments.md) for terminal support, clipboard helpers, limits, and model behavior.

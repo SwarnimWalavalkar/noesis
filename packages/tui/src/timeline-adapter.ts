@@ -2,6 +2,16 @@ import { createConditionalObject, type ComposerAttachment } from "@noesis/domain
 import type { RuntimeTranscriptAction, RuntimeTranscriptEntry } from "@noesis/runtime";
 import type { TuiTimelineEntry, TuiMessageEntry, NoesisTuiAction } from "./state.ts";
 
+/** UI-only command feedback has no durable message identity and never enters model history. */
+export function isLocalSystemMessage(entry: TuiTimelineEntry): boolean {
+  return entry.kind === "message" && entry.role === "system" && entry.messageId === undefined;
+}
+
+/** Local feedback must not split an in-progress assistant or reasoning segment. */
+export function lastContentEntryIndex(timeline: readonly TuiTimelineEntry[]): number {
+  return timeline.findLastIndex((entry) => !isLocalSystemMessage(entry));
+}
+
 function parsedTimestamp(timestamp: string): number | undefined {
   const parsed = Date.parse(timestamp);
   return Number.isFinite(parsed) ? parsed : undefined;

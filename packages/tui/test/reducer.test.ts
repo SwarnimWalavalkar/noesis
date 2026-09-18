@@ -21,6 +21,53 @@ import {
 } from "../src/index.ts";
 
 describe("Noesis TUI reducer", () => {
+  test("local feedback does not split streaming assistant or reasoning text", () => {
+    let state = reduceTui(initialTuiState("fake"), { type: "prompt-submitted", text: "inspect" });
+    state = reduceTui(state, { type: "reasoning-delta", text: "Thinking" });
+    state = reduceTui(state, { type: "system-message", text: "Usage: /skill <name>" });
+    state = reduceTui(state, { type: "reasoning-delta", text: " carefully" });
+    state = reduceTui(state, { type: "reasoning-reconciled", text: "Thinking carefully." });
+    state = reduceTui(state, { type: "stream-delta", text: "Partial" });
+    state = reduceTui(state, { type: "system-message", text: "Usage: /run <id>" });
+    state = reduceTui(state, { type: "stream-delta", text: " answer" });
+    expect(state.timeline.filter((entry) => entry.kind === "message" && entry.role === "assistant")).toEqual([
+      { kind: "message", role: "assistant", text: "Partial answer" },
+    ]);
+    state = reduceTui(state, { type: "stream-reconciled", text: "Complete answer" });
+    expect(state.timeline).toEqual([
+      { kind: "message", role: "user", text: "inspect" },
+      { kind: "reasoning", text: "Thinking carefully." },
+      { kind: "message", role: "system", text: "Usage: /skill <name>" },
+      { kind: "message", role: "assistant", text: "Complete answer" },
+      { kind: "message", role: "system", text: "Usage: /run <id>" },
+    ]);
+  });
+
+  test("hydration retains local feedback without duplicating durable system messages", () => {
+    let state = initialTuiState("fake");
+    state = { ...state, trailId: "session" };
+    const hydrate = {
+      type: "transcript-hydrated",
+      trailId: "session",
+      transcript: [
+        {
+          kind: "message",
+          role: "system",
+          messageId: "durable",
+          text: "durable notice",
+          createdAt: "2026-08-01T00:00:00Z",
+        },
+      ],
+    } as const;
+    state = reduceTui(state, hydrate);
+    state = reduceTui(state, { type: "system-message", text: "local usage" });
+    state = reduceTui(state, hydrate);
+    state = reduceTui(state, hydrate);
+    expect(state.timeline).toHaveLength(2);
+    expect(state.timeline.at(-1)).toEqual({ kind: "message", role: "system", text: "local usage" });
+    expect(reduceTui(state, { ...hydrate, trailId: "another-session" })).toBe(state);
+  });
+
   test("derives execution state from interaction lifecycle without hiding active work", () => {
     expect(executionForInteractionPhase("aborting", "running")).toBe("thinking");
     expect(executionForInteractionPhase("tool", "running")).toBeUndefined();

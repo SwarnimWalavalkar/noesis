@@ -52,6 +52,38 @@ function fixture(
 }
 
 describe("attachment composer", () => {
+  test("local commands stay available while an attachment is preparing or failed", async () => {
+    const read = deferred<ComposerAttachmentInput>();
+    const f = fixture(async () => read.promise);
+    f.enter("/attach slow.txt");
+    for (const text of ["/skill", "/program", "/run", "/abort", "/help"]) {
+      f.enter(text);
+      expect(f.ordinary).toHaveBeenCalledWith(text);
+    }
+    expect(f.submit).not.toHaveBeenCalled();
+    expect(f.composer.render(80).join(" ")).toContain("loading");
+    read.reject(new Error("unreadable"));
+    await settle();
+    f.enter("/skills");
+    expect(f.ordinary).toHaveBeenCalledWith("/skills");
+    expect(f.composer.render(80).join(" ")).toContain("failed");
+    f.composer.dispose();
+  });
+
+  test.each(["/unknown text", "/help explain this"])(
+    "preserves prompt and skill text with attachments: %j",
+    async (text) => {
+      const f = fixture();
+      f.enter("/attach notes.txt");
+      await settle();
+      f.enter(text);
+      await settle();
+      expect(f.submit).toHaveBeenCalledWith(text, [file]);
+      expect(f.ordinary).not.toHaveBeenCalled();
+      f.composer.dispose();
+    },
+  );
+
   test("clipboard batches larger than eight submit together without admission caps", async () => {
     const f = fixture();
     const second = { ...file, name: "second.pdf", mimeType: "application/pdf" };

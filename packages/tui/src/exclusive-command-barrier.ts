@@ -1,3 +1,5 @@
+import { routeSubmission } from "./submission-routing.ts";
+
 export type ExclusiveCommandScope = "current-session" | "resulting-session";
 
 type BarrierInteractionCommand =
@@ -88,8 +90,12 @@ export function createExclusiveCommandBarrier(options: {
     routeSubmission: (text: string) => {
       const state = active;
       if (!state) return "idle";
-      const command = text.trim();
-      if (command === "?" || command.startsWith("/")) return "blocked";
+      const route = routeSubmission(text);
+      if (route.kind === "exclusive" || (route.kind === "control" && route.name === "queue"))
+        return "blocked";
+      // Queue control cannot release a queue held by this barrier. Inspection and
+      // turn control bypass the prompt queue, including /steer and /abort.
+      if (route.kind !== "prompt") return "idle";
       if (state.destinationSessionId) enqueueOnDestination(state, text);
       else enqueueOnSource(state, text);
       return "queued";
