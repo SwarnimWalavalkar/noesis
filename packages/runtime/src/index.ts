@@ -43,6 +43,8 @@ export interface RuntimeTranscriptMessage {
   readonly role: "user" | "assistant" | "system";
   readonly text: string;
   readonly createdAt: string;
+  /** A runtime-delivered collaboration reminder recorded in the user role for the model. */
+  readonly origin?: "collaboration";
 }
 
 export interface RuntimeTranscriptReasoning {

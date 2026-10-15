@@ -1,6 +1,7 @@
 import type { ComposerAttachment } from "@noesis/domain";
 import type {
   AgentAddress,
+  AgentMessageKind,
   AgentMessageStatus,
   AgentThinkingLevel,
   AgentUsage,
@@ -286,6 +287,7 @@ export interface AgentMailboxMessageRecord {
   readonly projectId: string;
   readonly sender: AgentAddress;
   readonly recipient: AgentAddress;
+  readonly kind: AgentMessageKind;
   readonly content: string;
   readonly sensitivity: Sensitivity;
   readonly status: AgentMessageStatus;
@@ -949,12 +951,32 @@ export interface OperationalRepositories {
       readonly message: Omit<AgentMailboxMessageRecord, "sequence">;
       readonly task: SubAgentTaskRecord;
     }) => Promise<AgentMailboxMessageRecord>;
+    /**
+     * Start a follow-up task for a subagent message whose addressed task settled before consuming
+     * it. The message keeps its original task, triggers the new task, and returns to `accepted`.
+     */
+    readonly admitMissedMessageTask: (request: {
+      readonly messageId: string;
+      readonly task: SubAgentTaskRecord;
+    }) => Promise<AgentMailboxMessageRecord>;
     readonly getMessage: (messageId: string) => Promise<AgentMailboxMessageRecord | undefined>;
     readonly listMessages: (agentId: string) => Promise<readonly AgentMailboxMessageRecord[]>;
     readonly listAcceptedMessagesForRecipient: (
       recipient: AgentAddress,
     ) => Promise<readonly AgentMailboxMessageRecord[]>;
     readonly putMessage: (record: AgentMailboxMessageRecord) => Promise<void>;
+    /**
+     * Atomically record claimed foreground mailbox messages as one reminder consumed by a running
+     * foreground turn: the session message, its timeline position, and every mailbox delivery.
+     */
+    readonly recordForegroundReminder: (request: {
+      readonly sessionId: string;
+      readonly turnId: string;
+      readonly messageIds: readonly string[];
+      readonly content: string;
+      readonly timelineSequence: number;
+      readonly deliveredAt: string;
+    }) => Promise<MessageRecord>;
     readonly appendTimeline: (record: SubAgentTimelineRecord) => Promise<void>;
     readonly listTimeline: (taskId: string) => Promise<readonly SubAgentTimelineRecord[]>;
     readonly putModelCall: (record: SubAgentModelCallRecord) => Promise<void>;

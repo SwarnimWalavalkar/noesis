@@ -10,6 +10,11 @@ export interface TurnSettlementRequest {
   readonly input: string;
   readonly attachments?: readonly ComposerAttachment[];
   readonly sourceIntentId?: string;
+  /** A woken turn's input is a collaboration reminder, not a user message. */
+  readonly inputOrigin?: {
+    readonly kind: "collaboration";
+    readonly mailboxMessageIds: readonly string[];
+  };
   readonly occurredAt: string;
   readonly plan: FrozenTurnPlan;
   readonly execute: () => Promise<TurnResult>;
@@ -53,6 +58,14 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
           } as const)
             .addOptional(request.attachments?.length ? { attachments: request.attachments } : undefined)
             .addOptional(request.sourceIntentId ? { sourceIntentId: request.sourceIntentId } : undefined)
+            .addOptional(
+              request.inputOrigin
+                ? {
+                    origin: request.inputOrigin.kind,
+                    mailboxMessageIds: [...request.inputOrigin.mailboxMessageIds],
+                  }
+                : undefined,
+            )
             .add({
               frozenTurnPlanId: request.plan.planId,
               frozenTurnPlanDigest: request.plan.canonicalDigest,

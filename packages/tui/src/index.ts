@@ -370,6 +370,11 @@ export async function startNoesisTui(
         turnId: interactionEvent.turnId,
       };
       activeTurnToken = token;
+      if (interactionEvent.origin === "collaboration") {
+        view.dispatch({ type: "collaboration-delivered", text: interactionEvent.text });
+        tui.requestRender();
+        return;
+      }
       const echoed = optimisticPrompts.admit(
         interactionEvent.sessionId,
         interactionEvent.text,

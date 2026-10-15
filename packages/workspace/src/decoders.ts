@@ -469,6 +469,7 @@ export function decodeAgentMailboxMessage(row: DatabaseRow | undefined): AgentMa
       kind: z.enum(["foreground", "subagent"]).parse(requiredString(row, "recipient_kind")),
       id: requiredString(row, "recipient_id"),
     }),
+    kind: z.enum(["message", "completion"]).parse(requiredString(row, "kind")),
     content: requiredString(row, "content"),
     sensitivity: SensitivitySchema.parse(requiredString(row, "sensitivity")),
     status: AgentMessageStatusSchema.parse(requiredString(row, "status")),

@@ -322,6 +322,11 @@ export async function loadRuntimeTranscript(
           attachments: composerAttachmentsFromMetadata(message.metadata),
           createdAt: message.createdAt,
         } as const)
+        .addOptional(
+          message.role === "user" && message.metadata["origin"] === "collaboration"
+            ? { origin: "collaboration" as const }
+            : undefined,
+        )
         .finish(),
     ) satisfies RuntimeTranscriptMessage;
     const sequence = inheritedHistorySequence(message.metadata);

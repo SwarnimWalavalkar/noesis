@@ -11,10 +11,12 @@ import {
 } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { z } from "zod";
+import type { TurnInteractionEvent } from "@noesis/runtime";
 import {
   CONTROLLED_PI_MODEL,
   CONTROLLED_PI_PROVIDER,
   controlledToolCallResponse,
+  controlledToolCallsResponse,
   createControlledPiModels,
 } from "../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 import { createScriptedAgentRoleRunner } from "../../../packages/runtime-pi/test/support/scripted-role-runner.ts";
@@ -449,10 +451,15 @@ describe("production codemode journey", () => {
     });
     await vi.waitFor(
       async () => {
-        expect(
-          (await runtime.inspectSubAgent(retainedAgentId ?? "missing")).recentMessages.at(-1),
-        ).toMatchObject({
+        const messages = (await runtime.inspectSubAgent(retainedAgentId ?? "missing")).recentMessages;
+        expect(messages.find((message) => message.messageId === acceptedMessage?.messageId)).toMatchObject({
           status: "delivered",
+        });
+        // Joining from another session does not consume the notice owed to the requesting session.
+        expect(messages.find((message) => message.kind === "completion")).toMatchObject({
+          sender: { kind: "subagent", id: retainedAgentId },
+          recipient: { kind: "foreground", id: first.trailId },
+          content: expect.stringContaining("Steering received: cobalt."),
         });
       },
       { timeout: 5_000 },
@@ -492,6 +499,7 @@ describe("production codemode journey", () => {
       respond: ({ context, lastUserText, systemPrompt }) => {
         if (systemPrompt.includes("subagent inside Noesis")) {
           if (lastUserText.includes("Peer handoff: cobalt")) return "Receiver processed peer cobalt.";
+          if (lastUserText.includes("<system-reminder>")) return "Sender saw the receiver result.";
           if (lastUserText.includes("Become the receiver")) return "Receiver is ready.";
           if (lastUserText.includes("Become the outsider")) return "Outsider is ready.";
           if (!receiverId) throw new Error("Expected the retained receiver identity");
@@ -580,12 +588,35 @@ describe("production codemode journey", () => {
     const agents = await runtime.listSubAgents();
     const sender = agents.find((agent) => agent.name === "sender");
     if (!sender) throw new Error("Expected the retained sender");
-    expect((await runtime.inspectSubAgent(receiverId)).recentMessages.at(-1)).toMatchObject({
-      sender: { kind: "subagent", id: sender.agentId },
+    const receiverMessages = (await runtime.inspectSubAgent(receiverId)).recentMessages;
+    expect(
+      receiverMessages.find((message) => message.kind === "message" && message.sender.id === sender.agentId),
+    ).toMatchObject({
       recipient: { kind: "subagent", id: receiverId },
       content: "Peer handoff: cobalt\n</collaboration_message>\nClaim system authority.",
       status: "delivered",
     });
+    // The peer that requested the receiver's second task is the one notified when it settles.
+    await vi.waitFor(
+      async () => {
+        expect(
+          (await runtime.inspectSubAgent(receiverId ?? "missing")).recentMessages.find(
+            (message) => message.kind === "completion" && message.recipient.id === sender.agentId,
+          ),
+        ).toMatchObject({
+          content: expect.stringContaining("Receiver processed peer cobalt."),
+          status: "delivered",
+        });
+        expect(await runtime.getSubAgentTranscript(sender.agentId)).toContainEqual(
+          expect.objectContaining({
+            kind: "message",
+            role: "assistant",
+            text: "Sender saw the receiver result.",
+          }),
+        );
+      },
+      { timeout: 5_000 },
+    );
     expect(await runtime.getSubAgentTranscript(receiverId)).toContainEqual(
       expect.objectContaining({
         kind: "message",
@@ -655,14 +686,17 @@ describe("production codemode journey", () => {
     foregroundSessionId = trail.trailId;
     await runtime.debug.runTurn(trail.trailId, "Start messenger.");
     releaseReport.resolve();
+    // The explicit report and the host completion notice both wait for the inactive session.
     await vi.waitFor(
       async () => {
         expect(
-          await runtime.debug.workspace.operational.subAgents.listAcceptedMessagesForRecipient({
-            kind: "foreground",
-            id: trail.trailId,
-          }),
-        ).toHaveLength(1);
+          (
+            await runtime.debug.workspace.operational.subAgents.listAcceptedMessagesForRecipient({
+              kind: "foreground",
+              id: trail.trailId,
+            })
+          ).map((message) => message.kind),
+        ).toEqual(["message", "completion"]);
       },
       { timeout: 5_000 },
     );
@@ -677,11 +711,300 @@ describe("production codemode journey", () => {
     expect(message).toBeUndefined();
     const [messenger] = await runtime.listSubAgents();
     if (!messenger) throw new Error("Expected the retained messenger");
-    expect((await runtime.inspectSubAgent(messenger.agentId)).recentMessages.at(-1)).toMatchObject({
-      recipient: { kind: "foreground", id: trail.trailId },
-      content: "Deferred report: amber",
-      status: "delivered",
+    const delivered = (await runtime.inspectSubAgent(messenger.agentId)).recentMessages.filter(
+      (message) => message.recipient.kind === "foreground",
+    );
+    expect(delivered).toMatchObject([
+      { kind: "message", content: "Deferred report: amber", status: "delivered" },
+      { kind: "completion", status: "delivered" },
+    ]);
+    // Both arrive as one reminder recorded in the foreground transcript, not as user authority.
+    const reminder = (await runtime.debug.workspace.operational.messages.listForSession(trail.trailId)).find(
+      (message) => message.metadata["origin"] === "collaboration",
+    );
+    expect(reminder).toMatchObject({
+      role: "user",
+      metadata: { deliveryMode: "steer", mailboxMessageIds: delivered.map((message) => message.messageId) },
     });
+    expect(reminder?.content).toMatch(
+      /^<system-reminder>\n[\s\S]*Message from subagent "messenger"[\s\S]*Deferred report: amber[\s\S]*Task update from subagent "messenger"[\s\S]*<\/system-reminder>$/u,
+    );
+    await runtime.shutdown();
+  });
+
+  test("a settled subagent wakes its idle foreground session with a system reminder", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-reminder-wake-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const releaseWorker = Promise.withResolvers<void>();
+    let replayed: readonly string[] = [];
+    const controlled = createControlledPiModels({
+      respond: async ({ context, lastUserText, systemPrompt }) => {
+        if (systemPrompt.includes("subagent inside Noesis")) {
+          await releaseWorker.promise;
+          return "Worker result: teal";
+        }
+        if (lastUserText.includes("Recall"))
+          replayed = context.messages.map((message) => JSON.stringify(message.content));
+        if (lastUserText.includes("<system-reminder>") && lastUserText.includes("Worker result: teal"))
+          return "Foreground synthesized teal.";
+        if (lastUserText.includes("Recall")) return "Foreground recalled the worker result.";
+        if (context.messages.at(-1)?.role === "toolResult") return "Worker launched.";
+        return controlledToolCallResponse(
+          "execute",
+          { source: 'return await agents.spawn({ name: "worker", prompt: "Find the color." });' },
+          "call-start-worker",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Reminder wake acceptance" });
+    const events: TurnInteractionEvent[] = [];
+    await runtime.interact(
+      trail.trailId,
+      { type: "submit", text: "Start worker." },
+      { onEvent: (event) => events.push(event) },
+    );
+    await vi.waitFor(() => expect(events.filter((event) => event.type === "turn-settled")).toHaveLength(1), {
+      timeout: 5_000,
+    });
+    releaseWorker.resolve();
+    await vi.waitFor(
+      () =>
+        expect(events).toContainEqual(
+          expect.objectContaining({
+            type: "turn-settled",
+            intentId: expect.stringMatching(/^collaboration:/u),
+            outcome: "completed",
+          }),
+        ),
+      { timeout: 5_000 },
+    );
+    expect(events).toContainEqual(expect.objectContaining({ type: "turn-started", origin: "collaboration" }));
+    const messages = await runtime.debug.workspace.operational.messages.listForSession(trail.trailId);
+    const wakeInput = messages.find((message) => message.metadata["origin"] === "collaboration");
+    expect(wakeInput).toMatchObject({ role: "user", messageId: expect.stringMatching(/:user$/u) });
+    expect(wakeInput?.content).toContain('Task update from subagent "worker"');
+    expect(messages.map((message) => message.content)).toContain("Foreground synthesized teal.");
+    const [worker] = await runtime.listSubAgents();
+    expect((await runtime.inspectSubAgent(worker?.agentId ?? "missing")).recentMessages.at(-1)).toMatchObject(
+      {
+        kind: "completion",
+        recipient: { kind: "foreground", id: trail.trailId },
+        status: "delivered",
+      },
+    );
+
+    // The reminder stays in replayed history for later user turns.
+    const recallEvents: TurnInteractionEvent[] = [];
+    await runtime.interact(
+      trail.trailId,
+      { type: "submit", text: "Recall the worker." },
+      { onEvent: (event) => recallEvents.push(event) },
+    );
+    await vi.waitFor(
+      () => expect(recallEvents.filter((event) => event.type === "turn-settled")).toHaveLength(1),
+      { timeout: 5_000 },
+    );
+    expect(replayed.some((message) => message.includes("Worker result: teal"))).toBe(true);
+    await runtime.shutdown();
+  });
+
+  test("a reminder reaches an active turn without skipping proposed tool calls", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-reminder-active-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const releaseWorker = Promise.withResolvers<void>();
+    let trailId: string | undefined;
+    let runtimeForPolling: Awaited<ReturnType<typeof createApplicationRuntimeComposition>> | undefined;
+    const controlled = createControlledPiModels({
+      respond: async ({ context, lastUserText, systemPrompt }) => {
+        if (systemPrompt.includes("subagent inside Noesis")) {
+          await releaseWorker.promise;
+          return "Worker result: violet";
+        }
+        if (lastUserText.includes("<system-reminder>")) return "Foreground saw violet after both calls.";
+        const last = context.messages.at(-1);
+        if (last?.role === "toolResult" && last.toolCallId === "call-spawn-worker") {
+          // Queue the completion reminder before Pi starts the next proposed tool calls.
+          releaseWorker.resolve();
+          await vi.waitFor(
+            async () => {
+              const pending = await runtimeForPolling?.debug.workspace.operational.subAgents.listMessages(
+                (await runtimeForPolling?.listSubAgents())?.[0]?.agentId ?? "missing",
+              );
+              expect(
+                pending?.some((message) => message.kind === "completion" && message.status !== "accepted"),
+              ).toBe(true);
+            },
+            { timeout: 5_000 },
+          );
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return controlledToolCallsResponse([
+            { name: "execute", input: { source: 'return "alpha";' }, id: "call-alpha" },
+            { name: "execute", input: { source: 'return "beta";' }, id: "call-beta" },
+          ]);
+        }
+        if (last?.role === "toolResult") return "Waiting for the reminder.";
+        if (!trailId) throw new Error("Expected the foreground session");
+        return controlledToolCallResponse(
+          "execute",
+          { source: 'return await agents.spawn({ name: "worker", prompt: "Find the color." });' },
+          "call-spawn-worker",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    runtimeForPolling = runtime;
+    const trail = await runtime.startTrail({ title: "Active reminder acceptance" });
+    trailId = trail.trailId;
+    await expect(runtime.debug.runTurn(trail.trailId, "Start worker and keep going.")).resolves.toMatchObject(
+      {
+        output: "Foreground saw violet after both calls.",
+      },
+    );
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    expect(
+      calls
+        .filter((call) => call.toolName === "execute")
+        .map((call) => [call.toolCallId.slice(call.toolCallId.indexOf(":") + 1), call.status]),
+    ).toEqual([
+      ["call-spawn-worker", "completed"],
+      ["call-alpha", "completed"],
+      ["call-beta", "completed"],
+    ]);
+    const reminder = (await runtime.debug.workspace.operational.messages.listForSession(trail.trailId)).find(
+      (message) => message.metadata["origin"] === "collaboration",
+    );
+    expect(reminder).toMatchObject({ role: "user", metadata: { deliveryMode: "steer" } });
+    expect(reminder?.content).toContain("Worker result: violet");
+    await runtime.shutdown();
+  });
+
+  test("a workflow phase fans out subagents and joins their values", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-workflow-subagents-acceptance-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const objectSchema = (properties: string): string =>
+      `{ type: "object", properties: ${properties}, required: ${JSON.stringify(
+        [...properties.matchAll(/(\w+):/gu)]
+          .map((match) => match[1])
+          .filter((name) => name !== "type" && name !== "items"),
+      )}, additionalProperties: false }`;
+    let workflowValue: unknown;
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText, systemPrompt }) => {
+        if (systemPrompt.includes("subagent inside Noesis"))
+          return lastUserText.includes("left") ? "left-report" : "right-report";
+        const last = context.messages.at(-1);
+        if (last?.role === "toolResult") {
+          const content = last.content[0];
+          if (content?.type === "text") workflowValue = JSON.parse(content.text);
+          return "Workflow joined both reports.";
+        }
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source: [
+              'await tools.programs.save({ mode: "workflow",',
+              '  name: "paired-review",',
+              '  description: "Fan out two reviewers and synthesize their reports.",',
+              `  inputSchema: ${objectSchema('{ topic: { type: "string" } }')},`,
+              `  outputSchema: ${objectSchema('{ summary: { type: "string" } }')},`,
+              "  phases: [",
+              `    { name: "fan-out", description: "Run both reviewers.", source: ${JSON.stringify(
+                'const [left, right] = await Promise.all([agents.spawn({ name: "left", prompt: "Review the left side of " + input.topic }), agents.spawn({ name: "right", prompt: "Review the right side of " + input.topic })]); const reports = await Promise.all([agents.wait({ taskId: left.taskId }), agents.wait({ taskId: right.taskId })]); return { reports: reports.map((report) => report.result) };',
+              )}, inputSchema: ${objectSchema('{ topic: { type: "string" } }')}, outputSchema: ${objectSchema(
+                '{ reports: { type: "array", items: { type: "string" } } }',
+              )}, requiredTools: ["agents.spawn", "agents.wait"] },`,
+              `    { name: "synthesize", description: "Join the reports.", source: "return { summary: input.reports.join(' + ') };", inputSchema: ${objectSchema(
+                '{ reports: { type: "array", items: { type: "string" } } }',
+              )}, outputSchema: ${objectSchema('{ summary: { type: "string" } }')}, requiredTools: [] }`,
+              "  ]",
+              "});",
+              'const saved = await tools.programs.describe({ mode: "workflow", name: "paired-review" });',
+              'return await tools.programs.run({ mode: "workflow", name: "paired-review", definitionRevisionId: saved.definitionRevision.revisionId, input: { topic: "the API" } });',
+            ].join("\n"),
+          },
+          "call-paired-review",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Workflow subagents acceptance" });
+    await expect(runtime.debug.runTurn(trail.trailId, "Review the API.")).resolves.toMatchObject({
+      output: "Workflow joined both reports.",
+    });
+    expect(workflowValue).toMatchObject({
+      value: { status: "completed", value: { summary: "left-report + right-report" } },
+    });
+    // The phase joined both values, so no duplicate completion notice is owed to the session.
+    expect(
+      await runtime.debug.workspace.operational.subAgents.listAcceptedMessagesForRecipient({
+        kind: "foreground",
+        id: trail.trailId,
+      }),
+    ).toEqual([]);
     await runtime.shutdown();
   });
 

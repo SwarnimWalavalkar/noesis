@@ -78,8 +78,90 @@ async function flushOutput() {
   );
   return flushed.every((result) => result.status === "fulfilled");
 }
+const EXECUTION_PREFIX = "async function __noesis_execute__() {\n";
+const PROMISE_COMBINATORS = new Set(["all", "allSettled", "race", "any"]);
+function memberName(node) {
+  if (node?.type !== "MemberExpression") return undefined;
+  if (!node.computed && node.property.type === "Identifier") return node.property.name;
+  return node.computed && node.property.type === "Literal" && typeof node.property.value === "string"
+    ? node.property.value
+    : undefined;
+}
+function isAgentsWaitCall(node) {
+  if (node.type !== "CallExpression") return false;
+  const callee = node.callee;
+  return (
+    callee.type === "MemberExpression" &&
+    callee.object.type === "Identifier" &&
+    callee.object.name === "agents" &&
+    memberName(callee) === "wait"
+  );
+}
+function isPromiseCombinatorCall(node) {
+  return (
+    node?.type === "CallExpression" &&
+    node.callee.type === "MemberExpression" &&
+    node.callee.object.type === "Identifier" &&
+    node.callee.object.name === "Promise" &&
+    PROMISE_COMBINATORS.has(memberName(node.callee))
+  );
+}
+/**
+ * Reject an `agents.wait` whose value can never reach later code. This is a syntactic check: a wait
+ * statement, `void` wait, or discarded Promise combinator of waits only blocks without using the value.
+ */
+function rejectDiscardedAgentWaits(source, completionMode) {
+  let program;
+  try {
+    program = parse(`${EXECUTION_PREFIX}${source}\n}`, {
+      ecmaVersion: "latest",
+      sourceType: "script",
+      locations: true,
+    });
+  } catch {
+    // The real compilation reports syntax errors with the caller's own source positions.
+    return;
+  }
+  const body = program.body[0]?.body;
+  const finalStatement = body?.type === "BlockStatement" ? body.body.at(-1) : undefined;
+  const parents = new Map();
+  const waits = [];
+  const visit = (node, parent) => {
+    if (!node || typeof node.type !== "string") return;
+    parents.set(node, parent);
+    if (isAgentsWaitCall(node)) waits.push(node);
+    for (const [key, value] of Object.entries(node)) {
+      if (key === "loc") continue;
+      if (Array.isArray(value)) for (const child of value) visit(child, node);
+      else if (value && typeof value === "object") visit(value, node);
+    }
+  };
+  visit(program, undefined);
+  for (const wait of waits) {
+    let current = wait;
+    let parent = parents.get(current);
+    for (;;) {
+      if (parent?.type === "AwaitExpression" || parent?.type === "ChainExpression") {
+        current = parent;
+      } else if (parent?.type === "ArrayExpression" && isPromiseCombinatorCall(parents.get(parent))) {
+        current = parents.get(parent);
+      } else break;
+      parent = parents.get(current);
+    }
+    const discarded =
+      (parent?.type === "ExpressionStatement" &&
+        !(completionMode === "last-expression" && parent === finalStatement)) ||
+      (parent?.type === "UnaryExpression" && parent.operator === "void") ||
+      (parent?.type === "SequenceExpression" && parent.expressions.at(-1) !== current);
+    if (!discarded) continue;
+    const line = wait.loc.start.line - 1;
+    throw new Error(
+      `agents.wait at line ${line} discards its result. Wait only to use a subagent's result in later code: assign it, return it, or pass it on. A settled task already reaches the agent that requested it as a system reminder, so continue other work or end the turn instead of waiting.`,
+    );
+  }
+}
 function sourceWithLastExpressionCompletion(source) {
-  const prefix = "async function __noesis_execute__() {\n";
+  const prefix = EXECUTION_PREFIX;
   const program = parse(`${prefix}${source}\n}`, {
     ecmaVersion: "latest",
     sourceType: "script",
@@ -315,6 +397,7 @@ process.on("message", async (message) => {
   if (agentContext?.parent) agentMembers.parent = Object.freeze({ ...agentContext.parent });
   const agents = Object.freeze(agentMembers);
   try {
+    rejectDiscardedAgentWaits(message.source, message.completionMode);
     const executableSource =
       message.completionMode === "last-expression"
         ? sourceWithLastExpressionCompletion(message.source)

@@ -69,6 +69,8 @@ export interface PiSubAgentTaskResult {
 export interface PiSubAgentTaskRunner {
   readonly run: (request: PiSubAgentTaskRequest) => Promise<PiSubAgentTaskResult>;
   readonly steer: (taskId: string, text: string) => Promise<AgentSteerResult>;
+  /** Queue a runtime reminder without skipping tool calls the child has already proposed. */
+  readonly remind: (taskId: string, text: string) => Promise<AgentSteerResult>;
   readonly abort: (taskId: string) => Promise<void>;
 }
 
@@ -134,6 +136,13 @@ function priorAssistantMessage(
   };
 }
 
+function queuedUserText(content: string | readonly { readonly type: string }[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .flatMap((part) => ("text" in part && typeof part.text === "string" ? [part.text] : []))
+    .join("");
+}
+
 function historyTimestamp(createdAt: string | undefined, fallback: number): number {
   if (!createdAt) return fallback;
   const parsed = Date.parse(createdAt);
@@ -180,6 +189,7 @@ export function createPiSubAgentTaskRunner(
     readonly controller: AbortController;
     readonly pendingSteers: {
       readonly text: string;
+      readonly interruptsTools: boolean;
       readonly resolve: (result: AgentSteerResult) => void;
       readonly promise: Promise<AgentSteerResult>;
       forwarded: boolean;
@@ -407,7 +417,21 @@ export function createPiSubAgentTaskRunner(
       let terminalAssistant: AssistantMessage | undefined;
       const unsubscribers = [
         harness.events.on("queue_update", (event) => {
-          task.hasQueuedSteering = event.queues.some((item) => item.kind === "steer");
+          task.hasQueuedSteering = event.queues.some(
+            (item) =>
+              item.kind === "steer" &&
+              !(
+                item.type === "message" &&
+                item.message.role === "user" &&
+                "content" in item.message &&
+                task.pendingSteers.some(
+                  (receipt) =>
+                    !receipt.interruptsTools &&
+                    "content" in item.message &&
+                    receipt.text === queuedUserText(item.message.content),
+                )
+              ),
+          );
         }),
         harness.events.on("message_end", async (event) => {
           if (event.message.role === "user") {
@@ -415,10 +439,7 @@ export function createPiSubAgentTaskRunner(
               initialUserObserved = true;
               return;
             }
-            const text =
-              typeof event.message.content === "string"
-                ? event.message.content
-                : event.message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+            const text = queuedUserText(event.message.content);
             const index = task.pendingSteers.findIndex((receipt) => receipt.text === text);
             if (index >= 0) {
               const [receipt] = task.pendingSteers.splice(index, 1);
@@ -627,12 +648,17 @@ export function createPiSubAgentTaskRunner(
     }
   };
 
-  const steer = async (taskId: string, text: string): Promise<AgentSteerResult> => {
+  const queueSteer = async (
+    taskId: string,
+    text: string,
+    interruptsTools: boolean,
+  ): Promise<AgentSteerResult> => {
     const task = active.get(taskId);
     if (!task) return notConsumed("not-running");
     const deferred = Promise.withResolvers<AgentSteerResult>();
     const receipt = {
       text,
+      interruptsTools,
       promise: deferred.promise,
       resolve: deferred.resolve,
       forwarded: false,
@@ -649,6 +675,10 @@ export function createPiSubAgentTaskRunner(
     }
     return deferred.promise;
   };
+  const steer = async (taskId: string, text: string): Promise<AgentSteerResult> =>
+    await queueSteer(taskId, text, true);
+  const remind = async (taskId: string, text: string): Promise<AgentSteerResult> =>
+    await queueSteer(taskId, text, false);
 
   const abort = async (taskId: string): Promise<void> => {
     const task = active.get(taskId);
@@ -659,5 +689,5 @@ export function createPiSubAgentTaskRunner(
     if (task.abortError) throw task.abortError;
   };
 
-  return Object.freeze({ run, steer, abort });
+  return Object.freeze({ run, steer, remind, abort });
 }

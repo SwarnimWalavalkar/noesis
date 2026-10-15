@@ -3898,15 +3898,16 @@ function createOperationalRepositories(
   const insertAgentMessage = (record: AgentMailboxMessageRecord): void => {
     db.prepare(`INSERT INTO agent_messages(
         message_id, project_id, sender_kind, sender_id, recipient_kind, recipient_id,
-        content, sensitivity, status, sequence, task_id, created_at, claimed_at,
+        kind, content, sensitivity, status, sequence, task_id, created_at, claimed_at,
         delivered_at, failed_at, failure
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       record.messageId,
       record.projectId,
       record.sender.kind,
       record.sender.id,
       record.recipient.kind,
       record.recipient.id,
+      record.kind,
       record.content,
       record.sensitivity,
       record.status,
@@ -4779,11 +4780,117 @@ function createOperationalRepositories(
           recordActivity(systemActor, "subagent_task.admitted", "subagent_task", task.taskId);
           return message;
         }),
+      admitMissedMessageTask: async (
+        request: Parameters<OperationalRepositories["subAgents"]["admitMissedMessageTask"]>[0],
+      ) =>
+        database.transaction(() => {
+          const { messageId, task } = request;
+          const messageRow = db.prepare("SELECT * FROM agent_messages WHERE message_id = ?").get(messageId);
+          const message = messageRow === undefined ? undefined : decodeAgentMailboxMessage(messageRow);
+          if (!message || message.status !== "claimed")
+            throw new Error(`Agent message ${messageId} is not awaiting delivery`);
+          if (
+            message.recipient.kind !== "subagent" ||
+            message.recipient.id !== task.agentId ||
+            task.status !== "pending" ||
+            task.triggerMessageId !== messageId
+          )
+            throw new Error("A missed message must trigger a new pending task for its recipient");
+          const agent = db.prepare("SELECT status FROM sub_agents WHERE agent_id = ?").get(task.agentId);
+          if (agent === undefined || requiredString(agent, "status") !== "idle")
+            throw new Error(`Subagent ${task.agentId} is not idle`);
+          db.prepare(`INSERT INTO sub_agent_tasks(
+              task_id, agent_id, trigger_message_id, status, result_artifact_id, result_preview,
+              error, usage_json, created_at, started_at, completed_at
+            ) VALUES (?, ?, ?, 'pending', NULL, NULL, NULL, NULL, ?, NULL, NULL)`).run(
+            task.taskId,
+            task.agentId,
+            task.triggerMessageId,
+            task.createdAt,
+          );
+          db.prepare(
+            "UPDATE agent_messages SET status = 'accepted', claimed_at = NULL WHERE message_id = ?",
+          ).run(messageId);
+          db.prepare("UPDATE sub_agents SET status = 'starting', updated_at = ? WHERE agent_id = ?").run(
+            task.createdAt,
+            task.agentId,
+          );
+          recordActivity(systemActor, "subagent_task.admitted", "subagent_task", task.taskId);
+          return decodeAgentMailboxMessage(
+            db.prepare("SELECT * FROM agent_messages WHERE message_id = ?").get(messageId),
+          );
+        }),
       getMessage: async (messageId: string) =>
         decodeOptional(
           db.prepare("SELECT * FROM agent_messages WHERE message_id = ?").get(messageId),
           decodeAgentMailboxMessage,
         ),
+      recordForegroundReminder: async (
+        request: Parameters<OperationalRepositories["subAgents"]["recordForegroundReminder"]>[0],
+      ) =>
+        database.transaction(() => {
+          const [firstMessageId] = request.messageIds;
+          if (firstMessageId === undefined) throw new Error("A foreground reminder needs mailbox messages");
+          if (!request.content.trim()) throw new Error("A foreground reminder must not be empty");
+          const target = db
+            .prepare("SELECT session_id, status FROM foreground_turns WHERE turn_id = ?")
+            .get(request.turnId);
+          if (target === undefined || requiredString(target, "session_id") !== request.sessionId)
+            throw new Error(
+              `Foreground turn ${request.turnId} does not belong to session ${request.sessionId}`,
+            );
+          if (requiredString(target, "status") !== "running")
+            throw new Error(`Foreground turn ${request.turnId} is not running`);
+          for (const messageId of request.messageIds) {
+            const current = decodeOptional(
+              db.prepare("SELECT * FROM agent_messages WHERE message_id = ?").get(messageId),
+              decodeAgentMailboxMessage,
+            );
+            if (
+              current === undefined ||
+              current.status !== "claimed" ||
+              current.recipient.kind !== "foreground" ||
+              current.recipient.id !== request.sessionId
+            )
+              throw new Error(`Agent message ${messageId} is not claimed for session ${request.sessionId}`);
+          }
+          const messageId = `${request.turnId}:collaboration:${firstMessageId}`;
+          const metadata = Object.freeze({
+            turnId: request.turnId,
+            deliveryMode: "steer",
+            origin: "collaboration",
+            mailboxMessageIds: [...request.messageIds],
+          });
+          db.prepare(`INSERT INTO messages(message_id, session_id, role, content, sensitivity, created_at, metadata_json)
+             VALUES (?, ?, 'user', ?, 'normal', ?, ?)`).run(
+            messageId,
+            request.sessionId,
+            request.content,
+            request.deliveredAt,
+            JSON.stringify(metadata),
+          );
+          registerTurnTimelineEntry(request.turnId, request.timelineSequence, "message", messageId);
+          recordActivity(systemActor, "message.append", "message", messageId);
+          for (const mailboxMessageId of request.messageIds) {
+            const updated = db
+              .prepare(`UPDATE agent_messages SET status = 'delivered', delivered_at = ?
+                WHERE message_id = ? AND status = 'claimed'`)
+              .run(request.deliveredAt, mailboxMessageId);
+            if (Number(updated.changes) !== 1)
+              throw new Error(`Agent message ${mailboxMessageId} changed during reminder delivery`);
+            recordActivity(systemActor, "agent_message.delivered", "agent_message", mailboxMessageId);
+          }
+          return Object.freeze({
+            messageId,
+            sessionId: request.sessionId,
+            role: "user" as const,
+            content: request.content,
+            sensitivity: "normal" as const,
+            createdAt: request.deliveredAt,
+            metadata,
+            timelineSequence: request.timelineSequence,
+          });
+        }),
       listMessages: async (agentId: string) =>
         db
           .prepare(`SELECT * FROM agent_messages

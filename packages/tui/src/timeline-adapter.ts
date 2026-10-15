@@ -42,6 +42,7 @@ export function tuiTimelineFromRuntime(
         messageId: entry.messageId,
       } as const)
         .addOptional(entry.attachments?.length ? { attachments: entry.attachments } : undefined)
+        .addOptional(entry.origin ? { origin: entry.origin } : undefined)
         .addOptional(entry.turnId ? { turnId: entry.turnId } : undefined)
         .add({
           createdAt: entry.createdAt,

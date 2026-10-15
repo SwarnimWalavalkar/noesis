@@ -6,6 +6,7 @@ For current behavior, start with [the product documentation](../docs/README.md),
 
 ## Active implementation plans
 
+- [Subagent reminders, wake-ups, and value joins](noesis-subagent-reminders-and-joins.md) — active; completion notices, system-reminder delivery, idle wake-ups, and value-only `agents.wait`.
 - [Composer attachments](noesis-composer-attachments.md) — active; large-file attachment implementation and final-head CI/bot review in PR #44.
 
 - [Prompt cache and token efficiency implementation](noesis-token-efficiency-implementation.md) — active; implementation and review fixes in PR #43.

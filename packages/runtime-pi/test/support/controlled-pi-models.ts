@@ -25,6 +25,15 @@ export interface CreateControlledPiModelsOptions {
 export function controlledToolCallResponse(name: string, input: JsonObject, id: string): AssistantMessage {
   return fauxAssistantMessage(fauxToolCall(name, input, { id }), { stopReason: "toolUse" });
 }
+/** One assistant response that proposes several tool calls, executed in order. */
+export function controlledToolCallsResponse(
+  calls: readonly { readonly name: string; readonly input: JsonObject; readonly id: string }[],
+): AssistantMessage {
+  return fauxAssistantMessage(
+    calls.map((call) => fauxToolCall(call.name, call.input, { id: call.id })),
+    { stopReason: "toolUse" },
+  );
+}
 function contentText(content: Context["messages"][number]["content"]): string {
   if (typeof content === "string") return content;
   return content

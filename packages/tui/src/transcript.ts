@@ -1,6 +1,7 @@
 import { attachmentLabel } from "./attachment-label.ts";
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { isJsonObject, type JsonValue } from "@noesis/domain";
+import { collaborationReminderBody } from "@noesis/runtime";
 import { EXECUTE_ACTION_NAME, formatCount, sourceOf, summarizeAction } from "./action-summary.ts";
 import { renderRichText } from "./rich-text.ts";
 import {
@@ -19,8 +20,34 @@ const ACTION_DETAIL_MAX_CHARACTERS = 24_000;
 const MAX_ACTION_DEPTH = 4;
 const DEFAULT_EXPANDED_BODY_ROWS = 16;
 
+const COLLABORATION_PREVIEW_ROWS = 8;
+
+/**
+ * Collaboration reminders reach the model in the user role, but the user did not type them. Show
+ * the actor-authored part under its own label and keep long results to a short preview.
+ */
+function renderCollaborationBlock(message: TuiMessage, width: number, colorEnabled: boolean): string[] {
+  const label = "AGENTS";
+  const rail = width >= 3 ? "│ " : "";
+  const bodyWidth = Math.max(1, width - visibleWidth(rail));
+  const rendered = renderRichText(collaborationReminderBody(message.text), bodyWidth, colorEnabled);
+  const hidden = rendered.length - COLLABORATION_PREVIEW_ROWS;
+  const body =
+    hidden > 1
+      ? [
+          ...rendered.slice(0, COLLABORATION_PREVIEW_ROWS),
+          styled(colorEnabled, ANSI.dim, `… ${formatCount(hidden, "more line")} · Ctrl+O inspects agents`),
+        ]
+      : rendered;
+  return [
+    styled(colorEnabled, `${ANSI.bold}${ANSI.magenta}`, width === 1 ? "A" : elideText(label, width)),
+    ...body.map((line) => elideText(`${styled(colorEnabled, ANSI.magenta, rail)}${line}`, width)),
+  ];
+}
+
 export function renderMessageBlock(message: TuiMessage, width: number, colorEnabled = false): string[] {
   if (width <= 0) return [];
+  if (message.origin === "collaboration") return renderCollaborationBlock(message, width, colorEnabled);
   const label = message.role === "user" ? "YOU" : message.role === "assistant" ? "NOESIS" : "NOTE";
   const labelColor =
     message.role === "user" ? ANSI.cyan : message.role === "assistant" ? ANSI.green : ANSI.yellow;

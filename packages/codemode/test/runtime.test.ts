@@ -322,6 +322,46 @@ describe("codemode runtime", () => {
       }),
     ).resolves.toMatchObject({ value: null });
   });
+  it("rejects an agents.wait whose value is discarded before any call runs", async () => {
+    const calls: string[] = [];
+    const code = runtime({
+      additionalToolNames: ["agents.wait"],
+      observeContext: (context) => calls.push(context.callId),
+    });
+    for (const [source, completionMode] of [
+      ["await agents.wait({ value: 1 });\nreturn 1;", "explicit"],
+      ["void agents.wait({ value: 1 });\nreturn 1;", "explicit"],
+      [
+        'await Promise.all([agents.wait({ value: 1 }), agents["wait"]({ value: 2 })]);\nreturn "done";',
+        "explicit",
+      ],
+      ["const seed = 1;\nawait agents.wait({ value: seed });", "explicit"],
+      ["await agents.wait({ value: 1 });\n42;", "last-expression"],
+    ] as const)
+      await expect(
+        code.execute({ source, completionMode, sessionId: "session-discarded-wait" }),
+      ).rejects.toThrow(/agents\.wait at line \d+ discards its result/u);
+    expect(calls).toEqual([]);
+    await expect(
+      code.execute({
+        source: "const joined = await agents.wait({ value: 1 });\nreturn joined.value + 1;",
+        sessionId: "session-used-wait",
+      }),
+    ).resolves.toMatchObject({ value: 3 });
+    await expect(
+      code.execute({
+        source: "await agents.wait({ value: 3 });",
+        completionMode: "last-expression",
+        sessionId: "session-used-wait",
+      }),
+    ).resolves.toMatchObject({ value: { value: 6 } });
+    await expect(
+      code.execute({
+        source: "return await Promise.all([agents.wait({ value: 1 }), agents.wait({ value: 2 })]);",
+        sessionId: "session-used-wait",
+      }),
+    ).resolves.toMatchObject({ value: [{ value: 2 }, { value: 4 }] });
+  });
   it("returns actionable frozen-catalog recovery for an unknown tool name", async () => {
     await expect(
       runtime().execute({

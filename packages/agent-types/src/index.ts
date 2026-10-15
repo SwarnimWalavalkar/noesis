@@ -79,6 +79,8 @@ export type AgentThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" |
 export type SubAgentStatus = "starting" | "running" | "idle" | "suspended" | "closed";
 export type SubAgentTaskStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 export type AgentMessageStatus = "accepted" | "claimed" | "delivered" | "failed";
+/** A host-authored completion notice or an ordinary actor-authored message. */
+export type AgentMessageKind = "message" | "completion";
 
 export type AgentAddress =
   | {
@@ -315,6 +317,7 @@ export interface SubAgentInspection extends SubAgentSummary {
     readonly messageId: string;
     readonly sender: AgentAddress;
     readonly recipient: AgentAddress;
+    readonly kind: AgentMessageKind;
     readonly content: string;
     readonly status: AgentMessageStatus;
     readonly createdAt: string;
@@ -339,7 +342,14 @@ export type SubAgentRuntimeEvent =
       readonly agentId: string;
       readonly messageId: string;
       readonly recipient: AgentAddress;
+      readonly kind: AgentMessageKind;
       readonly status: "accepted" | "delivered";
+    }
+  | {
+      /** A reminder was consumed by an active foreground turn and recorded in its session. */
+      readonly type: "reminder-delivered";
+      readonly sessionId: string;
+      readonly text: string;
     };
 export const ProgramWorkflowPhaseSchema = z.strictObject({
   name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
@@ -1216,6 +1226,11 @@ export interface NoesisAgentRuntime {
     text: string,
     images?: readonly AgentRuntimeImage[],
   ) => Promise<AgentSteerResult>;
+  /**
+   * Queue a runtime reminder for the next model boundary. Unlike user steering, a pending reminder
+   * never skips tool calls the model has already proposed.
+   */
+  readonly remind?: (trailId: string, text: string) => Promise<AgentSteerResult>;
   readonly abort: (trailId: string) => Promise<void>;
 }
 export interface StructuredInferencePort {

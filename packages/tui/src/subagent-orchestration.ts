@@ -17,6 +17,23 @@ const subAgentExecutionStatus = (
         ? "cancelled"
         : "interrupted";
 
+/** Say who reported and when the foreground agent will actually see it. */
+export function foregroundMessageNotice(
+  event: Extract<SubAgentRuntimeEvent, { readonly type: "message" }>,
+  state: {
+    readonly trailId?: string;
+    readonly subAgents: readonly Pick<SubAgentInspection, "agentId" | "name">[];
+    readonly interaction: { readonly phase: string; readonly queuePaused: boolean };
+  },
+): string {
+  const name = state.subAgents.find((agent) => agent.agentId === event.agentId)?.name ?? "A subagent";
+  const what = event.kind === "completion" ? `${name} finished` : `${name} sent a message`;
+  if (event.recipient.id !== state.trailId) return `${what} · reported to the session that asked`;
+  if (state.interaction.phase !== "idle") return `${what} · the agent sees it at its next step`;
+  if (state.interaction.queuePaused) return `${what} · it reaches the agent with your next message`;
+  return `${what} · resuming the agent`;
+}
+
 export interface TuiSubAgentOrchestration {
   readonly openInspector: (agentId: string) => void;
   readonly dispose: () => void;
@@ -111,13 +128,17 @@ export function createTuiSubAgentOrchestration(options: {
       options.requestRender();
       return;
     }
+    if (event.type === "reminder-delivered") {
+      if (event.sessionId === options.view.state.trailId) {
+        options.view.dispatch({ type: "collaboration-delivered", text: event.text });
+        options.requestRender();
+      }
+      return;
+    }
     if (event.type === "message" && event.status === "accepted" && event.recipient.kind === "foreground")
       options.view.dispatch({
         type: "notification-shown",
-        text:
-          event.recipient.id === options.view.state.trailId
-            ? "A subagent message is waiting for this session's next safe boundary."
-            : "A subagent message is waiting in another session; resume it to deliver.",
+        text: foregroundMessageNotice(event, options.view.state),
         tone: "info",
       });
     void refresh().catch(options.reportFailure);

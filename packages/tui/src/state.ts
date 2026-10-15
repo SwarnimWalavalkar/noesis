@@ -19,6 +19,8 @@ export interface TuiMessage {
   readonly attachments?: readonly TuiAttachmentLabel[];
   readonly role: "user" | "assistant" | "system";
   readonly text: string;
+  /** A collaboration reminder delivered to the model in the user role, not typed by the user. */
+  readonly origin?: "collaboration";
   /** View-local identity used only until the runtime admits a submitted prompt. */
   readonly localSubmissionId?: string;
   readonly messageId?: string;
@@ -174,6 +176,10 @@ export type NoesisTuiAction =
   | {
       readonly type: "steer-delivered";
       readonly attachments?: readonly ComposerAttachment[];
+      readonly text: string;
+    }
+  | {
+      readonly type: "collaboration-delivered";
       readonly text: string;
     }
   | {
@@ -490,6 +496,14 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return {
         ...state,
         timeline: [...state.timeline, tuiUserMessage(action.text, action.attachments)],
+      };
+    case "collaboration-delivered":
+      return {
+        ...state,
+        timeline: [
+          ...state.timeline,
+          { kind: "message", role: "user", origin: "collaboration", text: action.text },
+        ],
       };
     case "stream-delta": {
       const timeline = [...state.timeline];

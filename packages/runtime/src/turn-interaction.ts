@@ -54,6 +54,17 @@ export interface InteractionActiveTurn {
   readonly text: string;
   readonly attachments?: readonly ComposerAttachment[];
   readonly mode: "turn" | "steer";
+  /** Present when the turn was woken by collaboration reminders rather than a user intent. */
+  readonly origin?: "collaboration";
+}
+/** Claimed collaboration reminders that become the input of one woken foreground turn. */
+export interface CollaborationTurnInput {
+  readonly text: string;
+  readonly mailboxMessageIds: readonly string[];
+  /** Settle after the turn ends; delivery depends on whether the turn durably recorded its input. */
+  readonly settle: () => Promise<void>;
+  /** Return the claim unchanged when the turn never started. */
+  readonly release: () => Promise<void>;
 }
 export interface InteractionSnapshot {
   readonly sessionId: string;
@@ -74,6 +85,7 @@ export type TurnInteractionEvent =
       readonly turnId: string;
       readonly text: string;
       readonly attachments?: readonly ComposerAttachment[];
+      readonly origin?: "collaboration";
     }
   | {
       readonly type: "agent";
@@ -247,6 +259,10 @@ export interface TurnInteractionControllerOptions {
     readonly turnId: string;
     readonly text: string;
     readonly attachments?: readonly ComposerAttachment[];
+    readonly origin?: {
+      readonly kind: "collaboration";
+      readonly mailboxMessageIds: readonly string[];
+    };
     readonly thinkingLevel?: AgentThinkingLevel;
     readonly onEvent: (event: AgentRuntimeEvent) => void;
     readonly onReady: () => void;
@@ -269,6 +285,10 @@ export interface TurnInteractionControllerOptions {
     readonly deliveredAt: string;
   }) => Promise<void>;
   readonly interrupt: (sessionId: string) => Promise<void>;
+  /** Source of collaboration reminders that may wake an idle, unpaused session. */
+  readonly collaboration?: {
+    readonly claim: (sessionId: string, turnId: string) => Promise<CollaborationTurnInput | undefined>;
+  };
 }
 export interface TurnInteractionController {
   readonly inspect: (sessionId: string) => Promise<InteractionSnapshot>;
@@ -277,6 +297,11 @@ export interface TurnInteractionController {
     command: InteractionCommand,
     options?: InteractionDispatchOptions,
   ) => Promise<InteractionDispatchResult>;
+  /**
+   * Ask an idle session to drain pending collaboration reminders. A queue paused by interrupt,
+   * failure, or recovery stays paused; its reminders join the next turn the user starts.
+   */
+  readonly wake: (sessionId: string) => void;
   readonly close: () => Promise<void>;
 }
 interface SessionInteractionState {
@@ -299,6 +324,8 @@ interface SessionInteractionState {
   interruptRequested: boolean;
   steerAdmissionTurnId?: string;
   steerableIntentId?: string;
+  /** Thinking level of the user's latest queue resumption, reused by collaboration wake-ups. */
+  thinkingLevel?: AgentThinkingLevel;
 }
 interface TurnSteerReadiness {
   readonly turnId: string;
@@ -500,6 +527,93 @@ export function createTurnInteractionController(
     );
     await notifyState(sessionId, state);
   };
+  const runCollaborationTurn = async (
+    sessionId: string,
+    state: SessionInteractionState,
+    turnId: string,
+    collaboration: CollaborationTurnInput,
+    thinkingLevel?: AgentThinkingLevel,
+  ): Promise<void> => {
+    const active: InteractionActiveTurn = Object.freeze({
+      intentId: `collaboration:${turnId}`,
+      turnId,
+      text: collaboration.text,
+      mode: "turn" as const,
+      origin: "collaboration" as const,
+    });
+    state.active = active;
+    state.phase = "running";
+    state.interruptRequested = false;
+    state.steerAdmissionTurnId = turnId;
+    delete state.steerableIntentId;
+    const steerReadiness = createSteerReadiness(turnId);
+    state.steerReadiness = steerReadiness;
+    const resumeGenerationAtStart = state.resumeGeneration;
+    await notifyState(sessionId, state);
+    let outcome: "completed" | "aborted" | "failed";
+    let error: string | undefined;
+    try {
+      const result = await options.runTurn(
+        createConditionalObject({
+          sessionId,
+          intentId: active.intentId,
+          turnId,
+          text: active.text,
+          origin: Object.freeze({
+            kind: "collaboration" as const,
+            mailboxMessageIds: collaboration.mailboxMessageIds,
+          }),
+        } as const)
+          .addOptional(thinkingLevel ? { thinkingLevel } : undefined)
+          .add({
+            onEvent: (event: AgentRuntimeEvent) => notify(state, { type: "agent", sessionId, turnId, event }),
+            onReady: () => {
+              if (state.active?.intentId !== active.intentId) return;
+              if (state.steerableIntentId === active.intentId) return;
+              state.steerableIntentId = active.intentId;
+              steerReadiness.settle(true);
+              notify(state, {
+                type: "turn-started",
+                sessionId,
+                intentId: active.intentId,
+                turnId,
+                text: active.text,
+                origin: "collaboration",
+              });
+            },
+            isInterruptRequested: () => state.interruptRequested,
+          } as const)
+          .finish(),
+      );
+      outcome = result.outcome;
+    } catch (cause) {
+      outcome = "failed";
+      error = cause instanceof Error ? cause.message : String(cause);
+    }
+    const steerFailure = await settleSteerDeliveries(state);
+    // The composition decides delivery from whether the turn durably recorded the reminder input.
+    await collaboration.settle();
+    if (steerFailure || (outcome !== "completed" && state.resumeGeneration === resumeGenerationAtStart))
+      state.queuePaused = true;
+    delete state.active;
+    delete state.steerableIntentId;
+    state.interruptRequested = false;
+    state.phase = "idle";
+    const failure = [error, steerFailure].filter(Boolean).join("; ");
+    notify(
+      state,
+      createConditionalObject({
+        type: "turn-settled",
+        sessionId,
+        intentId: active.intentId,
+        turnId,
+        outcome: outcome === "completed" && steerFailure ? ("failed" as const) : outcome,
+      } as const)
+        .addOptional(failure ? { error: failure } : undefined)
+        .finish(),
+    );
+    await notifyState(sessionId, state);
+  };
   const drain = async (
     sessionId: string,
     state: SessionInteractionState,
@@ -514,7 +628,18 @@ export function createTurnInteractionController(
         targetTurnId: turnId,
         claimedAt: now(),
       });
-      if (!claimed) return;
+      if (!claimed) {
+        // User intents always go first; pending collaboration reminders wake an otherwise idle session.
+        const collaboration = await options.collaboration?.claim(sessionId, turnId);
+        if (!collaboration) return;
+        if (closed || state.queuePaused || state.cancellationGeneration !== cancellationGenerationAtClaim) {
+          await collaboration.release();
+          if (!closed) await notifyState(sessionId, state);
+          return;
+        }
+        await runCollaborationTurn(sessionId, state, turnId, collaboration, thinkingLevel);
+        continue;
+      }
       if (closed || state.queuePaused || state.cancellationGeneration !== cancellationGenerationAtClaim) {
         const released = await options.intents.releaseUnconsumedDispatch({
           sessionId,
@@ -629,6 +754,7 @@ export function createTurnInteractionController(
     thinkingLevel?: AgentThinkingLevel,
   ): void => {
     if (closed || state.queuePaused) return;
+    if (thinkingLevel) state.thinkingLevel = thinkingLevel;
     if (state.drain || state.cancelScheduled) {
       state.wakeRequested = true;
       return;
@@ -1153,5 +1279,10 @@ export function createTurnInteractionController(
     })();
     return closePromise;
   };
-  return Object.freeze({ inspect, dispatch, close });
+  const wake = (sessionId: string): void => {
+    if (closed) return;
+    const state = stateFor(sessionId);
+    scheduleDrain(sessionId, state, state.thinkingLevel);
+  };
+  return Object.freeze({ inspect, dispatch, wake, close });
 }

@@ -89,6 +89,7 @@ import {
   createTurnInteractionController,
   createTurnSettlement,
   createSubAgentSupervisor,
+  renderSubAgentMailboxText,
   DEFAULT_CONTEXT_TOKEN_BUDGET,
   DEFAULT_TOOL_CONTEXT_RESERVE_TOKENS,
   estimateContextTokens,
@@ -110,6 +111,7 @@ import {
   type TrailSummary,
   type TurnCapabilityRoutingRequest,
   type TurnResult,
+  type TurnSettlementRequest,
   serializeCompactionWindow,
   type SubAgentSupervisor,
   type SubAgentTaskExecutionPort,
@@ -2119,6 +2121,10 @@ export async function createApplicationRuntimeComposition(
     return durable;
   };
   let subAgentSupervisor: SubAgentSupervisor | undefined;
+  /** Foreground turn currently able to consume collaboration reminders, by session. */
+  const reminderReadyTurns = new Map<string, string>();
+  /** Assigned once the interaction controller exists; wakes an idle session for pending reminders. */
+  let wakeForCollaboration: (sessionId: string) => void = () => undefined;
   const prepareCodeExecution: PiCodeExecutionAdapter["prepare"] = async (plan, signal, resources) => {
     if (!plan.project || plan.project.projectId !== project.projectId || plan.project.root !== project.root)
       throw new Error(`Frozen turn plan ${plan.planId} does not belong to project ${project.projectId}`);
@@ -3325,6 +3331,7 @@ export async function createApplicationRuntimeComposition(
           projectId: project.projectId,
           sender,
           recipient: Object.freeze({ kind: "subagent", id: agentId }),
+          kind: "message",
           content: renderedPrompt,
           sensitivity: "normal",
           status: "accepted",
@@ -3408,7 +3415,7 @@ export async function createApplicationRuntimeComposition(
       label: "Inspect subagent",
       description:
         "Inspect one retained subagent, its tasks, mailbox, frozen route, and transcript artifact.",
-      identityMaterial: toJsonValue({ adapterRevision: "agents-inspect-v1" }),
+      identityMaterial: toJsonValue({ adapterRevision: "agents-inspect-v2" }),
       inputSchema: z.strictObject({ agentId: z.string().min(1), taskId: z.string().min(1).optional() }),
       outputSchema: subAgentSummarySchema.extend({
         systemPrompt: z.string(),
@@ -3419,6 +3426,7 @@ export async function createApplicationRuntimeComposition(
             messageId: z.string(),
             sender: agentAddressSchema,
             recipient: agentAddressSchema,
+            kind: z.enum(["message", "completion"]),
             content: z.string(),
             status: z.enum(["accepted", "claimed", "delivered", "failed"]),
             createdAt: z.string(),
@@ -3449,8 +3457,9 @@ export async function createApplicationRuntimeComposition(
     const agentsWaitTool = defineTool({
       name: "agents.wait",
       label: "Wait for subagent",
-      description: "Join one exact subagent task. Cancelling or timing out this wait never cancels the task.",
-      identityMaterial: toJsonValue({ adapterRevision: "agents-wait-v1" }),
+      description:
+        "Join one exact subagent task to use its result value in later code. Settled results reach the requesting actor automatically as a system reminder, so do not wait only to learn that work finished. Code that discards this value is rejected. Cancelling or timing out this wait never cancels the task.",
+      identityMaterial: toJsonValue({ adapterRevision: "agents-wait-v2" }),
       inputSchema: z.strictObject({
         taskId: z.string().min(1),
         timeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
@@ -3459,7 +3468,9 @@ export async function createApplicationRuntimeComposition(
       effect: () => ({ effect: "read", resource: `subagent:${project.projectId}:wait`, estimatedCost: 0 }),
       execute: async ({ taskId, timeoutMs }, context) => {
         if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
-        return subAgentTaskResultOutput(await subAgentSupervisor.wait(taskId, context.signal, timeoutMs));
+        return subAgentTaskResultOutput(
+          await subAgentSupervisor.wait(taskId, context.signal, timeoutMs, currentAgentAddress()),
+        );
       },
     });
     const agentsCancelTool = defineTool({
@@ -4336,6 +4347,7 @@ export async function createApplicationRuntimeComposition(
         throw new Error("Retained subagent execution is unavailable in this runtime composition");
       },
       steer: async () => Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
+      remind: async () => Object.freeze({ status: "not-consumed" as const, reason: "not-running" as const }),
       abort: async () => undefined,
     });
   const childTaskPlan = (record: SubAgentRecord, task: SubAgentTaskRecord): FrozenTurnPlan => {
@@ -4572,12 +4584,26 @@ export async function createApplicationRuntimeComposition(
         createdAt: consumedAt,
       });
     },
-    deliverForeground: async ({ message }) => {
-      const delivered = await agent.steer(
-        message.recipient.id,
-        `[Subagent ${message.sender.id}]\n${message.content}`,
-      );
-      return delivered.status === "consumed" ? "delivered" : "pending";
+    deliverForeground: async (reminder) => {
+      const turnId = reminderReadyTurns.get(reminder.sessionId);
+      const delivered =
+        turnId !== undefined && agent.remind
+          ? await agent.remind(reminder.sessionId, reminder.text)
+          : undefined;
+      if (turnId === undefined || delivered?.status !== "consumed") {
+        wakeForCollaboration(reminder.sessionId);
+        return "pending";
+      }
+      await workspace.operational.subAgents.recordForegroundReminder({
+        sessionId: reminder.sessionId,
+        turnId,
+        messageIds: reminder.messages.map((message) => message.messageId),
+        content: reminder.text,
+        timelineSequence: delivered.timelineSequence,
+        deliveredAt: delivered.consumedAt,
+      });
+      await refreshMessageCount(reminder.sessionId);
+      return "delivered";
     },
     taskExecution: Object.freeze({
       run: async (request: Parameters<SubAgentTaskExecutionPort["run"]>[0]) => {
@@ -4599,6 +4625,13 @@ export async function createApplicationRuntimeComposition(
         ]);
         const ordinaryById = new Map(existingMessages.map((message) => [message.messageId, message]));
         const mailboxById = new Map(allMailbox.map((message) => [message.messageId, message]));
+        const mailboxText = async (message: AgentMailboxMessageRecord): Promise<string> => {
+          const sender =
+            message.sender.kind === "subagent"
+              ? await workspace.operational.subAgents.get(message.sender.id)
+              : undefined;
+          return renderSubAgentMailboxText(message, sender?.name);
+        };
         const history: {
           readonly role: "user" | "assistant";
           readonly content: string;
@@ -4613,7 +4646,7 @@ export async function createApplicationRuntimeComposition(
               if (mailbox)
                 history.push({
                   role: "user",
-                  content: `[${mailbox.sender.kind}:${mailbox.sender.id}]\n${mailbox.content}`,
+                  content: await mailboxText(mailbox),
                   createdAt: entry.createdAt,
                 });
               continue;
@@ -4637,9 +4670,7 @@ export async function createApplicationRuntimeComposition(
             createdAt: message.createdAt,
           });
         }
-        const prompt = messages
-          .map((message) => `[${message.sender.kind}:${message.sender.id}]\n${message.content}`)
-          .join("\n\n");
+        const prompt = (await Promise.all(messages.map(mailboxText))).join("\n\n");
         try {
           const result = await subAgentTaskRunner.run({
             plan: record.frozenPlan,
@@ -4863,9 +4894,8 @@ export async function createApplicationRuntimeComposition(
           await prepared.close();
         }
       },
-      steer: async (taskId: string, message: string) => {
-        return await subAgentTaskRunner.steer(taskId, message);
-      },
+      steer: async (taskId: string, message: string) => await subAgentTaskRunner.steer(taskId, message),
+      remind: async (taskId: string, message: string) => await subAgentTaskRunner.remind(taskId, message),
       cancel: async (taskId: string) => await subAgentTaskRunner.abort(taskId),
     }),
   });
@@ -5532,6 +5562,7 @@ export async function createApplicationRuntimeComposition(
       readonly isInterruptRequested: () => boolean;
     },
     attachments: readonly ComposerAttachment[] = [],
+    inputOrigin?: TurnSettlementRequest["inputOrigin"],
   ): Promise<TurnResult> => {
     const trail = getTrail(trailId);
     if (trail.status === "running") throw new Error("Trail is already running");
@@ -5692,6 +5723,7 @@ export async function createApplicationRuntimeComposition(
             input,
           } as const)
             .addOptional(sourceIntentId ? { sourceIntentId } : undefined)
+            .addOptional(inputOrigin ? { inputOrigin } : undefined)
             .addOptional(attachments.length > 0 ? { attachments } : undefined)
             .add({
               occurredAt,
@@ -5759,6 +5791,7 @@ export async function createApplicationRuntimeComposition(
                     if (interactionControl?.isInterruptRequested()) void agent.abort(trailId);
                     else {
                       interactionControl?.onReady();
+                      reminderReadyTurns.set(trailId, turnId);
                       const collaborationPersistence = subAgentSupervisor
                         ?.deliverPendingForeground(trailId)
                         .catch(() => undefined);
@@ -6008,6 +6041,7 @@ export async function createApplicationRuntimeComposition(
       await persistTrail(Object.freeze({ ...running, status: "failed" as const }));
       throw error;
     } finally {
+      if (reminderReadyTurns.get(trailId) === turnId) reminderReadyTurns.delete(trailId);
       await refreshMessageCount(trailId);
     }
   };
@@ -6034,6 +6068,7 @@ export async function createApplicationRuntimeComposition(
       onReady,
       isInterruptRequested,
       attachments,
+      origin,
     }) => {
       try {
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -6046,9 +6081,10 @@ export async function createApplicationRuntimeComposition(
           } as const)
             .addOptional(thinkingLevel ? { thinkingLevel } : undefined)
             .finish(),
-          intentId,
+          origin ? undefined : intentId,
           { onReady, isInterruptRequested },
           attachments,
+          origin,
         );
         return Object.freeze({ outcome: result.outcome });
       } catch (error) {
@@ -6101,7 +6137,28 @@ export async function createApplicationRuntimeComposition(
       activeCompactions.get(sessionId)?.abort(contextCompactionInterrupted("Context compaction interrupted"));
       await agent.abort(sessionId);
     },
+    collaboration: {
+      claim: async (sessionId, turnId) => {
+        const reminder = await subAgentSupervisor?.claimForegroundReminder(sessionId);
+        if (!reminder || !subAgentSupervisor) return undefined;
+        const supervisor = subAgentSupervisor;
+        return Object.freeze({
+          text: reminder.text,
+          mailboxMessageIds: Object.freeze(reminder.messages.map((message) => message.messageId)),
+          // The woken turn's durable input message is the delivered copy; without it, retry later.
+          settle: async () => {
+            const recorded = await workspace.operational.messages.get(`${turnId}:user`);
+            await supervisor.settleForegroundReminder(reminder, recorded ? "delivered" : "released");
+            await refreshMessageCount(sessionId);
+          },
+          release: async () => await supervisor.settleForegroundReminder(reminder, "released"),
+        });
+      },
+    },
   });
+  wakeForCollaboration = (sessionId) => {
+    if (trailStates.has(sessionId)) interactions.wake(sessionId);
+  };
   const interact: NoesisRuntime["interact"] = async (trailId, command, interactionOptions) => {
     getTrail(trailId);
     const result = await interactions.dispatch(trailId, command, interactionOptions);

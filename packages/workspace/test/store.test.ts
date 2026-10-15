@@ -2279,7 +2279,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 50 });
+    ).toEqual({ version: 51 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -3012,7 +3012,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(50);
+    expect(versions.at(-1)).toBe(51);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -3760,6 +3760,83 @@ describe("WorkspaceStore", () => {
     ).toEqual(["user", "assistant"]);
     store.close();
   });
+  test("records a foreground collaboration reminder atomically with its mailbox delivery", async () => {
+    const store = await createWorkspaceStore(await temporary("foreground-reminder"));
+    await store.operational.sessions.put(session("session-reminder"));
+    seedForegroundTurn(store, {
+      turnId: "turn-reminder",
+      sessionId: "session-reminder",
+      status: "running",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const append = async (messageId: string, kind: "message" | "completion") =>
+      await store.operational.subAgents.appendMessage({
+        messageId,
+        projectId: "project-reminder",
+        sender: { kind: "foreground", id: "session-sender" },
+        recipient: { kind: "foreground", id: "session-reminder" },
+        kind,
+        content: `content ${messageId}`,
+        sensitivity: "normal",
+        status: "accepted",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+    const claim = async (messageId: string) => {
+      const current = await store.operational.subAgents.getMessage(messageId);
+      if (!current) throw new Error(`Missing ${messageId}`);
+      await store.operational.subAgents.putMessage({
+        ...current,
+        status: "claimed",
+        claimedAt: "2026-01-01T00:00:02.000Z",
+      });
+    };
+    await expect(append("message-report", "message")).resolves.toMatchObject({ kind: "message" });
+    await expect(append("message-notice", "completion")).resolves.toMatchObject({ kind: "completion" });
+    const request = {
+      sessionId: "session-reminder",
+      turnId: "turn-reminder",
+      messageIds: ["message-report", "message-notice"],
+      content: "<system-reminder>\nreport\n</system-reminder>",
+      timelineSequence: 3,
+      deliveredAt: "2026-01-01T00:00:03.000Z",
+    } as const;
+    await claim("message-report");
+    // An unclaimed message rolls back the whole delivery, including the session message.
+    await expect(store.operational.subAgents.recordForegroundReminder(request)).rejects.toThrow(
+      /message-notice is not claimed/u,
+    );
+    expect(await store.operational.messages.listForSession("session-reminder")).toEqual([]);
+    await claim("message-notice");
+    await expect(store.operational.subAgents.recordForegroundReminder(request)).resolves.toMatchObject({
+      messageId: "turn-reminder:collaboration:message-report",
+      role: "user",
+      metadata: {
+        turnId: "turn-reminder",
+        deliveryMode: "steer",
+        origin: "collaboration",
+        mailboxMessageIds: ["message-report", "message-notice"],
+      },
+    });
+    expect(await store.operational.messages.listForSession("session-reminder")).toMatchObject([
+      { content: request.content, timelineSequence: 3 },
+    ]);
+    for (const messageId of request.messageIds)
+      expect(await store.operational.subAgents.getMessage(messageId)).toMatchObject({
+        status: "delivered",
+        deliveredAt: request.deliveredAt,
+      });
+    seedForegroundTurn(store, {
+      turnId: "turn-settled",
+      sessionId: "session-reminder",
+      status: "completed",
+      admittedAt: "2026-01-01T00:00:00.000Z",
+      settledAt: "2026-01-01T00:00:04.000Z",
+    });
+    await expect(
+      store.operational.subAgents.recordForegroundReminder({ ...request, turnId: "turn-settled" }),
+    ).rejects.toThrow(/is not running/u);
+  });
+
   test("keeps queued turns and explicit steers durable, ordered, and session isolated", async () => {
     const store = await createWorkspaceStore(await temporary("user-intents"));
     await store.operational.sessions.put(session("session-intents"));

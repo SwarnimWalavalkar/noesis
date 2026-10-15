@@ -20,8 +20,8 @@ const child = await agents.spawn({
   name: "decision-reviewer",
   prompt: ["Find the unresolved decisions.", recent],
 });
-// Continue the foreground task while the subagent runs.
-return await agents.wait({ taskId: child.taskId });
+// The result arrives as a system reminder when the task settles.
+child;
 ```
 
 Saved workflows keep the context document and model route from the run that started them, including after resume.
@@ -50,6 +50,33 @@ Results contain bounded evidence with exact citations. The agent can use `histor
 
 `agents.send`, `agents.list`, `agents.inspect`, `agents.wait`, `agents.cancel`, and `agents.close` manage collaboration. Productive tasks have no independent provider-round, tool-call, or wall-clock ceiling.
 
+### Results and messages
+
+When a task completes, fails, or is interrupted, Noesis sends a completion notice to the actor that requested it. The requester is the foreground session or agent that spawned the agent or sent the message that started the task. Mailbox messages and notices reach the recipient as one `<system-reminder>` block. The block says that its content comes from named agents and is not a user message.
+
+- A running foreground turn receives the reminder at its next model step. Tool calls the model already proposed still run. A reminder delivered this way is stored in the session transcript, so later turns see it too.
+- An idle foreground session starts a turn with the reminder as its input. A session whose queue is paused, for example after an interrupt, keeps the reminder until the user's next message.
+- A running subagent receives completion notices at its next step. A message from another actor steers it, so tool calls it already proposed are skipped. An idle subagent starts a new task for either kind.
+
+No notice is sent when the requester is already joined to the task through `agents.wait`, or when the task was cancelled. A task started by a completion notice does not send a notice of its own.
+
+`agents.wait` is for using a result in later code. Execution is rejected before it starts if code discards a wait's value, for example `await agents.wait({ taskId });` as a statement or a discarded `Promise.all` of waits. Assigning the value, returning it, or passing it on is allowed.
+
+When one agent's output feeds another agent or a later step, use a workflow Program. A phase can spawn agents and join them, and the next phase receives the joined values:
+
+```js
+// One workflow phase; requiredTools: ["agents.spawn", "agents.wait"]
+const [left, right] = await Promise.all([
+  agents.spawn({ name: "left", prompt: `Review the left side of ${input.topic}` }),
+  agents.spawn({ name: "right", prompt: `Review the right side of ${input.topic}` }),
+]);
+const reports = await Promise.all([
+  agents.wait({ taskId: left.taskId }),
+  agents.wait({ taskId: right.taskId }),
+]);
+return { reports: reports.map((report) => report.result) };
+```
+
 Subagents use the same Broker, authority, and durable recording paths as other codemode tools. Recursive spawning is available only when explicitly granted.
 
 ## Model routing
@@ -61,5 +88,7 @@ The parent may choose tools, prompt, and thinking level, but not the provider or
 ## Inspect subagents
 
 A process-wide `SUBAGENTS` panel stays above the composer while agents are active, including after switching sessions. Idle and completed agents collapse by default.
+
+When a subagent reports to the current session, a notice names the agent and says when the foreground agent will see the report. The report appears in the transcript under `AGENTS`, not as user input.
 
 In `Ctrl+O`, select an agent and press Enter to inspect its frozen prompt, reasoning, assistant messages, model rounds, mailbox messages, and complete nested tool tree. Child internals never interleave into the main transcript.

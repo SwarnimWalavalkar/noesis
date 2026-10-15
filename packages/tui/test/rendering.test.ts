@@ -1,7 +1,9 @@
 import { type Terminal, TuiMainScreen, visibleWidth } from "@earendil-works/pi-tui";
 import type { SubAgentSummary } from "@noesis/agent-types";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { renderCollaborationReminder } from "@noesis/runtime";
 import { reduceTui } from "../src/state.ts";
+import { foregroundMessageNotice } from "../src/subagent-orchestration.ts";
 import {
   createSafeEditor,
   createTranscriptRenderer,
@@ -685,6 +687,62 @@ describe("Noesis transcript rendering", () => {
     expect(visibleTail).toContain("file-2.ts");
     expect(visibleTail).not.toContain("file-24.ts");
     expect(visibleTail).not.toContain("TRANSCRIPT");
+  });
+
+  test("shows collaboration reminders as agent updates, not user text", () => {
+    const reminder = renderCollaborationReminder([
+      {
+        sender: { kind: "subagent", id: "subagent_1" },
+        senderName: "atlas",
+        kind: "completion",
+        content: `Task task_1 completed.\nResult:\n${Array.from({ length: 20 }, (_, index) => `finding ${String(index)}`).join("\n\n")}`,
+      },
+    ]);
+    let state = reduceTui(initialTuiState("fake"), { type: "collaboration-delivered", text: reminder });
+    expect(state.timeline).toEqual([
+      { kind: "message", role: "user", origin: "collaboration", text: reminder },
+    ]);
+    const [entry] = state.timeline;
+    if (entry?.kind !== "message") throw new Error("Expected the reminder message");
+    const lines = renderMessageBlock(entry, 60).map((line) => line.trimEnd());
+    expect(lines[0]).toBe("AGENTS");
+    expect(lines[1]).toBe('│ Task update from subagent "atlas" (subagent_1):');
+    expect(lines.join("\n")).not.toContain("system-reminder");
+    expect(lines.join("\n")).not.toContain("YOU");
+    expect(lines.at(-1)).toMatch(/^│ … \d+ more lines · Ctrl\+O inspects agents$/u);
+    expect(lines).toHaveLength(10);
+    state = reduceTui(state, { type: "steer-delivered", text: "typed by the user" });
+    expect(state.timeline.at(-1)).toEqual({ kind: "message", role: "user", text: "typed by the user" });
+  });
+
+  test("says when a foreground agent will see a subagent report", () => {
+    const subAgents = [{ agentId: "subagent_1", name: "atlas" }];
+    const event = (recipientId: string, kind: "message" | "completion") =>
+      ({
+        type: "message",
+        agentId: "subagent_1",
+        messageId: "message_1",
+        recipient: { kind: "foreground", id: recipientId },
+        kind,
+        status: "accepted",
+      }) as const;
+    const state = (overrides: { readonly phase?: string; readonly queuePaused?: boolean }) => ({
+      trailId: "trail_current",
+      subAgents,
+      interaction: { phase: "idle", queuePaused: false, ...overrides },
+    });
+    expect(foregroundMessageNotice(event("trail_current", "completion"), state({}))).toBe(
+      "atlas finished · resuming the agent",
+    );
+    expect(foregroundMessageNotice(event("trail_current", "message"), state({ phase: "running" }))).toBe(
+      "atlas sent a message · the agent sees it at its next step",
+    );
+    expect(foregroundMessageNotice(event("trail_current", "completion"), state({ queuePaused: true }))).toBe(
+      "atlas finished · it reaches the agent with your next message",
+    );
+    expect(foregroundMessageNotice(event("trail_other", "completion"), state({}))).toBe(
+      "atlas finished · reported to the session that asked",
+    );
   });
 
   test("wraps long prose to the actual display width", () => {

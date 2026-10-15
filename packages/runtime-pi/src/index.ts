@@ -416,6 +416,8 @@ export function createPiAgentRuntime(
   }
   interface PendingPiSteer {
     readonly text: string;
+    /** User steering supersedes proposed tool calls; runtime reminders do not. */
+    readonly interruptsTools: boolean;
     readonly promise: Promise<AgentSteerResult>;
     readonly resolve: (result: AgentSteerResult) => void;
   }
@@ -797,7 +799,21 @@ export function createPiAgentRuntime(
       let terminalAssistant: AssistantMessage | undefined;
       const unsubscribers = [
         harness.events.on("queue_update", (event) => {
-          execution.hasQueuedSteering = event.queues.some((item) => item.kind === "steer");
+          execution.hasQueuedSteering = event.queues.some(
+            (item) =>
+              item.kind === "steer" &&
+              !(
+                item.type === "message" &&
+                item.message.role === "user" &&
+                "content" in item.message &&
+                execution.pendingSteers.some(
+                  (receipt) =>
+                    !receipt.interruptsTools &&
+                    "content" in item.message &&
+                    receipt.text === userMessageText(item.message),
+                )
+              ),
+          );
         }),
         harness.events.on("message_start", (event) => {
           if (event.message.role !== "assistant") return;
@@ -1040,21 +1056,23 @@ export function createPiAgentRuntime(
       }
     }
   };
-  const steer = async (
+  const queueSteer = async (
     trailId: string,
     text: string,
-    images?: readonly AgentRuntimeImage[],
+    images: readonly AgentRuntimeImage[],
+    interruptsTools: boolean,
   ): Promise<AgentSteerResult> => {
     const execution = active.get(trailId);
     const lane = execution?.lane;
     if (!execution || !lane) return notConsumed("not-running");
     if (!execution.acceptsSteering)
       return notConsumed(execution.controller.signal.aborted ? "aborted" : "turn-ended");
-    validateImages(execution.provider, execution.model, images ?? []);
+    validateImages(execution.provider, execution.model, images);
     const blocks = imageBlocks(images);
     const deferred = Promise.withResolvers<AgentSteerResult>();
     const receipt: PendingPiSteer = Object.freeze({
       text,
+      interruptsTools,
       promise: deferred.promise,
       resolve: deferred.resolve,
     });
@@ -1068,6 +1086,13 @@ export function createPiAgentRuntime(
     }
     return receipt.promise;
   };
+  const steer = async (
+    trailId: string,
+    text: string,
+    images?: readonly AgentRuntimeImage[],
+  ): Promise<AgentSteerResult> => await queueSteer(trailId, text, images ?? [], true);
+  const remind = async (trailId: string, text: string): Promise<AgentSteerResult> =>
+    await queueSteer(trailId, text, [], false);
   const abort = async (trailId: string): Promise<void> => {
     const execution = active.get(trailId);
     if (!execution) return;
@@ -1080,6 +1105,7 @@ export function createPiAgentRuntime(
     name: "pi-agent-harness-0.85.0",
     run,
     steer,
+    remind,
     validateImages,
     abort,
     inspectContext: (trailId: string) => contextInspections.get(trailId),
