@@ -614,4 +614,54 @@ describe("runtime transcript projection", () => {
     expect(action).not.toHaveProperty("turnId");
     workspace.close();
   });
+  test("unwraps direct broker envelopes but keeps tool arguments that share their field names", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-runtime-transcript-broker-"));
+    roots.push(root);
+    const workspace = await createWorkspaceStore(root);
+    await workspace.operational.sessions.put({
+      sessionId: "session-broker",
+      title: "Broker payloads",
+      status: "idle",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-30T00:00:00.000Z",
+      updatedAt: "2026-07-30T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await workspace.operational.toolCalls.put({
+      toolCallId: "direct-broker",
+      sessionId: "session-broker",
+      toolName: "shell.run",
+      request: {
+        catalogId: "catalog-1",
+        catalogDigest: "digest-1",
+        toolRevisionId: "tool-1",
+        input: { command: "ls" },
+      },
+      response: { output: { exitCode: 0 } },
+      status: "completed",
+      sensitivity: "normal",
+      createdAt: "2026-07-30T00:00:01.000Z",
+      completedAt: "2026-07-30T00:00:02.000Z",
+    });
+    await workspace.operational.toolCalls.put({
+      toolCallId: "lookalike",
+      sessionId: "session-broker",
+      toolName: "custom.tool",
+      request: { toolRevisionId: "user-value", input: "raw", extra: true },
+      response: { output: "kept", extra: true },
+      status: "completed",
+      sensitivity: "normal",
+      createdAt: "2026-07-30T00:00:03.000Z",
+      completedAt: "2026-07-30T00:00:04.000Z",
+    });
+    const [direct, lookalike] = await loadRuntimeTranscript(workspace, "session-broker");
+    expect(direct).toMatchObject({ input: { command: "ls" }, output: { exitCode: 0 } });
+    expect(lookalike).toMatchObject({
+      input: { toolRevisionId: "user-value", input: "raw", extra: true },
+      output: { output: "kept", extra: true },
+    });
+    workspace.close();
+  });
 });

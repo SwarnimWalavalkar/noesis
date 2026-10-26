@@ -56,8 +56,18 @@ const nestedBrokerPayload = (value: unknown, field: "input" | "output"): JsonVal
   if (!isJsonObject(parsed.data) || !Object.hasOwn(parsed.data, field)) return parsed.data;
   return parsed.data[field];
 };
-/** The broker records every call it executes as `{ ..., toolRevisionId, input }` with `{ output }`. */
-const BrokerRequestSchema = z.looseObject({ toolRevisionId: z.string(), input: JsonValueSchema });
+/**
+ * The exact envelope the broker writes for every call it executes; its response is `{ output }` or
+ * `{ error }`. A strict shape keeps tool arguments that merely share a field name from being unwrapped.
+ */
+const BrokerRequestSchema = z.strictObject({
+  executionId: z.string().optional(),
+  catalogId: z.string(),
+  catalogDigest: z.string(),
+  turnId: z.string().optional(),
+  toolRevisionId: z.string(),
+  input: JsonValueSchema,
+});
 const isBrokerRequest = (value: unknown): boolean => BrokerRequestSchema.safeParse(value).success;
 const executionIdFrom = (...values: readonly unknown[]): string | undefined => {
   for (const value of values) {

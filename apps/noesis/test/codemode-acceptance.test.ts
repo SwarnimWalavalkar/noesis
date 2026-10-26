@@ -311,6 +311,7 @@ describe("production codemode journey", () => {
         kind: "action",
         name: "files.read",
         input: expect.objectContaining({ path: "package.json" }),
+        output: expect.objectContaining({ totalLines: expect.any(Number) }),
       }),
     );
     const modelCalls = await runtime.debug.workspace.operational.subAgents.listModelCalls(
