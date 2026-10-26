@@ -520,12 +520,13 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   const mutationHint = (text: string): string =>
     styled(options.colorEnabled, `${ANSI.bold}${ANSI.yellow}`, `✎ ${text}`);
 
+  // The close key sits beside the primary keys so a narrow overlay truncates only secondary ones.
   const listHint = (): string => {
     const failed = failedCount() > 0 ? " · x failed" : "";
     return navHint(
       wideLayout
-        ? `↑/↓ move · pgup/pgdn scroll · enter open · tab details · a all · f group · s session${failed} · r refresh · esc`
-        : `↑/↓ move · pgup/pgdn scroll · enter open · a all · f group · s session${failed} · r refresh · esc`,
+        ? `↑/↓ move · enter open · esc close · tab details · a all · f group · s session${failed} · r refresh · pgup/pgdn scroll`
+        : `↑/↓ move · enter open · esc close · a all · f group · s session${failed} · r refresh · pgup/pgdn scroll`,
     );
   };
 
@@ -542,14 +543,14 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     const stops = record ? interactableStops(record) : [];
     const navigation =
       detailFocus === "evidence"
-        ? `↑/↓ move · pgup/pgdn scroll · enter ${evidenceExpanded ? "hides" : "expands"} · tab next · space raw ·`
+        ? `↑/↓ pgup/pgdn · enter ${evidenceExpanded ? "hides" : "expands"} · tab next · space raw ·`
         : detailFocus === "inputs"
-          ? `↑/↓ move · pgup/pgdn scroll · enter ${inputsExpanded ? "hides" : "expands"} · tab next · space raw ·`
+          ? `↑/↓ pgup/pgdn · enter ${inputsExpanded ? "hides" : "expands"} · tab next · space raw ·`
           : detailFocus === "related"
-            ? "↑/↓ move · pgup/pgdn scroll · enter open · tab next · space raw ·"
+            ? "↑/↓ pgup/pgdn · enter open · tab next · space raw ·"
             : stops.length > 0
-              ? "↑/↓ move · pgup/pgdn scroll · tab next · space raw ·"
-              : "↑/↓ move · pgup/pgdn scroll · space raw ·";
+              ? "↑/↓ pgup/pgdn · tab next · space raw ·"
+              : "↑/↓ pgup/pgdn · space raw ·";
     return `${navHint(navigation)}${managed} ${navHint("esc")}`;
   };
 

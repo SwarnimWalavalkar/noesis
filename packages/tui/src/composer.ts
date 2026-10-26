@@ -180,7 +180,7 @@ export function createComposer(options: ComposerOptions) {
       if (route.kind !== "prompt") {
         if (route.name !== "steer" || items.length === 0) return false;
         editor.setText(text);
-        notice("/steer can't carry attachments. Send with enter, or /detach all first.");
+        notice("/steer can't carry attachments. Remove /steer and send with enter, or /detach all first.");
         return true;
       }
       if (sending || items.some((item) => !item.attachment)) {
