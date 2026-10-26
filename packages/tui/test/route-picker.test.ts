@@ -53,9 +53,7 @@ describe("route picker", () => {
     overlay.focused = true;
 
     expect(overlay.render(80).join("\n")).toContain("alpha-current  ✓ current");
-    expect(overlay.render(80).join("\n")).toContain(
-      "New empty session · previous preserved · history not replayed",
-    );
+    expect(overlay.render(80).join("\n")).toContain("Starts a new session · this one stays in /resume");
     for (const character of "second") overlay.handleInput(character);
     const filtered = overlay.render(80).join("\n");
     expect(filtered).toContain("alpha-second");
@@ -94,7 +92,7 @@ describe("route picker", () => {
     const reasoning = overlay.render(80).join("\n");
     expect(reasoning).toContain("SELECT REASONING · alpha-current");
     expect(reasoning).toContain("high  ✓ current");
-    expect(reasoning).toContain("Reasoning updates current session · provider and model unchanged");
+    expect(reasoning).toContain("Changes reasoning for this session only");
     overlay.handleInput("\u001b[A");
     overlay.handleInput("\r");
 
@@ -129,7 +127,7 @@ describe("route picker", () => {
     const rendered = overlay.render(80).join("\n");
     expect(rendered).toContain("SELECT REASONING · alpha-current");
     expect(rendered).toContain("high  ✓ current");
-    expect(rendered).toContain("Esc cancel");
+    expect(rendered).toContain("esc cancel");
     overlay.handleInput("\u001b");
 
     expect(cancelled).toBe(1);

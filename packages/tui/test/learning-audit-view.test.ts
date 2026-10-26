@@ -334,11 +334,11 @@ describe("learning audit view helpers", () => {
     expect(collapsed).toContain("second input preview");
     expect(collapsed).not.toContain("third input preview");
     expect(collapsed).not.toContain("more exact references in raw");
-    expect(collapsed).toContain("Tab to choose");
+    expect(collapsed).toContain("tab to choose");
     const expanded = detailDocument(subject, false, 0, 80, false, now, "inputs", false, true).join("\n");
     expect(expanded).toContain("third input preview");
     expect(expanded).toContain("+ 22 more exact references in raw");
-    expect(expanded).toContain("Enter hides");
+    expect(expanded).toContain("enter hides");
     const withEvidence = record({
       ...subject,
       evidence: Object.freeze(["a", "b", "c", "d"]),
@@ -380,7 +380,7 @@ describe("learning audit view helpers", () => {
     ).join("\n");
     expect(citedExpanded).toContain("third cited preview");
     expect(citedExpanded).toContain("+ 1 more exact references in raw");
-    expect(citedExpanded).toContain("Enter hides");
+    expect(citedExpanded).toContain("enter hides");
   });
 
   test("offers expansion only when additional readable previews exist", () => {
@@ -406,7 +406,7 @@ describe("learning audit view helpers", () => {
         false,
         false,
       ).join("\n"),
-    ).not.toContain("Enter expands");
+    ).not.toContain("enter expands");
   });
 
   test("reveals an expanded section tail when its raw-reference marker wraps", () => {

@@ -200,23 +200,23 @@ export function mcpManagerHint(input: {
 }): string {
   if (input.busy)
     return input.cancellable
-      ? "Please wait · Esc cancel operation"
+      ? "Please wait · esc cancel operation"
       : "Please wait for the operation to finish";
-  if (!input.mutationsEnabled) return "Read-only while the active turn finishes · Esc back";
+  if (!input.mutationsEnabled) return "Read-only while the active turn finishes · esc back";
   if (input.screenKind === "list")
-    return "↑/↓ select · Enter open · l local · r remote · g reload · Esc close";
+    return "↑/↓ select · enter open · l local · r remote · g reload · esc close";
   if (input.screenKind === "server") {
     if (input.detail && mcpOAuthActionsAvailable(input.detail, true))
-      return "↑/↓ select · Enter open · a auth · l logout · e enable/disable · r reconnect · d edit · x remove · Esc back";
+      return "↑/↓ select · enter open · a auth · l logout · e enable/disable · r reconnect · d edit · x remove · esc back";
     return input.detail?.shadowed || input.detail?.enabled === false
-      ? "↑/↓ select · Enter open · e enable/disable · d edit · x remove · Esc back"
-      : "↑/↓ select · Enter open · e enable/disable · r reconnect · d edit · x remove · Esc back";
+      ? "↑/↓ select · enter open · e enable/disable · d edit · x remove · esc back"
+      : "↑/↓ select · enter open · e enable/disable · r reconnect · d edit · x remove · esc back";
   }
-  if (input.screenKind === "collection") return "↑/↓ select · Enter inspect · Esc back";
-  if (input.screenKind === "text") return "↑/↓ scroll · PgUp/PgDn scroll · Esc back";
-  if (input.screenKind === "input") return "Enter continue · Esc back";
-  if (input.screenKind === "choice") return "↑/↓ select · 1-9 jump · Enter continue · Esc back";
-  return "Enter / y confirm · Esc / n cancel";
+  if (input.screenKind === "collection") return "↑/↓ select · enter inspect · esc back";
+  if (input.screenKind === "text") return "↑/↓ pgup/pgdn scroll · esc back";
+  if (input.screenKind === "input") return "enter continue · esc back";
+  if (input.screenKind === "choice") return "↑/↓ select · 1-9 jump · enter continue · esc back";
+  return "enter / y confirm · esc / n cancel";
 }
 export function mcpServerOptions(
   detail: TuiMcpServerDetail,

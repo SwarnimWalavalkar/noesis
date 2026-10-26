@@ -110,7 +110,7 @@ export async function loadSkillSlashCommands(
 export const NOESIS_SLASH_COMMANDS = [
   {
     name: "attach",
-    description: "Attach a file or image (Ctrl+V reads copied files or images)",
+    description: "Attach a file or image (ctrl+v pastes copied ones)",
     argumentHint: "<path>",
   },
   { name: "attachments", description: "Inspect a page of draft attachments", argumentHint: "[page]" },

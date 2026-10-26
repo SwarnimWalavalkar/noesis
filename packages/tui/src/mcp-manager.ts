@@ -121,7 +121,7 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     target?: Pick<TuiMcpServerSummary, "scope" | "name">,
   ): Promise<void> => {
     if (!options.mutationsEnabled()) {
-      notice = "MCP changes are available after the active turn finishes.";
+      notice = "MCP changes wait until the turn finishes.";
       render();
       return;
     }
@@ -432,7 +432,7 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
       moveTo({
         kind: "confirm",
         title: `Remove ${safeMcpScalar(detail.name)}`,
-        prompt: `Remove the ${detail.scope} server entry? This cannot be undone from Noesis.`,
+        prompt: `Remove this ${detail.scope} server? This can't be undone here.`,
         back: serverScreen,
         confirm: () => void mutate({ type: "remove", scope: detail.scope, name: detail.name }),
       });
@@ -696,8 +696,8 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     return [
       ...wrapTextWithAnsi(safeTerminalText(screen.prompt), width),
       "",
-      styled(options.colorEnabled, ANSI.red, "Enter / y confirm"),
-      styled(options.colorEnabled, ANSI.dim, "Esc / n cancel"),
+      styled(options.colorEnabled, ANSI.red, "enter / y confirm"),
+      styled(options.colorEnabled, ANSI.dim, "esc / n cancel"),
     ];
   };
   const title = (): string => {

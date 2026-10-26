@@ -16,8 +16,8 @@ import {
 } from "./state.ts";
 import { highlightCode } from "./syntax.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
-const SEMANTIC_INSPECTOR_HINT = "↑/↓ scroll · pgup/pgdn scroll · space exact · esc close";
-const RAW_INSPECTOR_HINT = "↑/↓ scroll · pgup/pgdn scroll · space semantic · esc close";
+const SEMANTIC_INSPECTOR_HINT = "↑/↓ pgup/pgdn scroll · space exact · esc close";
+const RAW_INSPECTOR_HINT = "↑/↓ pgup/pgdn scroll · space semantic · esc close";
 /** Compatibility export for the inspector's default semantic view. */
 export const INSPECTOR_HINT = SEMANTIC_INSPECTOR_HINT;
 function inspectorHint(view: TuiInspectorState["view"]): string {
@@ -443,10 +443,10 @@ function identityLines(
   ];
   const note =
     inspector.status === "loading"
-      ? "resolving the durable run record…"
+      ? "loading the saved run record…"
       : detail
         ? undefined
-        : "no durable run record resolved; showing the in-memory call";
+        : "live call · no saved run record";
   return [
     styled(colorEnabled, ANSI.dim, parts.join(" · ")),
     ...(note ? [styled(colorEnabled, ANSI.dim, note)] : []),

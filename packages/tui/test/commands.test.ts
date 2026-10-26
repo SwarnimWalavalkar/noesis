@@ -64,7 +64,7 @@ describe("Noesis slash commands", () => {
     await runSlashCommand("/context", commandContext);
     await runSlashCommand("/capabilities", commandContext);
     expect(published).toHaveLength(2);
-    expect(published.every((text) => text.includes("unavailable"))).toBe(true);
+    expect(published.every((text) => text.includes("isn't available"))).toBe(true);
   });
   test("routes learning only from column zero", () => {
     expect(isSlashCommandSubmission("/learning")).toBe(true);
@@ -96,7 +96,7 @@ describe("Noesis slash commands", () => {
     expect(published).toEqual([]);
 
     await expect(runSlashCommand("/mcp", context)).resolves.toBe(true);
-    expect(published).toEqual(["MCP management is unavailable in this runtime."]);
+    expect(published).toEqual(["MCP management isn't available here."]);
   });
 
   test("documents how to invoke skills whose names collide with built-in commands", async () => {
@@ -114,7 +114,7 @@ describe("Noesis slash commands", () => {
     expect(dispatched).toContainEqual(
       expect.objectContaining({
         type: "system-message",
-        text: expect.stringContaining("/skill:NAME [instructions] invokes command-name collisions"),
+        text: expect.stringContaining("/skill:NAME [instructions] runs one that shares a command's name"),
       }),
     );
   });
@@ -122,9 +122,9 @@ describe("Noesis slash commands", () => {
   test("explains idle and unresolved steering without masking successful delivery", () => {
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const snapshot = { sessionId: "session", phase: "idle" as const, queuePaused: true, pending: [] };
-    expect(steerFeedback({ effect: "idle", snapshot }, true)).toContain("No active turn");
+    expect(steerFeedback({ effect: "idle", snapshot }, true)).toContain("Nothing is running");
     expect(steerFeedback({ effect: "idle", snapshot }, false)).toContain("No queued message");
-    expect(steerFeedback({ effect: "unresolved", snapshot }, true)).toContain("will not retry");
+    expect(steerFeedback({ effect: "unresolved", snapshot }, true)).toContain("won't be retried");
     expect(steerFeedback({ effect: "steered", snapshot }, true)).toBeUndefined();
   });
 
@@ -222,18 +222,18 @@ describe("Noesis slash commands", () => {
     expect(dispatched).toContainEqual(
       expect.objectContaining({
         type: "system-message",
-        text: expect.stringContaining("previous session is preserved"),
+        text: expect.stringContaining("previous session is in /resume"),
       }),
     );
     expect(dispatched).toContainEqual(
       expect.objectContaining({
         type: "system-message",
-        text: expect.stringContaining("prompt-cache isolation"),
+        text: expect.stringContaining("in a new session"),
       }),
     );
     expect(dispatched).toContainEqual({
       type: "notification-shown",
-      text: "New empty session · previous preserved · history not replayed",
+      text: "Starts a new session · this one stays in /resume",
       tone: "info",
     });
     expect(dispatched).toContainEqual(
@@ -448,7 +448,7 @@ describe("Noesis slash commands", () => {
     expect(dispatched).toEqual([
       {
         type: "notification-shown",
-        text: "Authentication cancelled · session unchanged",
+        text: "Sign-in cancelled",
         tone: "info",
       },
     ]);
@@ -489,7 +489,7 @@ describe("Noesis slash commands", () => {
     expect(unchanged).toEqual([
       {
         type: "notification-shown",
-        text: `Already using reasoning ${current.thinkingLevel} · session unchanged`,
+        text: `Reasoning is already ${current.thinkingLevel}`,
         tone: "info",
       },
     ]);
@@ -748,7 +748,7 @@ describe("Noesis slash commands", () => {
     expect(published[0]).toContain("messages:message-learning-decision");
     expect(published[0]).toContain("accepted · turn turn-served");
     expect(published[0]).toContain("The focused research answer was accepted.");
-    expect(published[0]).toContain("No change is a normal outcome");
+    expect(published[0]).toContain("most turns change nothing");
     expect(published[0]).not.toContain("approve");
   });
 
@@ -825,7 +825,7 @@ describe("Noesis slash commands", () => {
       activity.every((entry) => completeOutput.includes(entry.jobId)),
       "every learning entry should remain inspectable across pages",
     ).toBe(true);
-    expect(completeOutput).toContain("No change is a normal outcome");
+    expect(completeOutput).toContain("most turns change nothing");
     expect(completeOutput).not.toContain("inspector preview truncated");
     expect(published.every((page) => page.length <= INSPECTOR_PREVIEW_CHARACTERS)).toBe(true);
   });
@@ -862,9 +862,9 @@ describe("Noesis slash commands", () => {
   test("guides bare inspect commands toward usage instead of treating them as prompts", async () => {
     const runtime = createInMemoryTestRuntime(agent);
     for (const [input, expected] of [
-      ["/skill", "Usage: /skill <name>. Use /skills to list available skills."],
+      ["/skill", "Usage: /skill <name> · /skills lists them"],
       ["/program", "Usage: /program <script|workflow> <name>"],
-      ["/run", "Usage: /run <execution-id>. Use /runs to list recent runs."],
+      ["/run", "Usage: /run <id> · /runs lists them"],
     ] as const) {
       const published: string[] = [];
       const handled = await runSlashCommand(input, {

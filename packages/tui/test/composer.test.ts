@@ -161,7 +161,7 @@ describe("attachment composer", () => {
     await settle();
     expect(f.editor.getText()).toBe("exact draft\nwith context");
     expect(f.composer.render(80).join("\n")).toContain("notes.txt");
-    expect(f.notice).toHaveBeenCalledWith(expect.stringContaining("draft retained"));
+    expect(f.notice).toHaveBeenCalledWith(expect.stringContaining("your draft is kept"));
   });
   test("successful admission does not erase edits made while waiting", async () => {
     const admission = deferred<void>();
@@ -314,7 +314,7 @@ test("clipboard and path attachment requests explain pending admission instead o
   f.enter("send");
   f.composer.handleKey("\u0016");
   f.enter("/attach later.txt");
-  expect(f.notice).toHaveBeenCalledWith(expect.stringContaining("retry attaching"));
+  expect(f.notice).toHaveBeenCalledWith(expect.stringContaining("Attach again"));
   expect(f.readClipboard).not.toHaveBeenCalled();
   pending.resolve();
 });

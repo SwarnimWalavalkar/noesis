@@ -346,7 +346,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
       { columns: 70, rows: 22 },
     );
     expect(cancelled.output).toContain("NOESIS  resume a session");
-    expect(cancelled.output).toContain("↑/↓ navigate · Enter resume · d delete · Esc cancel");
+    expect(cancelled.output).toContain("↑/↓ move · enter resume · d delete · esc cancel");
     expect(cancelled.result).toEqual({ code: 0, signal: null });
     const reopened = await createTestRuntime(cancelled.home);
     expect(reopened.listTrails()).toMatchObject([{ title: "cancel me", status: "idle" }]);
@@ -374,7 +374,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     });
 
     expect(output).toContain("SELECT MODEL · OpenRouter");
-    expect(output).toContain("New empty session · previous preserved · history not replayed");
+    expect(output).toContain("Starts a new session · this one stays in /resume");
     expect(output).toContain("● IDLE");
     expect(result).toEqual({ code: 0, signal: null });
   }, 10_000);

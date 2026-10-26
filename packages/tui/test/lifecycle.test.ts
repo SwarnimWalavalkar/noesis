@@ -472,7 +472,7 @@ describe("Noesis TUI lifecycle", () => {
     const unsupportedRun = startNoesisTui(unsupported, {}, unsupportedTerminal);
     await vi.waitFor(() => expect(unsupportedTerminal.output).toContain("● IDLE"));
     unsupportedTerminal.type("/skills\r");
-    await vi.waitFor(() => expect(unsupportedTerminal.output).toContain("unavailable in this runtime"));
+    await vi.waitFor(() => expect(unsupportedTerminal.output).toContain("isn't available here"));
     unsupportedTerminal.type("/quit\n");
     await unsupportedRun;
 
@@ -484,8 +484,8 @@ describe("Noesis TUI lifecycle", () => {
     const emptyRun = startNoesisTui(empty, {}, emptyTerminal);
     await vi.waitFor(() => expect(emptyTerminal.output).toContain("● IDLE"));
     emptyTerminal.type("/skills\r");
-    await vi.waitFor(() => expect(emptyTerminal.output).toContain("No skills are installed"));
-    expect(emptyTerminal.output).not.toContain("unavailable in this runtime");
+    await vi.waitFor(() => expect(emptyTerminal.output).toContain("No skills installed"));
+    expect(emptyTerminal.output).not.toContain("isn't available here");
     emptyTerminal.type("/quit\n");
     await emptyRun;
   });
@@ -520,7 +520,7 @@ describe("Noesis TUI lifecycle", () => {
     expect(discoveryAttempts).toBe(1);
     expect(terminal.output).not.toContain("broken skill package");
     terminal.type("/help\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("/provider ID · /model ID"));
+    await vi.waitFor(() => expect(terminal.output).toContain("add an ID or LEVEL"));
     terminal.type("/quit\n");
     await running;
   });
@@ -554,7 +554,7 @@ describe("Noesis TUI lifecycle", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
     expect(discoveryAttempts).toBe(1);
     terminal.type("/help\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("/provider ID · /model ID"));
+    await vi.waitFor(() => expect(terminal.output).toContain("add an ID or LEVEL"));
     terminal.type("/quit\n");
     await running;
   });
@@ -612,7 +612,7 @@ describe("Noesis TUI lifecycle", () => {
       ]),
     );
     terminal.type("/fork\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("A command is active."));
+    await vi.waitFor(() => expect(terminal.output).toContain("Another command is running."));
     expect(prompts).toEqual([]);
 
     releaseCompact?.();
@@ -998,7 +998,7 @@ describe("Noesis TUI lifecycle", () => {
     terminal.type("first\r");
     await vi.waitFor(() => expect(terminal.output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u));
     terminal.type("/compact\r");
-    await vi.waitFor(() => expect(terminal.output).toContain("changes the session"));
+    await vi.waitFor(() => expect(terminal.output).toContain("before changing sessions"));
     expect(compact).not.toHaveBeenCalled();
 
     releaseTurn?.();
@@ -2288,10 +2288,10 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("?\r");
     await vi.waitFor(() =>
-      expect(terminal.output).toContain("learning, experiments, activation, and revert run ambiently"),
+      expect(terminal.output).toContain("learning runs in the background after each turn"),
     );
     expect(terminal.output).not.toContain("/learn · /evaluate");
-    expect(terminal.output).toContain("/provider ID · /model ID");
+    expect(terminal.output).toContain("add an ID or LEVEL");
 
     terminal.type("/quit\n");
     await running;
@@ -2406,17 +2406,17 @@ describe("Noesis TUI lifecycle", () => {
     terminal.type("/resume\r");
     await vi.waitFor(() => expect(terminal.output).toContain("d delete"));
     terminal.send("d");
-    await vi.waitFor(() => expect(terminal.output).toContain("current session cannot be deleted"));
+    await vi.waitFor(() => expect(terminal.output).toContain("Can't delete the current session"));
     terminal.send("\u001b[B");
     terminal.send("d");
-    await vi.waitFor(() => expect(terminal.output).toContain("Delete from resume and search?"));
+    await vi.waitFor(() => expect(terminal.output).toContain("Delete this session?"));
     terminal.send("\r");
     expect(runtime.listTrailSummaries().map((summary) => summary.trailId)).toEqual(
       expect.arrayContaining([current.trailId, older.trailId]),
     );
-    expect(terminal.output).toContain("d again to delete · Esc keep");
+    expect(terminal.output).toContain("d again to delete · esc keep");
     terminal.send("d");
-    await vi.waitFor(() => expect(terminal.output).toContain("Session deleted from resume and search."));
+    await vi.waitFor(() => expect(terminal.output).toContain("Session deleted."));
 
     expect(runtime.listTrailSummaries().map((summary) => summary.trailId)).toEqual([current.trailId]);
     expect(() => runtime.getTrail(older.trailId)).toThrow(`Trail not found: ${older.trailId}`);
@@ -2444,7 +2444,7 @@ describe("Noesis TUI lifecycle", () => {
 
     await expect(
       startNoesisTui(runtime, { session: { mode: "resume", trailId: "trail_missing" } }, terminal),
-    ).rejects.toThrow(/was not found.*--resume/);
+    ).rejects.toThrow(/not found.*--resume/);
     expect(terminal.starts).toBe(0);
   });
 
@@ -2466,7 +2466,7 @@ describe("Noesis TUI lifecycle", () => {
     const terminal = createTestTerminal();
 
     await expect(startNoesisTui(runtime, { session: { mode: "pick" } }, terminal)).rejects.toThrow(
-      /No saved sessions.*without --resume/,
+      /No saved sessions.*Run noesis to start one/,
     );
     expect(terminal.starts).toBe(0);
   });
@@ -2489,7 +2489,7 @@ describe("Noesis TUI lifecycle", () => {
     const terminal = createTestTerminal();
 
     await expect(startNoesisTui(runtime, { session: { mode: "continue" } }, terminal)).rejects.toThrow(
-      /No saved sessions.*without --continue/,
+      /No saved sessions.*Run noesis to start one/,
     );
     expect(terminal.starts).toBe(0);
     expect(runtime.listTrails()).toEqual([]);

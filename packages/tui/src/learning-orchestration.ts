@@ -36,7 +36,7 @@ export function createTuiLearningOrchestration(options: {
       }
       const { inspectLearningAudit } = options.runtime;
       if (!inspectLearningAudit) {
-        options.reportUnavailable("The learning audit is unavailable in this runtime.");
+        options.reportUnavailable("The learning audit isn't available here.");
         options.tui.requestRender();
         return;
       }

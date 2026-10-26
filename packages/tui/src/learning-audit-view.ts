@@ -279,7 +279,7 @@ function expandRuleOptions(
 ): { readonly accent: boolean; readonly caption: string } {
   return {
     accent: focus === section,
-    caption: focus === section ? (expanded ? "Enter hides" : "Enter expands") : "Tab to choose",
+    caption: focus === section ? (expanded ? "enter hides" : "enter expands") : "tab to choose",
   };
 }
 
@@ -481,7 +481,7 @@ function evidenceLines(
       styled(
         colorEnabled,
         ANSI.dim,
-        total === 0 ? "No evidence was cited." : "Exact references remain available in the raw audit view.",
+        total === 0 ? "No evidence was cited." : "Exact references are in the raw view.",
       ),
     ];
   return [
@@ -552,7 +552,7 @@ export function previewDocument(
           "",
         ]
       : []),
-    styled(colorEnabled, ANSI.dim, "Enter opens"),
+    styled(colorEnabled, ANSI.dim, "enter opens"),
   ];
 }
 
@@ -578,7 +578,7 @@ export function detailDocument(
 ): readonly string[] {
   if (raw)
     return [
-      styled(colorEnabled, ANSI.dim, "Raw record · Space returns"),
+      styled(colorEnabled, ANSI.dim, "Raw record · space returns"),
       "",
       ...highlightCode(safeTerminalText(formatRawJson(record.rawJson)), "json", colorEnabled),
     ];
@@ -638,7 +638,7 @@ export function detailDocument(
           "",
           rule(`related · ${String(record.relations.length)}`, width, colorEnabled, {
             accent: focus === "related",
-            caption: focus === "related" ? "Enter opens" : "Tab to choose",
+            caption: focus === "related" ? "enter opens" : "tab to choose",
           }),
           ...record.relations.map((item, index) => {
             const selected = focus === "related" && index === relationCursor;
