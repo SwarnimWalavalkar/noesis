@@ -137,9 +137,10 @@ function durableIdentities(entry: TuiTimelineEntry): readonly string[] {
 /**
  * Re-inserts UI-only notes into a reloaded transcript where they were shown. A note follows the
  * nearest earlier entry the reload still contains, resolved by exact identity before the turn
- * alias that a prompt shares with its steers. Live text between that entry and the note has no
- * identity yet, so it counts as an offset: a note shown after a streamed reply stays after the
- * reply once it is reloaded. A note with no earlier entry keeps its place at the top.
+ * alias that a prompt shares with its steers. When streamed text with no identity yet sat between
+ * that entry and the note, the note also moves past the reloaded entries the user had never seen
+ * with an identity, since those are that text persisted, however many messages it became. A note
+ * with no earlier entry keeps its place at the top.
  */
 export function withLocalNotes(
   durable: readonly TuiTimelineEntry[],
@@ -156,6 +157,11 @@ export function withLocalNotes(
   const leading: TuiTimelineEntry[] = [];
   const trailing: TuiTimelineEntry[] = [];
   const placed = new Map<number, TuiTimelineEntry[]>();
+  const seen = new Set(previous.flatMap((entry) => durableIdentities(entry)));
+  const unseen = (index: number): boolean => {
+    const entry = durable[index];
+    return entry !== undefined && !durableIdentities(entry).some((identity) => seen.has(identity));
+  };
   const anchors: (readonly string[])[] = [];
   let sinceAnchor = 0;
   for (const entry of previous) {
@@ -173,14 +179,12 @@ export function withLocalNotes(
     }
     let position = -1;
     for (let back = anchors.length - 1; back >= 0 && position < 0; back -= 1) {
-      const index = locate(anchors[back] ?? []);
-      if (index >= 0) position = back === anchors.length - 1 ? index + sinceAnchor : index;
+      let index = locate(anchors[back] ?? []);
+      if (index >= 0 && back === anchors.length - 1 && sinceAnchor > 0) while (unseen(index + 1)) index += 1;
+      position = index;
     }
     if (position < 0) trailing.push(entry);
-    else {
-      const at = Math.min(position, durable.length - 1);
-      placed.set(at, [...(placed.get(at) ?? []), entry]);
-    }
+    else placed.set(position, [...(placed.get(position) ?? []), entry]);
   }
   return [
     ...leading,

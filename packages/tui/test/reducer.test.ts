@@ -1022,6 +1022,17 @@ describe("Noesis TUI reducer", () => {
         ),
       ),
     ).toEqual(["first", "done", "after reply"]);
+    // One streamed entry that persisted as two messages still keeps the note after both.
+    const partA = message("m-5", "assistant", "A", "turn-1");
+    const partB = message("m-6", "assistant", "B", "turn-1");
+    expect(
+      texts(
+        withLocalNotes(
+          [prompt, partA, partB],
+          [prompt, { kind: "message", role: "assistant", text: "AB" }, note("after both")],
+        ),
+      ),
+    ).toEqual(["first", "A", "B", "after both"]);
   });
 
   test("tracks an active subagent's live phase without requiring its inspector", () => {
