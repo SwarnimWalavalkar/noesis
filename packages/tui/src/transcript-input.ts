@@ -14,7 +14,7 @@ export function createTranscriptInputHandler(options: {
   readonly tui: TUI;
   readonly view: NoesisView;
   readonly inspectorMaxScroll: () => number;
-  readonly agentViewMaxScroll: () => number;
+  readonly agentViewBounds: () => { readonly maxScroll: number; readonly documentRows: number };
   readonly openRunInspector: (actionId: string) => void;
   readonly openAgent: (agentId: string, options?: { readonly nested?: boolean }) => void;
   readonly closeAgent: () => void;
@@ -59,7 +59,7 @@ export function createTranscriptInputHandler(options: {
 
     const agentView = state.agentView;
     if (agentView) {
-      const maxScroll = options.agentViewMaxScroll();
+      const { maxScroll, documentRows } = options.agentViewBounds();
       if (matchesKey(data, "escape")) {
         if (agentView.actionCursor) view.dispatch({ type: "agent-view-cursor-cleared" });
         else options.closeAgent();
@@ -70,9 +70,9 @@ export function createTranscriptInputHandler(options: {
         if (agentView.actionCursor) view.dispatch({ type: "agent-view-cursor-moved", direction: "next" });
         // Paging scrolls the followed transcript; while an action is selected the window follows it.
       } else if (!agentView.actionCursor && matchesKey(data, "pageUp"))
-        view.dispatch({ type: "agent-view-scrolled", delta: PAGE_ROWS, maxScroll });
+        view.dispatch({ type: "agent-view-scrolled", delta: PAGE_ROWS, maxScroll, documentRows });
       else if (!agentView.actionCursor && matchesKey(data, "pageDown"))
-        view.dispatch({ type: "agent-view-scrolled", delta: -PAGE_ROWS, maxScroll });
+        view.dispatch({ type: "agent-view-scrolled", delta: -PAGE_ROWS, maxScroll, documentRows });
       else if (matchesKey(data, "left")) options.cycleAgent("previous");
       else if (matchesKey(data, "right")) options.cycleAgent("next");
       else if (matchesKey(data, "space")) view.dispatch({ type: "agent-view-expansion-toggled" });

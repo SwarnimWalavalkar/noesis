@@ -314,7 +314,7 @@ export async function startNoesisTui(
     tui,
     view,
     inspectorMaxScroll: inspector.maxScroll,
-    agentViewMaxScroll: subAgents.maxScroll,
+    agentViewBounds: subAgents.bounds,
     openRunInspector: inspector.openRun,
     openAgent: subAgents.open,
     closeAgent: subAgents.back,

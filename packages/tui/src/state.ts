@@ -120,6 +120,16 @@ export interface TuiInspectorState {
   readonly view: "semantic" | "raw";
   readonly scroll: number;
 }
+/** The part of an agent view the user moved through, restored when they return to it. */
+export type TuiAgentViewNavigation = Pick<
+  TuiAgentViewState,
+  "actionCursor" | "expandedActionIds" | "scroll" | "scrollAnchor"
+>;
+/** Rows a scrolled-back agent view sits above the newest output, including output since it scrolled. */
+export function effectiveAgentScroll(view: TuiAgentViewState, documentRows: number): number {
+  if (view.scroll <= 0) return 0;
+  return view.scroll + Math.max(0, documentRows - (view.scrollAnchor ?? documentRows));
+}
 /** Collapsed or expanded presentation of the running-agent strip above the composer. */
 export interface TuiAgentStripState {
   readonly expanded: boolean;
@@ -141,6 +151,8 @@ export interface TuiAgentViewState {
   readonly execution: ExecutionState;
   /** Rows scrolled back from the newest content; zero follows live output. */
   readonly scroll: number;
+  /** Document rows when `scroll` was set; later output deepens the offset so the view holds still. */
+  readonly scrollAnchor?: number;
   readonly systemPrompt?: string;
   readonly systemPromptShown: boolean;
   /** Why the agent's latest task failed, as recorded by the runtime. */
@@ -295,6 +307,8 @@ export type NoesisTuiAction =
       readonly type: "agent-view-opened";
       readonly agentId: string;
       readonly parents: readonly string[];
+      /** Where the user was in this agent's view when they opened a nested agent from it. */
+      readonly navigation?: TuiAgentViewNavigation;
     }
   | {
       readonly type: "agent-view-hydrated";
@@ -317,6 +331,8 @@ export type NoesisTuiAction =
       readonly type: "agent-view-scrolled";
       readonly delta: number;
       readonly maxScroll: number;
+      /** Rendered document rows, which anchor a scrolled-back position against new output. */
+      readonly documentRows: number;
     }
   | {
       readonly type: "agent-view-expansion-toggled";
@@ -764,27 +780,36 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     }
     case "agent-view-opened": {
       const summary = state.subAgents.find((agent) => agent.agentId === action.agentId);
-      // The session's navigation cursor is kept so closing the view returns to the same row.
+      // The session's navigation cursor is kept so closing the view returns to the same row, and a
+      // parent agent's own position comes back when the user returns from a nested agent.
+      const navigation = action.navigation;
       return {
         ...state,
-        agentView: {
+        agentView: createConditionalObject({
           agentId: action.agentId,
           parents: Object.freeze([...action.parents]),
           status: "loading",
           timeline: [],
-          expandedActionIds: NO_EXPANDED_ACTIONS,
+          expandedActionIds: navigation?.expandedActionIds ?? NO_EXPANDED_ACTIONS,
           execution: summary && isActiveSubAgent(summary) ? "thinking" : "idle",
-          scroll: 0,
+          scroll: navigation?.scroll ?? 0,
           systemPromptShown: false,
-        },
+        } as const)
+          .addOptional(navigation?.actionCursor ? { actionCursor: navigation.actionCursor } : undefined)
+          .addOptional(
+            navigation?.scrollAnchor === undefined ? undefined : { scrollAnchor: navigation.scrollAnchor },
+          )
+          .finish(),
       };
     }
     case "agent-view-hydrated": {
       const view = state.agentView;
       if (view?.agentId !== action.agentId) return state;
       const totalTokens = sumTokens(action.transcript);
+      // Each snapshot describes the latest task, so an earlier failure never outlives a later success.
+      const { taskError: _taskError, ...current } = view;
       const hydrated = createConditionalObject({
-        ...view,
+        ...current,
         status: "ready",
         timeline: mergeDurableTimeline(
           subAgentTimelineFromRuntime(action.transcript, action.agentId),
@@ -816,9 +841,13 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
     case "agent-view-scrolled": {
       const view = state.agentView;
       if (!view) return state;
-      const scroll = Math.min(Math.max(0, action.maxScroll), Math.max(0, view.scroll + action.delta));
-      const { actionCursor: _actionCursor, ...rest } = view;
-      return { ...state, agentView: { ...rest, scroll } };
+      const current = effectiveAgentScroll(view, action.documentRows);
+      const scroll = Math.min(Math.max(0, action.maxScroll), Math.max(0, current + action.delta));
+      const { actionCursor: _actionCursor, scrollAnchor: _scrollAnchor, ...rest } = view;
+      return {
+        ...state,
+        agentView: scroll > 0 ? { ...rest, scroll, scrollAnchor: action.documentRows } : { ...rest, scroll },
+      };
     }
     case "agent-view-expansion-toggled": {
       const view = state.agentView;

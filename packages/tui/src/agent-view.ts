@@ -12,7 +12,7 @@ import {
 } from "./agent-presentation.ts";
 import { formatCount } from "./action-summary.ts";
 import { renderRichText } from "./rich-text.ts";
-import type { NoesisTuiState, TuiAgentViewState } from "./state.ts";
+import { effectiveAgentScroll, type NoesisTuiState, type TuiAgentViewState } from "./state.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 import { createTranscriptRenderer, type TranscriptRenderer } from "./transcript.ts";
 import type { TuiTranscriptSlice } from "./transcript-slice.ts";
@@ -28,6 +28,7 @@ const SPEAKER_LABEL_MAX_COLUMNS = 24;
 export interface RenderedAgentView {
   readonly rows: readonly string[];
   readonly maxScroll: number;
+  readonly documentRows: number;
 }
 
 /** Time of day for today's agents; older retained agents also need their date. */
@@ -180,7 +181,7 @@ export function renderAgentViewFrame(
 ): RenderedAgentView {
   const view = state.agentView;
   const safeWidth = Math.max(0, Math.floor(width));
-  if (!view || safeWidth < 8 || height < CHROME_ROWS + 1) return { rows: [], maxScroll: 0 };
+  if (!view || safeWidth < 8 || height < CHROME_ROWS + 1) return { rows: [], maxScroll: 0, documentRows: 0 };
   const agent = state.subAgents.find((candidate) => candidate.agentId === view.agentId);
   const inner = safeWidth > 2 ? safeWidth - 2 : safeWidth;
   const bodyRows = height - CHROME_ROWS;
@@ -197,10 +198,13 @@ export function renderAgentViewFrame(
   let visible: readonly string[];
   let maxScroll = 0;
   if (view.actionCursor && document.length > bodyRows) {
-    visible = renderer.renderWindow(slice, inner, bodyRows, Math.max(3, bodyRows - 2));
+    // The recorded failure still closes the transcript while an action is selected.
+    visible = [...renderer.renderWindow(slice, inner, bodyRows, Math.max(3, bodyRows - 2)), ...failure].slice(
+      -bodyRows,
+    );
   } else {
     maxScroll = Math.max(0, document.length - bodyRows);
-    const scroll = Math.min(view.scroll, maxScroll);
+    const scroll = Math.min(effectiveAgentScroll(view, document.length), maxScroll);
     visible = document.slice(Math.max(0, document.length - bodyRows - scroll), document.length - scroll);
   }
   const blank = Array.from({ length: Math.max(0, bodyRows - visible.length) }, () => "");
@@ -208,7 +212,7 @@ export function renderAgentViewFrame(
   const hint = styled(
     state.colorEnabled,
     ANSI.dim,
-    `${scrolled ? `${formatCount(Math.min(view.scroll, maxScroll), "row")} above live · ` : ""}${agentViewHint(view)}`,
+    `${scrolled ? `${formatCount(Math.min(effectiveAgentScroll(view, document.length), maxScroll), "row")} above live · ` : ""}${agentViewHint(view)}`,
   );
   const rows = [
     ...blank,
@@ -219,7 +223,11 @@ export function renderAgentViewFrame(
     statusLine(state, view, agent, safeWidth),
     elideText(hint, safeWidth),
   ];
-  return { rows: rows.map((line) => padTo(elideText(line, safeWidth), safeWidth)), maxScroll };
+  return {
+    rows: rows.map((line) => padTo(elideText(line, safeWidth), safeWidth)),
+    maxScroll,
+    documentRows: document.length,
+  };
 }
 
 /**
@@ -229,14 +237,14 @@ export function renderAgentViewFrame(
 export function createAgentViewOverlay(
   read: () => NoesisTuiState,
   height: () => number,
-  onBoundsMeasured: (maxScroll: number) => void,
+  onBoundsMeasured: (bounds: { readonly maxScroll: number; readonly documentRows: number }) => void,
 ): Component {
   const renderer = createTranscriptRenderer();
   return {
     invalidate() {},
     render(width) {
       const rendered = renderAgentViewFrame(read(), width, height(), renderer);
-      onBoundsMeasured(rendered.maxScroll);
+      onBoundsMeasured(rendered);
       return [...rendered.rows];
     },
   };

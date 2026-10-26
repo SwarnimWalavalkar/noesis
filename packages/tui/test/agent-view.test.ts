@@ -183,6 +183,25 @@ describe("subagent view", () => {
     });
     const rows = renderAgentViewFrame(state, 90, 16, createTranscriptRenderer()).rows.map(stripAnsi);
     expect(rows.join("\n")).toContain("Error · Provider rejected the request: quota exceeded");
+    // The failure still closes a long transcript while an action is selected.
+    let selecting = state;
+    for (let index = 0; index < 30; index += 1)
+      selecting = reduceTui(selecting, {
+        type: "subagent-live-event",
+        agentId: "agent-a",
+        event: { type: "tool-start", actionId: `step-${String(index)}`, name: "shell.run", input: {} },
+      });
+    selecting = reduceTui(selecting, { type: "agent-view-cursor-moved", direction: "previous" });
+    expect(
+      renderAgentViewFrame(selecting, 90, 16, createTranscriptRenderer()).rows.map(stripAnsi).join("\n"),
+    ).toContain("Error · Provider rejected the request");
+    // A later successful task replaces the earlier failure.
+    const recovered = reduceTui(state, {
+      type: "agent-view-hydrated",
+      agentId: "agent-a",
+      transcript: durableTranscript,
+    });
+    expect(recovered.agentView?.taskError).toBeUndefined();
   });
 
   test("shows the complete reply from its boundary even without streamed deltas", () => {
@@ -250,17 +269,47 @@ describe("subagent view", () => {
     const live = renderAgentViewFrame(state, 80, 12, renderer).rows.map(stripAnsi).join("\n");
     expect(live).toContain("step 39");
     expect(live).not.toContain("step 20");
-    const maxScroll = renderAgentViewFrame(state, 80, 12, renderer).maxScroll;
-    state = reduceTui(state, { type: "agent-view-scrolled", delta: 20, maxScroll });
-    const scrolled = renderAgentViewFrame(state, 80, 12, renderer).rows.map(stripAnsi).join("\n");
-    expect(scrolled).not.toContain("step 39");
-    expect(scrolled).toContain("rows above live");
+    const { maxScroll, documentRows } = renderAgentViewFrame(state, 80, 12, renderer);
+    state = reduceTui(state, { type: "agent-view-scrolled", delta: 20, maxScroll, documentRows });
+    const scrolled = renderAgentViewFrame(state, 80, 12, renderer).rows.map(stripAnsi);
+    expect(scrolled.join("\n")).not.toContain("step 39");
+    expect(scrolled.join("\n")).toContain("rows above live");
+    // New output while scrolled back leaves the visible transcript where the user put it.
+    for (let index = 40; index < 48; index += 1)
+      state = reduceTui(state, {
+        type: "subagent-live-event",
+        agentId: "agent-a",
+        event: {
+          type: "tool-start",
+          actionId: `t-${String(index)}`,
+          name: "shell.run",
+          input: { command: `step ${String(index)}` },
+        },
+      });
+    const held = renderAgentViewFrame(state, 80, 12, renderer).rows.map(stripAnsi);
+    expect(held.slice(0, 6)).toEqual(scrolled.slice(0, 6));
     state = reduceTui(state, { type: "agent-view-cursor-moved", direction: "previous" });
-    expect(state.agentView?.actionCursor).toBe("t-39");
+    expect(state.agentView?.actionCursor).toBe("t-47");
     expect(state.agentView?.scroll).toBe(0);
     state = reduceTui(state, { type: "agent-view-cursor-cleared" });
     expect(state.agentView?.actionCursor).toBeUndefined();
     expect(reduceTui(state, { type: "agent-view-closed" }).agentView).toBeUndefined();
+  });
+
+  test("restores a parent agent's selection, expansion, and scroll when returning to it", () => {
+    const restored = reduceTui(openedState(), {
+      type: "agent-view-opened",
+      agentId: "agent-a",
+      parents: [],
+      navigation: {
+        actionCursor: "read-1",
+        expandedActionIds: new Set(["read-1"]),
+        scroll: 4,
+        scrollAnchor: 30,
+      },
+    });
+    expect(restored.agentView).toMatchObject({ actionCursor: "read-1", scroll: 4, scrollAnchor: 30 });
+    expect(restored.agentView?.expandedActionIds.has("read-1")).toBe(true);
   });
 
   test("keeps the session's navigation cursor while an agent is open", () => {

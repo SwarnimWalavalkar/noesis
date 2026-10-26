@@ -4,7 +4,7 @@ import type { SubAgentInspection, SubAgentRuntimeEvent } from "@noesis/agent-typ
 import { createAgentViewOverlay } from "./agent-view.ts";
 import type { NoesisView } from "./rendering.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
-import { isActiveSubAgent, siblingAgents } from "./state.ts";
+import { isActiveSubAgent, siblingAgents, type TuiAgentViewNavigation } from "./state.ts";
 import { startWorkingAnimation } from "./working-animation.ts";
 
 /** Say who reported and when the foreground agent will actually see it. */
@@ -31,7 +31,7 @@ export interface TuiSubAgentOrchestration {
   readonly back: () => void;
   /** Left/Right: open the previous or next agent in strip order. */
   readonly cycle: (direction: "previous" | "next") => void;
-  readonly maxScroll: () => number;
+  readonly bounds: () => { readonly maxScroll: number; readonly documentRows: number };
   readonly hideOverlay: () => void;
   readonly dispose: () => void;
 }
@@ -45,7 +45,9 @@ export function createTuiSubAgentOrchestration(options: {
 }): TuiSubAgentOrchestration {
   const { view, tui } = options;
   let disposed = false;
-  let maxScroll = 0;
+  let bounds = { maxScroll: 0, documentRows: 0 };
+  // Each parent's position, saved when a nested agent opens from it and restored on return.
+  const parentNavigation = new Map<string, TuiAgentViewNavigation>();
   // Reads can overlap when lifecycle events arrive while one is in flight; only the newest applies.
   let hydration = 0;
   let handle: OverlayHandle | undefined;
@@ -53,7 +55,7 @@ export function createTuiSubAgentOrchestration(options: {
     () => view.state,
     options.height,
     (next) => {
-      maxScroll = next;
+      bounds = { maxScroll: next.maxScroll, documentRows: next.documentRows };
     },
   );
   const hideOverlay = (): void => {
@@ -86,9 +88,13 @@ export function createTuiSubAgentOrchestration(options: {
       if (current()) options.reportFailure(cause);
     }
   };
-  const show = (agentId: string, parents: readonly string[]): void => {
-    maxScroll = 0;
-    view.dispatch({ type: "agent-view-opened", agentId, parents });
+  const show = (agentId: string, parents: readonly string[], navigation?: TuiAgentViewNavigation): void => {
+    bounds = { maxScroll: 0, documentRows: 0 };
+    view.dispatch(
+      createConditionalObject({ type: "agent-view-opened", agentId, parents } as const)
+        .addOptional(navigation ? { navigation } : undefined)
+        .finish(),
+    );
     // Non-capturing: the session's input listener routes keys, and the composer keeps its draft.
     handle ??= tui.showOverlay(overlay, { anchor: "top-left", width: "100%", nonCapturing: true });
     tui.requestRender();
@@ -97,8 +103,21 @@ export function createTuiSubAgentOrchestration(options: {
   const open: TuiSubAgentOrchestration["open"] = (agentId, openOptions = {}) => {
     const current = view.state.agentView;
     if (current?.agentId === agentId) return;
-    const parents =
-      current && openOptions.nested ? [...current.parents, current.agentId] : (current?.parents ?? []);
+    const nested = current !== undefined && openOptions.nested === true;
+    if (current && nested)
+      parentNavigation.set(
+        current.agentId,
+        createConditionalObject({
+          expandedActionIds: current.expandedActionIds,
+          scroll: current.scroll,
+        } as const)
+          .addOptional(current.actionCursor ? { actionCursor: current.actionCursor } : undefined)
+          .addOptional(
+            current.scrollAnchor === undefined ? undefined : { scrollAnchor: current.scrollAnchor },
+          )
+          .finish(),
+      );
+    const parents = current && nested ? [...current.parents, current.agentId] : (current?.parents ?? []);
     show(agentId, parents);
   };
   const back = (): void => {
@@ -106,9 +125,12 @@ export function createTuiSubAgentOrchestration(options: {
     if (!current) return;
     const parent = current.parents.at(-1);
     if (parent) {
-      show(parent, current.parents.slice(0, -1));
+      const navigation = parentNavigation.get(parent);
+      parentNavigation.delete(parent);
+      show(parent, current.parents.slice(0, -1), navigation);
       return;
     }
+    parentNavigation.clear();
     view.dispatch({ type: "agent-view-closed" });
     hideOverlay();
     tui.requestRender();
@@ -171,7 +193,7 @@ export function createTuiSubAgentOrchestration(options: {
     open,
     back,
     cycle,
-    maxScroll: () => maxScroll,
+    bounds: () => bounds,
     hideOverlay,
     dispose: () => {
       disposed = true;
