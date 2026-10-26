@@ -76,6 +76,8 @@ export function timelineEventForAgentEvent(
   if (event.type === "delta") return { type: "stream-delta", text: event.text };
   if (event.type === "reasoning-delta") return { type: "reasoning-delta", text: event.text };
   if (event.type === "reasoning-message") return { type: "reasoning-reconciled", text: event.text };
+  // The boundary carries the complete persisted text, which also covers a view opened mid-stream.
+  if (event.type === "assistant-message") return { type: "stream-reconciled", text: event.text };
   if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
     const action = tuiActionForAgentEvent(event, at);
     if (

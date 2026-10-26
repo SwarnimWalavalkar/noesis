@@ -1,4 +1,4 @@
-import { type Component, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import { createConditionalObject } from "@noesis/domain";
 import type { SubAgentSummary } from "@noesis/agent-types";
 import {
@@ -8,6 +8,7 @@ import {
   agentGlyph,
   agentOutcome,
   agentPulseDim,
+  agentRoute,
 } from "./agent-presentation.ts";
 import { formatCount } from "./action-summary.ts";
 import { renderRichText } from "./rich-text.ts";
@@ -70,7 +71,7 @@ function headerLines(
   const color = state.colorEnabled;
   const rail = styled(color, ANSI.dim, "│ ");
   const railWidth = visibleWidth(rail);
-  const route = agent ? `${agent.route.provider}/${agent.route.model} · ${agent.thinkingLevel}` : undefined;
+  const route = agent ? `${agentRoute(agent)} · ${agent.thinkingLevel}` : undefined;
   const lineage = [
     agent && agent.originSessionId !== state.trailId
       ? "subagent from an earlier session"
@@ -140,7 +141,7 @@ function statusLine(
       ? `ctx ${String(Math.min(100, Math.round((usage.usedTokens / usage.contextWindow) * 100)))}%`
       : undefined;
   const fields = [
-    ...(agent ? [`${agent.route.provider}/${agent.route.model}`, agent.thinkingLevel] : []),
+    ...(agent ? [agentRoute(agent), agent.thinkingLevel] : []),
     ...(percent ? [percent] : []),
     ...(view.totalTokens === undefined ? [] : [`${formatTokens(view.totalTokens)} tok`]),
     formatCount(calls, "call"),
@@ -186,7 +187,13 @@ export function renderAgentViewFrame(
   const slice = agentTranscriptSlice(state, view, agent);
   const header = headerLines(state, view, agent, inner);
   const transcript = renderer.render(slice, inner, Math.max(3, bodyRows - 2));
-  const document = [...header, ...(transcript.length > 0 ? ["", ...transcript] : [])];
+  // A failed task's recorded reason closes the transcript, even when no action ran before it.
+  const failure = view.taskError
+    ? ["", ...safeTerminalText(`Error · ${view.taskError}`).split("\n")]
+        .flatMap((line) => wrapTextWithAnsi(line, inner))
+        .map((line) => styled(state.colorEnabled, `${ANSI.bold}${ANSI.red}`, line))
+    : [];
+  const document = [...header, ...(transcript.length > 0 ? ["", ...transcript] : []), ...failure];
   let visible: readonly string[];
   let maxScroll = 0;
   if (view.actionCursor && document.length > bodyRows) {

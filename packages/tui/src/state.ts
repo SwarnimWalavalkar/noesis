@@ -143,6 +143,8 @@ export interface TuiAgentViewState {
   readonly scroll: number;
   readonly systemPrompt?: string;
   readonly systemPromptShown: boolean;
+  /** Why the agent's latest task failed, as recorded by the runtime. */
+  readonly taskError?: string;
   readonly totalTokens?: number;
   readonly contextUsage?: TuiContextUsage;
 }
@@ -299,6 +301,7 @@ export type NoesisTuiAction =
       readonly agentId: string;
       readonly transcript: readonly RuntimeTranscriptEntry[];
       readonly systemPrompt?: string;
+      readonly taskError?: string;
     }
   | {
       readonly type: "agent-view-closed";
@@ -480,12 +483,14 @@ export function isSessionAgent(state: NoesisTuiState, agent: SubAgentSummary): b
   return false;
 }
 /**
- * Rows of the agent strip. Unfocused, it lists running agents from any session. With focus it
- * adds this session's finished agents, or every retained agent when the user widens the scope.
+ * Rows of the agent strip. Unfocused, it lists running agents from any session. With focus, or
+ * when pinned open, it adds this session's finished agents, or every retained agent when the user
+ * widens the scope.
  */
 export function stripAgents(state: NoesisTuiState): readonly SubAgentSummary[] {
   const running = state.subAgents.filter(isActiveSubAgent);
-  if (state.subAgentCursor === undefined) return running;
+  // A pinned strip keeps this session's finished agents after navigation leaves it.
+  if (state.subAgentCursor === undefined && !state.agentStrip.expanded) return running;
   const finished = newestFirst(
     state.subAgents.filter(
       (agent) => !isActiveSubAgent(agent) && (state.agentStrip.allSessions || isSessionAgent(state, agent)),
@@ -787,6 +792,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         ),
       } as const)
         .addOptional(action.systemPrompt === undefined ? undefined : { systemPrompt: action.systemPrompt })
+        .addOptional(action.taskError === undefined ? undefined : { taskError: action.taskError })
         .addOptional(totalTokens === undefined ? undefined : { totalTokens })
         .finish();
       return { ...state, agentView: hydrated };

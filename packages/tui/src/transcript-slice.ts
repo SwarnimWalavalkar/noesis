@@ -2,7 +2,7 @@ import { createConditionalObject, type JsonValue } from "@noesis/domain";
 import type { SubAgentSummary } from "@noesis/agent-types";
 import { appendReasoningDelta, reconcileReasoning } from "./reasoning-timeline.ts";
 import { lastContentEntryIndex } from "./timeline-adapter.ts";
-import type { ExecutionState, TuiAgentActionEntry, TuiMessageEntry, TuiTimelineEntry } from "./state.ts";
+import type { ExecutionState, TuiAgentActionEntry, TuiTimelineEntry } from "./state.ts";
 
 /** Speaker labels a transcript uses; a subagent's requester is the foreground agent, not the user. */
 export interface TranscriptSpeakerLabels {
@@ -160,31 +160,63 @@ export function moveActionCursor(
   return actions[nextIndex]?.actionId;
 }
 
-const sameLiveMessage = (live: TuiMessageEntry, durable: TuiTimelineEntry): boolean =>
-  durable.kind === "message" && durable.role === live.role && durable.text.startsWith(live.text);
+/** Identity an entry keeps across a durable reload; live streamed text has none yet. */
+function durableKey(entry: TuiTimelineEntry): string | undefined {
+  if (entry.kind === "action") return `action:${entry.actionId}`;
+  if (entry.kind === "reasoning") return entry.reasoningId ? `reasoning:${entry.reasoningId}` : undefined;
+  return entry.messageId ? `message:${entry.messageId}` : undefined;
+}
+
+const sameSpeaker = (live: TuiTimelineEntry, durable: TuiTimelineEntry): boolean =>
+  live.kind === durable.kind &&
+  (live.kind !== "message" || (durable.kind === "message" && live.role === durable.role));
+
+const textOf = (entry: TuiTimelineEntry): string => (entry.kind === "action" ? "" : entry.text);
 
 /**
  * Replaces a timeline with its durable record while keeping live content the record has not
- * caught up with yet. Durable entries always win: a live action is kept only while its exact
- * identity is absent, and live text only while no durable entry already contains it.
+ * caught up with yet. Everything up to the newest entry the reload already contains is
+ * represented by it. After that point a live action survives while its identity is absent, and
+ * live text survives only for the part no newer durable entry of the same speaker already holds:
+ * a live view opened mid-stream holds a suffix, and one live entry can span several persisted
+ * messages.
  */
 export function mergeDurableTimeline(
   durable: readonly TuiTimelineEntry[],
   previous: readonly TuiTimelineEntry[],
 ): readonly TuiTimelineEntry[] {
-  const durableActionIds = new Set(selectableActions(durable).map((action) => action.actionId));
-  const tail = previous.filter((entry) => {
-    if (entry.kind === "action") return !durableActionIds.has(entry.actionId);
-    if (entry.kind === "reasoning")
-      return (
-        entry.reasoningId === undefined &&
-        !durable.some((candidate) => candidate.kind === "reasoning" && candidate.text.startsWith(entry.text))
-      );
-    return (
-      entry.messageId === undefined &&
-      entry.role === "assistant" &&
-      !durable.some((candidate) => sameLiveMessage(entry, candidate))
-    );
+  const keys = durable.map(durableKey);
+  const known = new Set(keys.filter((key): key is string => key !== undefined));
+  const lastKnown = previous.findLastIndex((entry) => {
+    const key = durableKey(entry);
+    return key !== undefined && known.has(key);
   });
+  const anchorEntry = lastKnown < 0 ? undefined : previous[lastKnown];
+  const anchorKey = anchorEntry ? durableKey(anchorEntry) : undefined;
+  const anchor = anchorKey === undefined ? -1 : keys.indexOf(anchorKey);
+  const claimed = new Set<number>();
+  const tail: TuiTimelineEntry[] = [];
+  for (const entry of previous.slice(lastKnown + 1)) {
+    const key = durableKey(entry);
+    if (key !== undefined) {
+      if (!known.has(key)) tail.push(entry);
+      continue;
+    }
+    let remaining = textOf(entry);
+    for (let index = anchor + 1; index < durable.length && remaining; index += 1) {
+      const candidate = durable[index];
+      if (!candidate || claimed.has(index) || !sameSpeaker(entry, candidate)) continue;
+      const persisted = textOf(candidate);
+      if (persisted.startsWith(remaining) || persisted.endsWith(remaining)) {
+        claimed.add(index);
+        remaining = "";
+      } else if (remaining.startsWith(persisted)) {
+        claimed.add(index);
+        remaining = remaining.slice(persisted.length).trimStart();
+      }
+    }
+    if (remaining && entry.kind !== "action")
+      tail.push(remaining === entry.text ? entry : { ...entry, text: remaining });
+  }
   return [...durable, ...tail];
 }

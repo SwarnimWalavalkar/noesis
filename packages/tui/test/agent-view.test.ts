@@ -142,6 +142,60 @@ describe("subagent view", () => {
     ]);
   });
 
+  test("a reload keeps only live text that no newer durable entry holds", () => {
+    const earlier = { kind: "message", messageId: "m-old", role: "assistant", text: "Done." } as const;
+    const anchor = { kind: "action", actionId: "read-1", name: "files.read", status: "completed" } as const;
+    // An older durable reply that starts with the same text is never mistaken for the live one.
+    expect(
+      mergeDurableTimeline(
+        [earlier, anchor],
+        [earlier, anchor, { kind: "message", role: "assistant", text: "Done" }],
+      ),
+    ).toEqual([earlier, anchor, { kind: "message", role: "assistant", text: "Done" }]);
+    // A view opened mid-stream holds only a suffix of the persisted reply.
+    const persisted = {
+      kind: "message",
+      messageId: "m-new",
+      role: "assistant",
+      text: "Full reply text.",
+    } as const;
+    expect(
+      mergeDurableTimeline(
+        [anchor, persisted],
+        [anchor, { kind: "message", role: "assistant", text: "reply text." }],
+      ),
+    ).toEqual([anchor, persisted]);
+    // One live entry can span a persisted message and text that is still streaming.
+    expect(
+      mergeDurableTimeline(
+        [anchor, persisted],
+        [anchor, { kind: "message", role: "assistant", text: "Full reply text. And more" }],
+      ),
+    ).toEqual([anchor, persisted, { kind: "message", role: "assistant", text: "And more" }]);
+  });
+
+  test("ends a failed agent's transcript with the recorded failure reason", () => {
+    const state = reduceTui(openedState(), {
+      type: "agent-view-hydrated",
+      agentId: "agent-a",
+      transcript: durableTranscript.slice(0, 1),
+      taskError: "Provider rejected the request: quota exceeded",
+    });
+    const rows = renderAgentViewFrame(state, 90, 16, createTranscriptRenderer()).rows.map(stripAnsi);
+    expect(rows.join("\n")).toContain("Error · Provider rejected the request: quota exceeded");
+  });
+
+  test("shows the complete reply from its boundary even without streamed deltas", () => {
+    const state = reduceTui(openedState(), {
+      type: "subagent-live-event",
+      agentId: "agent-a",
+      event: { type: "assistant-message", text: "Final answer.", timelineSequence: 3, createdAt: "x" },
+    });
+    expect(state.agentView?.timeline).toEqual([
+      { kind: "message", role: "assistant", text: "Final answer." },
+    ]);
+  });
+
   test("renders like the session transcript with a read-only agent line instead of the composer", () => {
     let state = reduceTui(openedState(), {
       type: "agent-view-hydrated",
@@ -179,7 +233,7 @@ describe("subagent view", () => {
     expect(text.at(-1)).toContain("←/→ agents");
   });
 
-  test("follows live output until scrolled back, and Esc semantics are cursor first", () => {
+  test("follows live output until scrolled back, and clears a selection before closing", () => {
     let state = openedState();
     for (let index = 0; index < 40; index += 1)
       state = reduceTui(state, {

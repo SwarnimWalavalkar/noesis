@@ -816,6 +816,7 @@ export async function startNoesisTui(
     }
   } catch (error) {
     learning.dispose();
+    subAgents.dispose();
     await mcp.dispose();
     throw error;
   }

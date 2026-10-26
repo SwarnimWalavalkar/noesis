@@ -123,4 +123,3 @@ export function subAgentTimelineFromRuntime(
     return { ...entry, role: "user", text: entry.text.slice(header[0].length) };
   });
 }
-

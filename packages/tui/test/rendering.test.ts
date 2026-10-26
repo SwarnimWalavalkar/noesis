@@ -625,6 +625,35 @@ describe("Noesis transcript rendering", () => {
     expect(rows).not.toContain("Previous session work");
   });
 
+  test("names the recipient of agents.send, keeps the strip pinned, and folds route text", () => {
+    const send = {
+      kind: "action" as const,
+      actionId: "send-1",
+      name: "agents.send",
+      status: "completed" as const,
+      input: { to: { kind: "subagent", id: "agent-a" }, message: "Also check the TUI." },
+    };
+    const finished = subAgentSummary("agent-a", "idle", "lifecycle");
+    const odd = {
+      ...subAgentSummary("agent-b", "running", "runtime"),
+      route: { provider: "evil\u001b[2J", model: "line\nbreak" },
+    };
+    const state: NoesisTuiState = {
+      ...initialTuiState("fake"),
+      trailId: "session-foreground",
+      timeline: [send],
+      subAgents: [finished, odd],
+      agentStrip: { expanded: true, allSessions: false },
+    };
+    expect(renderTranscriptLines(state, 100).map(stripAnsi)).toContainEqual(
+      expect.stringContaining("agents.send  lifecycle"),
+    );
+    const strip = renderAgentStrip(state, 120, 30).map(stripAnsi).join("\n");
+    expect(strip).toContain("✓ lifecycle");
+    expect(strip).toContain("evil [2J/line break");
+    expect(containsUnsafeTextControl(renderAgentStrip(state, 120, 30).map(stripAnsi).join(""))).toBe(false);
+  });
+
   test("renders a spawn call as a card for the agent it started, and names the agent a wait joins", () => {
     const spawn = {
       kind: "action" as const,

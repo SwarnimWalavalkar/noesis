@@ -68,9 +68,10 @@ export function createTranscriptInputHandler(options: {
       if (matchesKey(data, "up")) view.dispatch({ type: "agent-view-cursor-moved", direction: "previous" });
       else if (matchesKey(data, "down")) {
         if (agentView.actionCursor) view.dispatch({ type: "agent-view-cursor-moved", direction: "next" });
-      } else if (matchesKey(data, "pageUp"))
+        // Paging scrolls the followed transcript; while an action is selected the window follows it.
+      } else if (!agentView.actionCursor && matchesKey(data, "pageUp"))
         view.dispatch({ type: "agent-view-scrolled", delta: PAGE_ROWS, maxScroll });
-      else if (matchesKey(data, "pageDown"))
+      else if (!agentView.actionCursor && matchesKey(data, "pageDown"))
         view.dispatch({ type: "agent-view-scrolled", delta: -PAGE_ROWS, maxScroll });
       else if (matchesKey(data, "left")) options.cycleAgent("previous");
       else if (matchesKey(data, "right")) options.cycleAgent("next");

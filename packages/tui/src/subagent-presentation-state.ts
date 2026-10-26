@@ -31,7 +31,9 @@ export function reduceSubAgentPhase(
   agentId: string,
   event: AgentRuntimeEvent,
 ): Readonly<Record<string, string>> {
-  if (event.type === "tool-update") return phases;
+  // An update keeps the richer phase from its start; it names the tool only when that start was missed.
+  if (event.type === "tool-update")
+    return phases[agentId] ? phases : Object.freeze({ ...phases, [agentId]: event.name });
   const phase =
     event.type === "reasoning-delta" || event.type === "reasoning-message"
       ? "thinking"

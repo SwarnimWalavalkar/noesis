@@ -11,6 +11,8 @@ import {
   agentGlyph,
   agentOutcome,
   agentPulseDim,
+  agentRoute,
+  singleLine,
 } from "./agent-presentation.ts";
 import {
   type ExecutionState,
@@ -336,13 +338,13 @@ export function renderAgentStrip(state: NoesisTuiState, width: number, height = 
     STRIP_NAME_MAX_COLUMNS,
     Math.max(...shown.map((agent) => visibleWidth(agentDisplayName(agent)))),
   );
-  const foregroundRoute = `${state.provider}/${state.model}`;
+  const foregroundRoute = singleLine(`${state.provider}/${state.model}`);
   return [
     focused ? elideText(heading, safeWidth) : withRightHint(heading, "ctrl+o", safeWidth, color),
     ...shown.map((agent) => {
       const selected = state.subAgentCursor === agent.agentId;
       const name = elideText(agentDisplayName(agent), nameWidth);
-      const route = `${agent.route.provider}/${agent.route.model}`;
+      const route = agentRoute(agent);
       const detail = [
         agentElapsed(agent, clock) ?? "",
         agentActivity(agent, state.subAgentPhases),

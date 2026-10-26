@@ -1,5 +1,5 @@
 import type { SubAgentSummary } from "@noesis/agent-types";
-import { stringField } from "./record-fields.ts";
+import { isRecord, stringField } from "./record-fields.ts";
 import type { TuiAgentAction } from "./state.ts";
 import { ANSI, safeTerminalText } from "./theme.ts";
 import { isPulseDimFrame, WORKING_ANIMATION_INTERVAL_MS } from "./working-animation.ts";
@@ -28,17 +28,29 @@ export function boundAgent(
   if (!AGENT_REFERENCE_ACTIONS.has(action.name)) return undefined;
   const agentId = stringField(action.output, "agentId") ?? stringField(action.input, "agentId");
   if (agentId) return subAgents.find((agent) => agent.agentId === agentId);
+  // `agents.send` addresses its recipient by agent ID or name, or as a `{ kind, id }` address.
+  const to = isRecord(action.input) ? action.input["to"] : undefined;
+  const recipient = typeof to === "string" ? to : stringField(to, "id");
+  if (recipient)
+    return (
+      subAgents.find((agent) => agent.agentId === recipient) ??
+      subAgents.findLast((agent) => agent.name === recipient)
+    );
   const taskId = stringField(action.input, "taskId");
   return taskId
     ? subAgents.find((agent) => agent.activeTaskId === taskId || agent.latestTaskId === taskId)
     : undefined;
 }
 
+/** Runtime-supplied text shown in one terminal row: controls removed and whitespace folded. */
+export const singleLine = (text: string): string => safeTerminalText(text).replaceAll(/\s+/gu, " ").trim();
+
+export function agentRoute(agent: Pick<SubAgentSummary, "route">): string {
+  return singleLine(`${agent.route.provider}/${agent.route.model}`);
+}
+
 export function agentDisplayName(agent: Pick<SubAgentSummary, "agentId" | "name">): string {
-  const name = safeTerminalText(agent.name ?? "")
-    .replaceAll(/\s+/gu, " ")
-    .trim();
-  return name || `agent ${agent.agentId.slice(-6)}`;
+  return singleLine(agent.name ?? "") || `agent ${singleLine(agent.agentId).slice(-6)}`;
 }
 
 /** Compact wall-clock duration that reads at a glance: `0:42`, `12:03`, `1:02:03`. */

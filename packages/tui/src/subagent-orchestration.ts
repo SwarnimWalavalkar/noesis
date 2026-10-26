@@ -1,4 +1,5 @@
 import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
+import { createConditionalObject } from "@noesis/domain";
 import type { SubAgentInspection, SubAgentRuntimeEvent } from "@noesis/agent-types";
 import { createAgentViewOverlay } from "./agent-view.ts";
 import type { NoesisView } from "./rendering.ts";
@@ -45,6 +46,8 @@ export function createTuiSubAgentOrchestration(options: {
   const { view, tui } = options;
   let disposed = false;
   let maxScroll = 0;
+  // Reads can overlap when lifecycle events arrive while one is in flight; only the newest applies.
+  let hydration = 0;
   let handle: OverlayHandle | undefined;
   const overlay = createAgentViewOverlay(
     () => view.state,
@@ -58,21 +61,29 @@ export function createTuiSubAgentOrchestration(options: {
     handle = undefined;
   };
   const hydrate = async (agentId: string): Promise<void> => {
+    const generation = ++hydration;
+    const current = (): boolean =>
+      !disposed && generation === hydration && view.state.agentView?.agentId === agentId;
     try {
       const [inspection, transcript] = await Promise.all([
         options.runtime.inspectSubAgent(agentId),
         options.runtime.getSubAgentTranscript(agentId),
       ]);
-      if (disposed || view.state.agentView?.agentId !== agentId) return;
-      view.dispatch({
-        type: "agent-view-hydrated",
-        agentId,
-        transcript,
-        systemPrompt: inspection.systemPrompt,
-      });
+      if (!current()) return;
+      const failure = inspection.tasks.at(-1)?.error;
+      view.dispatch(
+        createConditionalObject({
+          type: "agent-view-hydrated",
+          agentId,
+          transcript,
+          systemPrompt: inspection.systemPrompt,
+        } as const)
+          .addOptional(failure ? { taskError: failure } : undefined)
+          .finish(),
+      );
       tui.requestRender();
     } catch (cause) {
-      if (!disposed && view.state.agentView?.agentId === agentId) options.reportFailure(cause);
+      if (current()) options.reportFailure(cause);
     }
   };
   const show = (agentId: string, parents: readonly string[]): void => {
