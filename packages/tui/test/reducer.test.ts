@@ -13,6 +13,7 @@ import {
   renderBottomChrome,
   renderHeader,
   renderNoesisState,
+  renderStatusLine,
   renderQueuedInputs,
   renderAgentStrip,
   safeTerminalText,
@@ -20,6 +21,9 @@ import {
   shouldUseColor,
 } from "../src/index.ts";
 import { withLocalNotes } from "../src/timeline-adapter.ts";
+
+const stripAnsiCodes = (text: string): string =>
+  text.replaceAll(new RegExp(`${String.fromCodePoint(27)}\\[[0-9;]*m`, "gu"), "");
 
 describe("Noesis TUI reducer", () => {
   test("local feedback does not split streaming assistant or reasoning text", () => {
@@ -419,6 +423,31 @@ describe("Noesis TUI reducer", () => {
     expect(narrow).toContain("openai-codex/gpt-5.6-sol");
     expect(narrow).toContain("ctx 28%");
     expect(narrow).not.toContain("session");
+  });
+
+  test("drops the turn count before shortening the model name, and the spacer on tiny terminals", () => {
+    const busy: ReturnType<typeof initialTuiState> = {
+      ...initialTuiState("pi", { provider: "openai-codex", model: "gpt-6-luna", reasoningLevel: "medium" }),
+      execution: "streaming",
+      turnCount: 12,
+      contextUsage: { usedTokens: 27_200, contextWindow: 272_000, accuracy: "reported" },
+      interaction: {
+        phase: "running",
+        queuePaused: true,
+        queuedInputs: [
+          { queueId: "q1", text: "one", createdAt: "x" },
+          { queueId: "q2", text: "two", createdAt: "x" },
+        ],
+      },
+    };
+    const line = stripAnsiCodes(renderStatusLine(busy, 80, 28));
+    // The model keeps more than its provider prefix, and the queue state stays whole.
+    expect(line).toMatch(/openai-codex\/g/u);
+    expect(line).toContain("q 2 paused");
+    expect(line).not.toContain("12 turns");
+    const conversation = reduceTui(initialTuiState("fake"), { type: "system-message", text: "hello" });
+    expect(renderNoesisState(conversation, 80, 30).at(-1)).toBe("");
+    expect(renderNoesisState(conversation, 80, 6).at(-1)).not.toBe("");
   });
 
   test("renders the newest queued inputs with delivery state and interaction shortcuts", () => {
