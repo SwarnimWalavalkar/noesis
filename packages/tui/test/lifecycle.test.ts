@@ -1749,6 +1749,122 @@ describe("Noesis TUI lifecycle", () => {
     await running;
   });
 
+  test("returns from a nested agent to the parent card it was opened from", async () => {
+    const base = await createRuntime({
+      name: "nested-agent-scripted",
+      async run(request) {
+        return {
+          text: "ok",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const now = new Date().toISOString();
+    const summary = (agentId: string, name: string) =>
+      Object.freeze({
+        agentId,
+        childSessionId: `session-${agentId}`,
+        projectId: "project-test",
+        originSessionId: "session-foreground",
+        name,
+        status: "running" as const,
+        route: Object.freeze({ provider: "child-provider", model: "child-model" }),
+        thinkingLevel: "high" as const,
+        activeTaskId: `task-${agentId}`,
+        latestTaskId: `task-${agentId}`,
+        latestTaskStatus: "running" as const,
+        createdAt: now,
+        updatedAt: now,
+      });
+    const agents = [
+      summary("agent-parent", "outer-scout"),
+      { ...summary("agent-child", "inner-scout"), parentAgentId: "agent-parent" },
+    ];
+    const transcripts = new Map<string, readonly RuntimeTranscriptEntry[]>([
+      [
+        "agent-parent",
+        [
+          {
+            kind: "message",
+            messageId: "parent-task",
+            role: "user",
+            text: "Delegate one inner check.",
+            createdAt: now,
+          },
+          {
+            kind: "action",
+            actionId: "spawn-inner",
+            name: "agents.spawn",
+            status: "completed",
+            input: { name: "inner-scout" },
+            output: {
+              agentId: "agent-child",
+              taskId: "task-agent-child",
+              name: "inner-scout",
+              status: "accepted",
+            },
+            startedAt: now,
+            completedAt: now,
+          },
+        ],
+      ],
+      [
+        "agent-child",
+        [
+          {
+            kind: "message",
+            messageId: "child-task",
+            role: "user",
+            text: "Check the inner detail.",
+            createdAt: now,
+          },
+        ],
+      ],
+    ]);
+    const runtime: NoesisTuiRuntime = Object.freeze({
+      ...base,
+      listSubAgents: async () => agents,
+      inspectSubAgent: async (agentId: string) => {
+        const found = agents.find((agent) => agent.agentId === agentId);
+        if (!found) throw new Error(`Subagent not found: ${agentId}`);
+        return Object.freeze({
+          ...found,
+          systemPrompt: "You are a focused subagent.",
+          tools: Object.freeze([]),
+          tasks: Object.freeze([]),
+          recentMessages: Object.freeze([]),
+        });
+      },
+      getSubAgentTranscript: async (agentId: string) => transcripts.get(agentId) ?? [],
+      subscribeSubAgents: () => () => undefined,
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("2 agents running"));
+
+    terminal.send("\u000f");
+    terminal.send("\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("Delegate one inner check."));
+    terminal.send("\u001b[A");
+    await vi.waitFor(() => expect(terminal.output).toMatch(/▸ ?● inner-scout/u));
+    const beforeNested = terminal.output.length;
+    terminal.send("\r");
+    await vi.waitFor(() => expect(terminal.output.slice(beforeNested)).toContain("Check the inner detail."));
+    const beforeBack = terminal.output.length;
+    terminal.send("\u001b");
+    await vi.waitFor(() => expect(terminal.output.slice(beforeBack)).toContain("Delegate one inner check."));
+    // The parent's selection on the card survives the round trip through the nested agent.
+    await vi.waitFor(() => expect(terminal.output.slice(beforeBack)).toMatch(/▸ ?● inner-scout/u));
+
+    terminal.send("\u0003");
+    await running;
+  });
+
   test("keeps a tall run inspector footer and final rows reachable after resize", async () => {
     const source = Array.from({ length: 80 }, (_, index) => `source line ${String(index + 1)}`).join("\n");
     const runtime = await createRuntime({

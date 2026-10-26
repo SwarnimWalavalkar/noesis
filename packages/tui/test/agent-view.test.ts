@@ -195,6 +195,16 @@ describe("subagent view", () => {
     expect(
       renderAgentViewFrame(selecting, 90, 16, createTranscriptRenderer()).rows.map(stripAnsi).join("\n"),
     ).toContain("Error · Provider rejected the request");
+    // A long multi-line failure stays one row, so the selected action remains in view.
+    const verbose = reduceTui(selecting, {
+      type: "agent-view-hydrated",
+      agentId: "agent-a",
+      transcript: durableTranscript.slice(0, 1),
+      taskError: Array.from({ length: 40 }, (_, index) => `stack frame ${String(index)}`).join("\n"),
+    });
+    const verboseRows = renderAgentViewFrame(verbose, 90, 16, createTranscriptRenderer()).rows.map(stripAnsi);
+    expect(verboseRows.some((row) => row.includes("▸"))).toBe(true);
+    expect(verboseRows.filter((row) => row.includes("stack frame"))).toHaveLength(1);
     // A later successful task replaces the earlier failure.
     const recovered = reduceTui(state, {
       type: "agent-view-hydrated",
@@ -288,6 +298,18 @@ describe("subagent view", () => {
       });
     const held = renderAgentViewFrame(state, 80, 12, renderer).rows.map(stripAnsi);
     expect(held.slice(0, 6)).toEqual(scrolled.slice(0, 6));
+    // Opening the system prompt above the transcript is not new output either.
+    const prompted = reduceTui(
+      reduceTui(state, {
+        type: "agent-view-hydrated",
+        agentId: "agent-a",
+        transcript: [],
+        systemPrompt: Array.from({ length: 10 }, (_, index) => `rule ${String(index)}`).join("\n"),
+      }),
+      { type: "agent-view-system-prompt-toggled" },
+    );
+    const promptedRows = renderAgentViewFrame(prompted, 80, 12, renderer).rows.map(stripAnsi);
+    expect(promptedRows.slice(0, 6)).toEqual(scrolled.slice(0, 6));
     state = reduceTui(state, { type: "agent-view-cursor-moved", direction: "previous" });
     expect(state.agentView?.actionCursor).toBe("t-47");
     expect(state.agentView?.scroll).toBe(0);

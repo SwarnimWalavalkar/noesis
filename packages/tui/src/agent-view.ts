@@ -9,6 +9,7 @@ import {
   agentOutcome,
   agentPulseDim,
   agentRoute,
+  singleLine,
 } from "./agent-presentation.ts";
 import { formatCount } from "./action-summary.ts";
 import { renderRichText } from "./rich-text.ts";
@@ -28,6 +29,10 @@ const SPEAKER_LABEL_MAX_COLUMNS = 24;
 export interface RenderedAgentView {
   readonly rows: readonly string[];
   readonly maxScroll: number;
+  /**
+   * Rows below the header: the transcript and any failure. Scrolling anchors to these, so opening
+   * the system prompt above them never reads as new output.
+   */
   readonly documentRows: number;
 }
 
@@ -195,16 +200,31 @@ export function renderAgentViewFrame(
         .map((line) => styled(state.colorEnabled, `${ANSI.bold}${ANSI.red}`, line))
     : [];
   const document = [...header, ...(transcript.length > 0 ? ["", ...transcript] : []), ...failure];
+  const contentRows = document.length - header.length;
   let visible: readonly string[];
   let maxScroll = 0;
   if (view.actionCursor && document.length > bodyRows) {
-    // The recorded failure still closes the transcript while an action is selected.
-    visible = [...renderer.renderWindow(slice, inner, bodyRows, Math.max(3, bodyRows - 2)), ...failure].slice(
-      -bodyRows,
+    // While an action is selected the failure is one row, so it never pushes the selection out of
+    // the window; the full reason returns when the selection is cleared.
+    const failureRow = view.taskError
+      ? [
+          styled(
+            state.colorEnabled,
+            `${ANSI.bold}${ANSI.red}`,
+            elideText(`Error · ${singleLine(view.taskError)}`, inner),
+          ),
+        ]
+      : [];
+    const window = renderer.renderWindow(
+      slice,
+      inner,
+      bodyRows - failureRow.length,
+      Math.max(3, bodyRows - 2),
     );
+    visible = [...window, ...failureRow];
   } else {
     maxScroll = Math.max(0, document.length - bodyRows);
-    const scroll = Math.min(effectiveAgentScroll(view, document.length), maxScroll);
+    const scroll = Math.min(effectiveAgentScroll(view, contentRows), maxScroll);
     visible = document.slice(Math.max(0, document.length - bodyRows - scroll), document.length - scroll);
   }
   const blank = Array.from({ length: Math.max(0, bodyRows - visible.length) }, () => "");
@@ -212,7 +232,7 @@ export function renderAgentViewFrame(
   const hint = styled(
     state.colorEnabled,
     ANSI.dim,
-    `${scrolled ? `${formatCount(Math.min(effectiveAgentScroll(view, document.length), maxScroll), "row")} above live · ` : ""}${agentViewHint(view)}`,
+    `${scrolled ? `${formatCount(Math.min(effectiveAgentScroll(view, contentRows), maxScroll), "row")} above live · ` : ""}${agentViewHint(view)}`,
   );
   const rows = [
     ...blank,
@@ -226,7 +246,7 @@ export function renderAgentViewFrame(
   return {
     rows: rows.map((line) => padTo(elideText(line, safeWidth), safeWidth)),
     maxScroll,
-    documentRows: document.length,
+    documentRows: contentRows,
   };
 }
 
