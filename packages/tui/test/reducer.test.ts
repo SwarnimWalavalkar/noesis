@@ -1033,6 +1033,21 @@ describe("Noesis TUI reducer", () => {
         ),
       ),
     ).toEqual(["first", "A", "B", "after both"]);
+    // Output that streamed after the note stays after it once reloaded.
+    const thinking = { kind: "reasoning", reasoningId: "r-1", text: "plan", turnId: "turn-1" } as const;
+    expect(
+      texts(
+        withLocalNotes(
+          [prompt, thinking, reply],
+          [
+            prompt,
+            { kind: "reasoning", text: "plan" },
+            note("help output"),
+            { kind: "message", role: "assistant", text: "done" },
+          ],
+        ),
+      ),
+    ).toEqual(["first", "reasoning", "help output", "done"]);
   });
 
   test("tracks an active subagent's live phase without requiring its inspector", () => {

@@ -138,9 +138,8 @@ function durableIdentities(entry: TuiTimelineEntry): readonly string[] {
  * Re-inserts UI-only notes into a reloaded transcript where they were shown. A note follows the
  * nearest earlier entry the reload still contains, resolved by exact identity before the turn
  * alias that a prompt shares with its steers. When streamed text with no identity yet sat between
- * that entry and the note, the note also moves past the reloaded entries the user had never seen
- * with an identity, since those are that text persisted, however many messages it became. A note
- * with no earlier entry keeps its place at the top.
+ * that entry and the note, the note also moves past that text's reloaded form. A note with no
+ * earlier entry keeps its place at the top.
  */
 export function withLocalNotes(
   durable: readonly TuiTimelineEntry[],
@@ -162,15 +161,36 @@ export function withLocalNotes(
     const entry = durable[index];
     return entry !== undefined && !durableIdentities(entry).some((identity) => seen.has(identity));
   };
+  /**
+   * Steps past the reloaded form of streamed text shown between the anchor and the note: entries of
+   * the same speaker whose text that stream contained, however many messages it became. Anything
+   * else the reload adds came after the note and stays after it.
+   */
+  const pastStreamed = (anchor: number, streamed: readonly TuiTimelineEntry[]): number => {
+    let index = anchor;
+    for (const live of streamed) {
+      let remaining = live.kind === "action" ? "" : live.text;
+      while (remaining && unseen(index + 1)) {
+        const next = durable[index + 1];
+        if (!next || next.kind !== live.kind || next.kind === "action") break;
+        if (next.kind === "message" && live.kind === "message" && next.role !== live.role) break;
+        if (remaining.startsWith(next.text)) remaining = remaining.slice(next.text.length).trimStart();
+        else if (next.text.startsWith(remaining) || next.text.endsWith(remaining)) remaining = "";
+        else break;
+        index += 1;
+      }
+    }
+    return index;
+  };
   const anchors: (readonly string[])[] = [];
-  let sinceAnchor = 0;
+  let streamed: TuiTimelineEntry[] = [];
   for (const entry of previous) {
     if (!isLocalSystemMessage(entry)) {
       const identities = durableIdentities(entry);
       if (identities.length > 0) {
         anchors.push(identities);
-        sinceAnchor = 0;
-      } else sinceAnchor += 1;
+        streamed = [];
+      } else streamed.push(entry);
       continue;
     }
     if (anchors.length === 0) {
@@ -179,9 +199,8 @@ export function withLocalNotes(
     }
     let position = -1;
     for (let back = anchors.length - 1; back >= 0 && position < 0; back -= 1) {
-      let index = locate(anchors[back] ?? []);
-      if (index >= 0 && back === anchors.length - 1 && sinceAnchor > 0) while (unseen(index + 1)) index += 1;
-      position = index;
+      const index = locate(anchors[back] ?? []);
+      position = index >= 0 && back === anchors.length - 1 ? pastStreamed(index, streamed) : index;
     }
     if (position < 0) trailing.push(entry);
     else placed.set(position, [...(placed.get(position) ?? []), entry]);
