@@ -135,39 +135,52 @@ function durableIdentities(entry: TuiTimelineEntry): readonly string[] {
 }
 
 /**
- * Re-inserts UI-only notes into a reloaded transcript where they were shown: after the nearest
- * earlier entry the reload still contains. A note with no such entry keeps its place at the top.
+ * Re-inserts UI-only notes into a reloaded transcript where they were shown. A note follows the
+ * nearest earlier entry the reload still contains, resolved by exact identity before the turn
+ * alias that a prompt shares with its steers. Live text between that entry and the note has no
+ * identity yet, so it counts as an offset: a note shown after a streamed reply stays after the
+ * reply once it is reloaded. A note with no earlier entry keeps its place at the top.
  */
 export function withLocalNotes(
   durable: readonly TuiTimelineEntry[],
   previous: readonly TuiTimelineEntry[],
 ): readonly TuiTimelineEntry[] {
-  const groups: { anchor: readonly string[]; notes: TuiTimelineEntry[] }[] = [];
-  let anchor: readonly string[] = [];
-  for (const entry of previous) {
-    if (isLocalSystemMessage(entry)) {
-      const last = groups.at(-1);
-      if (last && last.anchor === anchor) last.notes.push(entry);
-      else groups.push({ anchor, notes: [entry] });
-      continue;
+  if (!previous.some(isLocalSystemMessage)) return durable;
+  const locate = (identities: readonly string[]): number => {
+    for (const identity of identities) {
+      const index = durable.findIndex((entry) => durableIdentities(entry).includes(identity));
+      if (index >= 0) return index;
     }
-    const identities = durableIdentities(entry);
-    if (identities.length > 0) anchor = identities;
-  }
-  if (groups.length === 0) return durable;
-  const placed = new Map<number, TuiTimelineEntry[]>();
+    return -1;
+  };
   const leading: TuiTimelineEntry[] = [];
   const trailing: TuiTimelineEntry[] = [];
-  for (const group of groups) {
-    if (group.anchor.length === 0) {
-      leading.push(...group.notes);
+  const placed = new Map<number, TuiTimelineEntry[]>();
+  const anchors: (readonly string[])[] = [];
+  let sinceAnchor = 0;
+  for (const entry of previous) {
+    if (!isLocalSystemMessage(entry)) {
+      const identities = durableIdentities(entry);
+      if (identities.length > 0) {
+        anchors.push(identities);
+        sinceAnchor = 0;
+      } else sinceAnchor += 1;
       continue;
     }
-    const index = durable.findIndex((entry) =>
-      durableIdentities(entry).some((identity) => group.anchor.includes(identity)),
-    );
-    if (index < 0) trailing.push(...group.notes);
-    else placed.set(index, [...(placed.get(index) ?? []), ...group.notes]);
+    if (anchors.length === 0) {
+      leading.push(entry);
+      continue;
+    }
+    let position = -1;
+    for (let back = anchors.length - 1; back >= 0 && position < 0; back -= 1) {
+      const index = locate(anchors[back] ?? []);
+      if (index >= 0) position = back === anchors.length - 1 ? index + sinceAnchor : index;
+    }
+    if (position < 0) trailing.push(entry);
+    else {
+      const at = Math.min(position, durable.length - 1);
+      placed.set(at, [...(placed.get(at) ?? []), entry]);
+    }
   }
   return [
     ...leading,
