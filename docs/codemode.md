@@ -87,8 +87,8 @@ The parent may choose tools, prompt, and thinking level, but not the provider or
 
 ## Inspect subagents
 
-A process-wide `SUBAGENTS` panel stays above the composer while agents are active, including after switching sessions. Idle and completed agents collapse by default.
+A process-wide agent strip stays above the composer while agents are running, including after switching sessions. It collapses to one line and lists finished agents only on request.
 
 When a subagent reports to the current session, a notice names the agent and says when the foreground agent will see the report. The report appears in the transcript under `AGENTS`, not as user input.
 
-In `Ctrl+O`, select an agent and press Enter to inspect its frozen prompt, reasoning, assistant messages, model rounds, mailbox messages, and complete nested tool tree. Child internals never interleave into the main transcript.
+In `Ctrl+O`, select an agent in the strip or its spawn card and press Enter to open its read-only transcript: task, reasoning, assistant messages, mailbox messages, and the complete nested tool tree, with the system prompt one key away. Child internals never interleave into the main transcript.

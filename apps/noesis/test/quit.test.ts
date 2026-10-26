@@ -497,7 +497,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     expect(hasStartupNote(resized)).toBe(false);
     expect(resized).toContain("● IDLE");
     expect(resized).toContain("› message");
-    expect(resized).toContain("? help · ctrl+o inspect runs");
+    expect(resized).toContain("? help · ctrl+o navigate");
     expect(result).toEqual({ code: 0, signal: null });
   }, 10_000);
 

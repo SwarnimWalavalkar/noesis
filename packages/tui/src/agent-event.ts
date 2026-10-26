@@ -1,6 +1,7 @@
 import { createConditionalObject } from "@noesis/domain";
 import type { AgentActionEvent, AgentRuntimeEvent } from "@noesis/agent-types";
 import type { NoesisTuiAction } from "./state.ts";
+import type { TimelineEvent } from "./transcript-slice.ts";
 import { safeTerminalText } from "./theme.ts";
 /** Runtime action identities are already durable and must survive transcript hydration unchanged. */
 export function actionIdentityForView(event: AgentActionEvent): {
@@ -64,5 +65,25 @@ export function tuiActionForAgentEvent(
   if (event.status === "started") return { type: "execution-changed", execution: "thinking" };
   if (event.status === "aborted") return { type: "execution-changed", execution: "idle" };
   if (event.status === "failed") return { type: "failed", error: safeTerminalText(event.error) };
+  return undefined;
+}
+
+/** The transcript-shaping subset of a runtime event, shared by session and subagent views. */
+export function timelineEventForAgentEvent(
+  event: AgentRuntimeEvent,
+  at = Date.now(),
+): TimelineEvent | undefined {
+  if (event.type === "delta") return { type: "stream-delta", text: event.text };
+  if (event.type === "reasoning-delta") return { type: "reasoning-delta", text: event.text };
+  if (event.type === "reasoning-message") return { type: "reasoning-reconciled", text: event.text };
+  if (event.type === "tool-start" || event.type === "tool-update" || event.type === "tool-end") {
+    const action = tuiActionForAgentEvent(event, at);
+    if (
+      action?.type === "action-started" ||
+      action?.type === "action-updated" ||
+      action?.type === "action-ended"
+    )
+      return action;
+  }
   return undefined;
 }

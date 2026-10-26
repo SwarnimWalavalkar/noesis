@@ -4,10 +4,9 @@ import type {
   InteractionDispatchResult,
   InteractionSnapshot,
   NoesisRuntime,
-  RuntimeTranscriptEntry,
   TurnInteractionEvent,
 } from "@noesis/runtime";
-import type { AgentThinkingLevel, SubAgentInspection } from "@noesis/agent-types";
+import type { AgentThinkingLevel } from "@noesis/agent-types";
 export type { SubAgentInspection, SubAgentRuntimeEvent, SubAgentSummary } from "@noesis/agent-types";
 
 export type TuiInteractionCommand = InteractionCommand;
@@ -110,7 +109,7 @@ export interface TuiSkillDetail extends TuiSkillSummary {
 }
 
 export interface TuiExecutionSummary {
-  readonly kind: "codemode" | "workflow" | "subagent";
+  readonly kind: "codemode" | "workflow";
   readonly executionId: string;
   readonly label: string;
   readonly status: "running" | "paused" | "completed" | "failed" | "cancelled" | "interrupted";
@@ -169,11 +168,6 @@ export interface TuiExecutionDetail extends TuiExecutionSummary {
   readonly stderrArtifact?: TuiExecutionArtifact;
   readonly result?: string;
   readonly error?: string;
-  readonly provider?: string;
-  readonly model?: string;
-  readonly thinkingLevel?: string;
-  readonly systemPrompt?: string;
-  readonly prompt?: string;
   readonly phases?: readonly {
     readonly index: number;
     readonly name: string;
@@ -181,8 +175,6 @@ export interface TuiExecutionDetail extends TuiExecutionSummary {
     readonly executionId?: string;
     readonly error?: string;
   }[];
-  readonly subAgent?: SubAgentInspection;
-  readonly transcript?: readonly RuntimeTranscriptEntry[];
 }
 
 export interface TuiLearningActivitySummary {

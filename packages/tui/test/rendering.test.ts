@@ -21,7 +21,7 @@ import {
   renderMessageBlock,
   renderNoesisState,
   renderRichText,
-  renderSubagents,
+  renderAgentStrip,
   safeTerminalText,
   sanitizeEditorText,
   streamingFrameDelay,
@@ -504,132 +504,158 @@ describe("Noesis transcript rendering", () => {
     expect(summary).toMatchObject({ outcome: "2 items" });
   });
 
-  test("hides historical subagents until the selected session has spawned one", () => {
-    const historical = subAgentSummary("old-agent", "suspended", "Previous session work");
+  test("shows the agent strip only while agents run, as one collapsed line", () => {
+    const base: NoesisTuiState = {
+      ...initialTuiState("fake"),
+      trailId: "session-foreground",
+      provider: "test-provider",
+      model: "test-model",
+      agentClock: Date.parse("2026-08-31T00:01:42.000Z"),
+    };
+    expect(
+      renderAgentStrip({ ...base, subAgents: [subAgentSummary("old", "idle", "earlier work")] }, 120, 30),
+    ).toEqual([]);
+    const running: NoesisTuiState = {
+      ...base,
+      subAgents: [
+        subAgentSummary("agent-a", "running", "capability-lifecycle"),
+        subAgentSummary("agent-b", "running", "capability-runtime"),
+        subAgentSummary("agent-c", "idle", "capability-data-model"),
+      ],
+    };
+    const collapsed = renderAgentStrip(running, 120, 30).map(stripAnsi);
+    expect(collapsed).toHaveLength(1);
+    expect(collapsed[0]).toContain("2 agents running · capability-lifecycle 1:42 · capability-runtime 1:42");
+    expect(collapsed[0]).toContain("ctrl+o");
+    expect(collapsed[0]).not.toContain("capability-data-model");
+    // The route repeats the session's own route, so it is left out.
+    expect(collapsed[0]).not.toContain("test-model");
+  });
+
+  test("expands the strip into one row per running agent with its live activity", () => {
+    const state: NoesisTuiState = {
+      ...initialTuiState("fake"),
+      trailId: "session-foreground",
+      provider: "test-provider",
+      model: "test-model",
+      agentClock: Date.parse("2026-08-31T00:00:42.000Z"),
+      agentStrip: { expanded: true, allSessions: false },
+      subAgentPhases: { "agent-a": "shell.run rg capability" },
+      subAgents: [
+        subAgentSummary("agent-a", "running", "lifecycle"),
+        { ...subAgentSummary("agent-b", "running", "runtime"), route: { provider: "other", model: "flash" } },
+      ],
+    };
+    const lines = renderAgentStrip(state, 120, 30).map(stripAnsi);
+    expect(lines[0]).toContain("AGENTS · 2 running");
+    expect(lines[1]).toContain("● lifecycle  0:42 · shell.run rg capability");
+    expect(lines[2]).toContain("● runtime    0:42 · starting… · other/flash");
+  });
+
+  test("Ctrl+O focuses the strip, Up continues into the transcript, and Down returns", () => {
+    let state: NoesisTuiState = {
+      ...initialTuiState("fake"),
+      trailId: "session-foreground",
+      timeline: [
+        { kind: "action", actionId: "execute-1", name: "execute", status: "completed" },
+        { kind: "action", actionId: "execute-2", name: "execute", status: "completed" },
+      ],
+      subAgents: [
+        subAgentSummary("agent-a", "running", "lifecycle"),
+        subAgentSummary("agent-b", "running", "runtime"),
+        subAgentSummary("agent-c", "idle", "data-model"),
+        { ...subAgentSummary("agent-old", "suspended", "old-scout"), originSessionId: "session-earlier" },
+      ],
+    };
+    state = reduceTui(state, { type: "navigation-entered" });
+    expect(state.subAgentCursor).toBe("agent-a");
+    expect(stripAnsi(inputModeLine(state, 80))).toContain("NAVIGATE");
+    state = reduceTui(state, { type: "navigation-moved", direction: "next" });
+    expect(state.subAgentCursor).toBe("agent-b");
+    // A focused strip adds this session's finished agents; `a` widens it to every session's history.
+    const scoped = renderAgentStrip(state, 120, 30).map(stripAnsi).join("\n");
+    expect(scoped).toContain("AGENTS · this session · 2 running · 1 finished");
+    expect(scoped).toContain("✓ data-model");
+    expect(scoped).not.toContain("old-scout");
+    state = reduceTui(state, { type: "agent-strip-scope-toggled" });
+    const everything = renderAgentStrip(state, 120, 30).map(stripAnsi).join("\n");
+    expect(everything).toContain("AGENTS · all sessions");
+    expect(everything).toMatch(/old-scout .*other session/u);
+    state = reduceTui(state, { type: "agent-strip-scope-toggled" });
+    state = reduceTui(state, { type: "navigation-moved", direction: "previous" });
+    state = reduceTui(state, { type: "navigation-moved", direction: "previous" });
+    expect(state.subAgentCursor).toBeUndefined();
+    expect(state.actionCursor).toBe("execute-2");
+    state = reduceTui(state, { type: "navigation-moved", direction: "previous" });
+    expect(state.actionCursor).toBe("execute-1");
+    state = reduceTui(reduceTui(state, { type: "navigation-moved", direction: "next" }), {
+      type: "navigation-moved",
+      direction: "next",
+    });
+    expect(state.actionCursor).toBeUndefined();
+    expect(state.subAgentCursor).toBe("agent-a");
+  });
+
+  test("Ctrl+O ignores other sessions' history but reaches this session's finished agents", () => {
     const fresh: NoesisTuiState = {
       ...initialTuiState("fake"),
       trailId: "fresh-session",
-      subAgents: [historical],
+      subAgents: [subAgentSummary("old-agent", "suspended", "Previous session work")],
     };
-    expect(renderSubagents(fresh, 120, 30)).toEqual([]);
-    expect(
-      reduceTui(fresh, { type: "subagent-cursor-moved", direction: "previous" }).subAgentCursor,
-    ).toBeUndefined();
-    expect(reduceTui(fresh, { type: "inspection-navigation-toggled" }).subAgentCursor).toBeUndefined();
+    const ignored = reduceTui(fresh, { type: "navigation-entered" });
+    expect(ignored.subAgentCursor).toBeUndefined();
+    expect(ignored.actionCursor).toBeUndefined();
 
-    const active = reduceTui(fresh, {
-      type: "subagents-hydrated",
-      subAgents: [
-        historical,
-        { ...subAgentSummary("new-agent", "running", "Current work"), originSessionId: "fresh-session" },
-      ],
-    });
-    expect(renderSubagents(active, 120, 30).join("\n")).toContain("SUBAGENTS · 2");
-    const inspecting = reduceTui(
-      reduceTui(active, { type: "subagent-cursor-moved", direction: "previous" }),
-      { type: "subagent-cursor-moved", direction: "previous" },
+    const own = reduceTui(
+      {
+        ...fresh,
+        subAgents: [
+          ...fresh.subAgents,
+          {
+            ...subAgentSummary("own-agent", "idle", "This session's work"),
+            originSessionId: "fresh-session",
+          },
+        ],
+      },
+      { type: "navigation-entered" },
     );
-    expect(inspecting.subAgentCursor).toBe("old-agent");
-    expect(renderSubagents(inspecting, 120, 30).join("\n")).toContain("Previous session work");
-    expect(renderSubagents({ ...active, trailId: "another-session" }, 120, 30)).toEqual([]);
-    const settled = {
-      ...active,
-      subAgents: active.subAgents.map((agent) => ({ ...agent, status: "suspended" as const })),
-    };
-    expect(renderSubagents(settled, 120, 30).join("\n")).toContain("SUBAGENTS · 2");
-    expect(active.subAgents).toHaveLength(2);
+    expect(own.subAgentCursor).toBe("own-agent");
+    const rows = renderAgentStrip(own, 120, 30).map(stripAnsi).join("\n");
+    expect(rows).toContain("This session's work");
+    expect(rows).not.toContain("Previous session work");
   });
 
-  test("keeps process subagents fixed near the composer and their child tools out of the transcript", () => {
-    const execute = {
-      actionId: "execute-1",
-      name: "execute",
+  test("renders a spawn call as a card for the agent it started, and names the agent a wait joins", () => {
+    const spawn = {
+      kind: "action" as const,
+      actionId: "spawn-1",
+      parentActionId: "execute-1",
+      name: "agents.spawn",
+      status: "completed" as const,
+      input: { name: "lifecycle", prompt: "Map the lifecycle." },
+      output: { agentId: "agent-a", taskId: "task-agent-a", name: "lifecycle", status: "accepted" },
+    };
+    const wait = {
+      kind: "action" as const,
+      actionId: "wait-1",
+      parentActionId: "execute-1",
+      name: "agents.wait",
       status: "running" as const,
+      input: { taskId: "task-agent-a" },
     };
     const state: NoesisTuiState = {
       ...initialTuiState("fake"),
-      timeline: [{ kind: "action", ...execute }],
-      trailId: "session-foreground",
-      subAgents: [subAgentSummary("agent-inspect", "running", "Inspect the package metadata.")],
+      timeline: [{ kind: "action", actionId: "execute-1", name: "execute", status: "running" }, spawn, wait],
+      subAgents: [subAgentSummary("agent-a", "running", "lifecycle")],
     };
-    const transcript = stripAnsi(renderTranscriptLines(state, 72).join("\n"));
-    expect(transcript).toContain("execute");
-    expect(transcript).not.toContain("subagent");
-    expect(transcript).not.toContain("files.read");
-    expect(transcript).not.toContain("package.json");
-
-    const fixed = stripAnsi(renderSubagents(state, 72, 30).join("\n"));
-    expect(fixed).toContain("SUBAGENTS · 1");
-    expect(fixed).toContain("Inspect the package metadata.");
-    expect(fixed).toContain("running · test-provider");
-
-    const inspecting: NoesisTuiState = {
-      ...state,
-      subAgentCursor: "agent-inspect",
-    };
-    const selectedPanel = stripAnsi(renderSubagents(inspecting, 72, 30).join("\n"));
-    expect(selectedPanel).toContain("▸ ● Inspect the package metadata.");
-    expect(stripAnsi(renderTranscriptLines(inspecting, 72).join("\n"))).not.toContain("files.read");
-  });
-
-  test("shows only active subagents until Ctrl+O reveals the selected run", () => {
-    const state: NoesisTuiState = {
-      ...initialTuiState("fake"),
-      timeline: [{ kind: "action", actionId: "execute-1", name: "execute", status: "running" }],
-      trailId: "session-foreground",
-      subAgents: [
-        subAgentSummary("agent-running", "running", "Watch the active migration."),
-        subAgentSummary("agent-completed", "idle", "Review the finished migration."),
-      ],
-    };
-
-    const collapsed = stripAnsi(renderSubagents(state, 120, 30).join("\n"));
-    expect(collapsed).toContain("SUBAGENTS · 2");
-    expect(collapsed).toContain("1 running subagent · 1 idle subagent · ctrl+o expand");
-    expect(collapsed).toContain("Watch the active migration.");
-    expect(collapsed).not.toContain("completed subagent");
-    expect(collapsed).not.toContain("Review the finished migration.");
-
-    const inspecting: NoesisTuiState = {
-      ...state,
-      subAgentCursor: "agent-completed",
-    };
-    const expanded = stripAnsi(renderSubagents(inspecting, 120, 30).join("\n"));
-    expect(expanded).toContain("SUBAGENTS · 2");
-    expect(expanded).toContain("1 running subagent · 1 idle subagent");
-    expect(expanded).toContain("enter inspect · tab transcript");
-    expect(expanded).toContain("Watch the active migration.");
-    expect(expanded).toContain("▸ ✓ Review the finished migration.");
-  });
-
-  test("keeps settled process subagents collapsed until Ctrl+O selects the actor", () => {
-    const state: NoesisTuiState = {
-      ...initialTuiState("fake"),
-      timeline: [
-        { kind: "action", actionId: "execute-earlier", name: "execute", status: "completed" },
-        { kind: "action", actionId: "execute-latest", name: "execute", status: "completed" },
-        {
-          kind: "action",
-          actionId: "saved-script",
-          parentActionId: "execute-latest",
-          name: "programs.run",
-          status: "completed",
-        },
-      ],
-      subAgents: [subAgentSummary("agent-earlier", "idle", "Inspect the earlier run.")],
-      trailId: "session-foreground",
-    };
-
-    expect(stripAnsi(renderSubagents(state, 120, 30).join("\n"))).not.toContain("Inspect the earlier run.");
-    expect(
-      stripAnsi(renderSubagents({ ...state, actionCursor: "execute-latest" }, 120, 30).join("\n")),
-    ).not.toContain("Inspect the earlier run.");
-
-    const inspectingEarlier = stripAnsi(
-      renderSubagents({ ...state, subAgentCursor: "agent-earlier" }, 120, 30).join("\n"),
-    );
-    expect(inspectingEarlier).toContain("SUBAGENTS · 1");
-    expect(inspectingEarlier).toContain("Inspect the earlier run.");
+    const running = renderTranscriptLines(state, 100).map(stripAnsi);
+    expect(running).toContainEqual(expect.stringContaining("● lifecycle  running"));
+    expect(running).toContainEqual(expect.stringContaining("agents.wait  lifecycle"));
+    const settled = renderTranscriptLines(
+      { ...state, subAgents: [subAgentSummary("agent-a", "idle", "lifecycle")] },
+      100,
+    ).map(stripAnsi);
+    expect(settled).toContainEqual(expect.stringContaining("✓ lifecycle  done · 0:02"));
   });
 
   test("keeps the selected action inside a bounded transcript navigation window", () => {
@@ -709,7 +735,7 @@ describe("Noesis transcript rendering", () => {
     expect(lines[1]).toBe('│ Task update from subagent "atlas" (subagent_1):');
     expect(lines.join("\n")).not.toContain("system-reminder");
     expect(lines.join("\n")).not.toContain("YOU");
-    expect(lines.at(-1)).toMatch(/^│ … \d+ more lines · Ctrl\+O inspects agents$/u);
+    expect(lines.at(-1)).toMatch(/^│ … \d+ more lines · ctrl\+o opens the agent$/u);
     expect(lines).toHaveLength(10);
     state = reduceTui(state, { type: "steer-delivered", text: "typed by the user" });
     expect(state.timeline.at(-1)).toEqual({ kind: "message", role: "user", text: "typed by the user" });
@@ -1326,10 +1352,10 @@ describe("Noesis transcript rendering", () => {
     expect(bottom[2]).toContain("? help");
   });
 
-  test("labels subagent navigation as inspect mode while the editor is paused", () => {
+  test("labels agent navigation as navigate mode while the editor is paused", () => {
     const state = { ...initialTuiState("fake"), subAgentCursor: "agent-live" };
 
-    expect(inputModeLine(state, 90)).toContain("INSPECT");
+    expect(inputModeLine(state, 90)).toContain("NAVIGATE");
     expect(inputModeLine(state, 90)).not.toContain("› message");
   });
 });

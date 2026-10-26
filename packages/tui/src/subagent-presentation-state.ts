@@ -1,4 +1,6 @@
+import { createConditionalObject } from "@noesis/domain";
 import type { AgentRuntimeEvent, SubAgentSummary } from "@noesis/agent-types";
+import { summarizeNestedAction } from "./action-summary.ts";
 
 export function retainActiveSubAgentPhases(
   agents: readonly SubAgentSummary[],
@@ -14,18 +16,29 @@ export function retainActiveSubAgentPhases(
   );
 }
 
+/** Names what a running agent is doing right now, e.g. `shell.run rg capability`. */
+function toolPhase(event: Extract<AgentRuntimeEvent, { readonly type: "tool-start" }>): string {
+  const summary = summarizeNestedAction(
+    createConditionalObject({ actionId: event.actionId, name: event.name, status: "running" } as const)
+      .addOptional(event.input === undefined ? undefined : { input: event.input })
+      .finish(),
+  );
+  return summary.subject ? `${summary.name} ${summary.subject}` : summary.name;
+}
+
 export function reduceSubAgentPhase(
   phases: Readonly<Record<string, string>>,
   agentId: string,
   event: AgentRuntimeEvent,
 ): Readonly<Record<string, string>> {
+  if (event.type === "tool-update") return phases;
   const phase =
     event.type === "reasoning-delta" || event.type === "reasoning-message"
       ? "thinking"
       : event.type === "delta" || event.type === "assistant-message"
         ? "responding"
-        : event.type === "tool-start" || event.type === "tool-update"
-          ? `tool · ${event.name}`
+        : event.type === "tool-start"
+          ? toolPhase(event)
           : event.type === "tool-end"
             ? "working"
             : event.type === "status" && event.status === "started"

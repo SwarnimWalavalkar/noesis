@@ -461,45 +461,27 @@ describe("run inspector panel", () => {
     expect(body).not.toContain("RESULT");
   });
 
-  test("invalidates prepared subagent rows when a live event arrives", () => {
-    const action = {
-      actionId: "subagent:agent-live",
-      name: "subagent",
-      status: "running" as const,
-      input: {},
-    };
+  test("opens a run from the subagent transcript that is being viewed", () => {
     let state = reduceTui(initialTuiState("fake"), {
-      type: "inspector-opened",
-      actionId: action.actionId,
-      syntheticAction: action,
+      type: "agent-view-opened",
+      agentId: "agent-live",
+      parents: [],
     });
-    state = reduceTui(state, {
-      type: "inspector-loaded",
-      actionId: action.actionId,
-      detail: {
-        kind: "subagent",
-        executionId: "agent-live",
-        label: "subagent",
-        status: "running",
-        toolNames: [],
-        callCount: 0,
-        startedAt: "2026-08-31T00:00:00.000Z",
-      },
-    });
-    expect(renderRunInspectorFrame(state, 88, 20).rows.join("\n")).not.toContain("fresh reasoning");
-
     state = reduceTui(state, {
       type: "subagent-live-event",
-      actionId: action.actionId,
+      agentId: "agent-live",
       event: {
-        type: "live",
-        agentId: "agent-live",
-        taskId: "task-live",
-        event: { type: "reasoning-delta", text: "fresh reasoning" },
+        type: "tool-start",
+        actionId: "child-read",
+        name: "files.read",
+        input: { path: "src/child.ts" },
       },
     });
-
-    expect(renderRunInspectorFrame(state, 88, 20).rows.join("\n")).toContain("fresh reasoning");
+    state = reduceTui(state, { type: "inspector-opened", actionId: "child-read" });
+    expect(state.actionCursor).toBeUndefined();
+    const body = renderRunInspectorFrame(state, 88, 20).rows.join("\n");
+    expect(body).toContain("files.read");
+    expect(body).not.toContain("This run is no longer available.");
   });
   test("keeps a failed action's exact structured output in raw mode", () => {
     const failed = stateWithRun({ failed: true });
