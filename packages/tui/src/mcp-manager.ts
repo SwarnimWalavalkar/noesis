@@ -121,7 +121,7 @@ export function createMcpManagerOverlay(options: CreateMcpManagerOverlayOptions)
     target?: Pick<TuiMcpServerSummary, "scope" | "name">,
   ): Promise<void> => {
     if (!options.mutationsEnabled()) {
-      notice = "MCP changes wait until the turn finishes.";
+      notice = "Try that again when the turn finishes.";
       render();
       return;
     }

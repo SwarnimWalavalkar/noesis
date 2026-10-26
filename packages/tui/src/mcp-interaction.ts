@@ -566,7 +566,7 @@ function createFormOverlay(
             current?.type === "multiselect"
               ? "↑/↓ move · space toggle · enter continue · ctrl+d decline · esc cancel"
               : choices.length > 0
-                ? "↑/↓ select · enter continue · ctrl+d decline · esc cancel"
+                ? "↑/↓ move · enter continue · ctrl+d decline · esc cancel"
                 : "enter continue · ctrl+d decline · esc cancel",
           )}`,
           outerWidth,

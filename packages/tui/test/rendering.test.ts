@@ -796,7 +796,7 @@ describe("Noesis transcript rendering", () => {
       "atlas finished · Noesis sees it with your next message",
     );
     expect(foregroundMessageNotice(event("trail_other", "completion"), state({}))).toBe(
-      "atlas finished · reported to its session",
+      "atlas finished · reported to the asking session",
     );
   });
 

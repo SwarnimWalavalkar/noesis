@@ -203,19 +203,18 @@ export function mcpManagerHint(input: {
       ? "Please wait · esc cancel operation"
       : "Please wait for the operation to finish";
   if (!input.mutationsEnabled) return "Read-only while the active turn finishes · esc back";
-  if (input.screenKind === "list")
-    return "↑/↓ select · enter open · l local · r remote · g reload · esc close";
+  if (input.screenKind === "list") return "↑/↓ move · enter open · l local · r remote · g reload · esc close";
   if (input.screenKind === "server") {
     if (input.detail && mcpOAuthActionsAvailable(input.detail, true))
-      return "↑/↓ select · enter open · a auth · l logout · e enable/disable · r reconnect · d edit · x remove · esc back";
+      return "↑/↓ move · enter open · a auth · l logout · e enable/disable · r reconnect · d edit · x remove · esc back";
     return input.detail?.shadowed || input.detail?.enabled === false
-      ? "↑/↓ select · enter open · e enable/disable · d edit · x remove · esc back"
-      : "↑/↓ select · enter open · e enable/disable · r reconnect · d edit · x remove · esc back";
+      ? "↑/↓ move · enter open · e enable/disable · d edit · x remove · esc back"
+      : "↑/↓ move · enter open · e enable/disable · r reconnect · d edit · x remove · esc back";
   }
-  if (input.screenKind === "collection") return "↑/↓ select · enter inspect · esc back";
+  if (input.screenKind === "collection") return "↑/↓ move · enter inspect · esc back";
   if (input.screenKind === "text") return "↑/↓ pgup/pgdn scroll · esc back";
   if (input.screenKind === "input") return "enter continue · esc back";
-  if (input.screenKind === "choice") return "↑/↓ select · 1-9 jump · enter continue · esc back";
+  if (input.screenKind === "choice") return "↑/↓ move · 1-9 jump · enter continue · esc back";
   return "enter / y confirm · esc / n cancel";
 }
 export function mcpServerOptions(

@@ -446,7 +446,7 @@ function identityLines(
       ? "loading the saved run record…"
       : detail
         ? undefined
-        : "live call · no saved run record";
+        : "saved run details unavailable · showing the call";
   return [
     styled(colorEnabled, ANSI.dim, parts.join(" · ")),
     ...(note ? [styled(colorEnabled, ANSI.dim, note)] : []),

@@ -510,7 +510,7 @@ describe("run inspector panel", () => {
   });
   test("says when no durable record backs the panel", () => {
     const body = render(stateWithRun()).join("\n");
-    expect(body).toContain("live call · no saved run record");
+    expect(body).toContain("saved run details unavailable · showing the call");
     expect(body).not.toContain("PROVENANCE");
   });
   test("shortens digests so provenance stays on one row each", () => {

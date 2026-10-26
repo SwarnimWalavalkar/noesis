@@ -334,7 +334,7 @@ export function createContextInspector(options: {
                 ? detail && selected?.label === "Tools"
                   ? `↑/↓ pgup/pgdn scroll · s ${schemas ? "hide" : "show"} schemas · esc back`
                   : "↑/↓ pgup/pgdn scroll · esc back"
-                : "↑/↓ select · enter inspect · ? details · r refresh · esc",
+                : "↑/↓ move · enter inspect · ? details · r refresh · esc",
             ),
             "╰" + "─".repeat(width - 2) + "╯",
           ];

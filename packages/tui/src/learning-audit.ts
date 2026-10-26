@@ -524,8 +524,8 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     const failed = failedCount() > 0 ? " · x failed" : "";
     return navHint(
       wideLayout
-        ? `↑/↓ · enter open · tab details · a all · f group · s session${failed} · r refresh · esc`
-        : `↑/↓ · enter open · a all · f group · s session${failed} · r refresh · esc`,
+        ? `↑/↓ move · pgup/pgdn scroll · enter open · tab details · a all · f group · s session${failed} · r refresh · esc`
+        : `↑/↓ move · pgup/pgdn scroll · enter open · a all · f group · s session${failed} · r refresh · esc`,
     );
   };
 
@@ -542,14 +542,14 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     const stops = record ? interactableStops(record) : [];
     const navigation =
       detailFocus === "evidence"
-        ? `↑/↓ · enter ${evidenceExpanded ? "hides" : "expands"} · tab next · space raw ·`
+        ? `↑/↓ move · pgup/pgdn scroll · enter ${evidenceExpanded ? "hides" : "expands"} · tab next · space raw ·`
         : detailFocus === "inputs"
-          ? `↑/↓ · enter ${inputsExpanded ? "hides" : "expands"} · tab next · space raw ·`
+          ? `↑/↓ move · pgup/pgdn scroll · enter ${inputsExpanded ? "hides" : "expands"} · tab next · space raw ·`
           : detailFocus === "related"
-            ? "↑/↓ · enter open · tab next · space raw ·"
+            ? "↑/↓ move · pgup/pgdn scroll · enter open · tab next · space raw ·"
             : stops.length > 0
-              ? "↑/↓ · tab next · space raw ·"
-              : "↑/↓ · space raw ·";
+              ? "↑/↓ move · pgup/pgdn scroll · tab next · space raw ·"
+              : "↑/↓ move · pgup/pgdn scroll · space raw ·";
     return `${navHint(navigation)}${managed} ${navHint("esc")}`;
   };
 

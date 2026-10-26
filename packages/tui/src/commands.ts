@@ -383,7 +383,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
       return true;
     }
     if (!runtime.inspectSkill) {
-      publishInspector("Skill details isn't available here.");
+      publishInspector("Skill details aren't available here.");
       return true;
     }
     const skill = await runtime.inspectSkill(name);
@@ -432,7 +432,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
       return true;
     }
     if (!runtime.inspectProgram) {
-      publishInspector("Program details isn't available here.");
+      publishInspector("Program details aren't available here.");
       return true;
     }
     const program = await runtime.inspectProgram(mode, name);
@@ -494,7 +494,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
       return true;
     }
     if (!runtime.inspectExecution) {
-      publishInspector("Run details isn't available here.");
+      publishInspector("Run details aren't available here.");
       return true;
     }
     const run = await runtime.inspectExecution(trailId, executionId);
