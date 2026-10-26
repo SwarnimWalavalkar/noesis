@@ -123,3 +123,55 @@ export function subAgentTimelineFromRuntime(
     return { ...entry, role: "user", text: entry.text.slice(header[0].length) };
   });
 }
+
+/** Identities an entry keeps across a durable reload; an admitted prompt is also known by its turn. */
+function durableIdentities(entry: TuiTimelineEntry): readonly string[] {
+  if (entry.kind === "action") return [`action:${entry.actionId}`];
+  if (entry.kind === "reasoning") return entry.reasoningId ? [`reasoning:${entry.reasoningId}`] : [];
+  return [
+    ...(entry.messageId ? [`message:${entry.messageId}`] : []),
+    ...(entry.role === "user" && entry.turnId ? [`prompt:${entry.turnId}`] : []),
+  ];
+}
+
+/**
+ * Re-inserts UI-only notes into a reloaded transcript where they were shown: after the nearest
+ * earlier entry the reload still contains. A note with no such entry keeps its place at the top.
+ */
+export function withLocalNotes(
+  durable: readonly TuiTimelineEntry[],
+  previous: readonly TuiTimelineEntry[],
+): readonly TuiTimelineEntry[] {
+  const groups: { anchor: readonly string[]; notes: TuiTimelineEntry[] }[] = [];
+  let anchor: readonly string[] = [];
+  for (const entry of previous) {
+    if (isLocalSystemMessage(entry)) {
+      const last = groups.at(-1);
+      if (last && last.anchor === anchor) last.notes.push(entry);
+      else groups.push({ anchor, notes: [entry] });
+      continue;
+    }
+    const identities = durableIdentities(entry);
+    if (identities.length > 0) anchor = identities;
+  }
+  if (groups.length === 0) return durable;
+  const placed = new Map<number, TuiTimelineEntry[]>();
+  const leading: TuiTimelineEntry[] = [];
+  const trailing: TuiTimelineEntry[] = [];
+  for (const group of groups) {
+    if (group.anchor.length === 0) {
+      leading.push(...group.notes);
+      continue;
+    }
+    const index = durable.findIndex((entry) =>
+      durableIdentities(entry).some((identity) => group.anchor.includes(identity)),
+    );
+    if (index < 0) trailing.push(...group.notes);
+    else placed.set(index, [...(placed.get(index) ?? []), ...group.notes]);
+  }
+  return [
+    ...leading,
+    ...durable.flatMap((entry, index) => [entry, ...(placed.get(index) ?? [])]),
+    ...trailing,
+  ];
+}

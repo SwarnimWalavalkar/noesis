@@ -7,11 +7,11 @@ import { timelineEventForAgentEvent } from "./agent-event.ts";
 import type { TuiExecutionDetail } from "./runtime-port.ts";
 import { reduceSubAgentPhase, retainActiveSubAgentPhases } from "./subagent-presentation-state.ts";
 import {
-  isLocalSystemMessage,
   lastContentEntryIndex,
   subAgentTimelineFromRuntime,
   tuiTimelineFromRuntime,
   tuiUserMessage,
+  withLocalNotes,
 } from "./timeline-adapter.ts";
 import { numberField } from "./record-fields.ts";
 import {
@@ -659,10 +659,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       if (state.trailId !== action.trailId) return state;
       return {
         ...state,
-        timeline: [
-          ...tuiTimelineFromRuntime(action.transcript),
-          ...state.timeline.filter(isLocalSystemMessage),
-        ],
+        timeline: withLocalNotes(tuiTimelineFromRuntime(action.transcript), state.timeline),
         expandedActionIds: NO_EXPANDED_ACTIONS,
       };
     case "prompt-submitted": {

@@ -939,6 +939,53 @@ describe("Noesis TUI reducer", () => {
     expect(state.inspector).toBeUndefined();
   });
 
+  test("keeps a UI-only note where it was shown when the transcript reloads after a turn", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "trail-selected",
+      trail: {
+        trailId: "trail-notes",
+        title: "Noesis session",
+        status: "idle",
+        provider: "openai-codex",
+        model: "gpt-6-luna",
+        thinkingLevel: "medium",
+        runtime: "pi",
+        turns: [],
+        capabilityVersions: {},
+      },
+    });
+    state = reduceTui(state, { type: "system-message", text: "Route changed." });
+    state = reduceTui(state, { type: "prompt-submitted", text: "hey there" });
+    state = reduceTui(state, { type: "stream-delta", text: "Hello!" });
+    state = reduceTui(state, {
+      type: "transcript-hydrated",
+      trailId: "trail-notes",
+      transcript: [
+        {
+          kind: "message",
+          messageId: "m-1",
+          role: "user",
+          text: "hey there",
+          turnId: "turn-1",
+          createdAt: "2026-10-26T00:00:00.000Z",
+        },
+        {
+          kind: "message",
+          messageId: "m-2",
+          role: "assistant",
+          text: "Hello!",
+          turnId: "turn-1",
+          createdAt: "2026-10-26T00:00:01.000Z",
+        },
+      ],
+    });
+    expect(state.timeline.map((entry) => (entry.kind === "message" ? entry.text : entry.kind))).toEqual([
+      "Route changed.",
+      "hey there",
+      "Hello!",
+    ]);
+  });
+
   test("tracks an active subagent's live phase without requiring its inspector", () => {
     let state = reduceTui(initialTuiState("fake"), {
       type: "subagents-hydrated",
