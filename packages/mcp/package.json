@@ -7,9 +7,9 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
     "@noesis/domain": "workspace:*",
     "@noesis/tools": "workspace:*",
-    "zod": "4.4.3"
+    "zod": "4.6.7"
   }
 }
