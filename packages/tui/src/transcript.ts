@@ -245,8 +245,9 @@ export function renderAgentActionBlock(
   if (width <= 0) return [];
   const colorEnabled = options.colorEnabled ?? false;
   const depth = actionDepth(action, actions);
+  // The selection marker owns its own column, so a selected row never touches its status glyph.
   const marker = options.selected ? "▸" : " ";
-  const indent = `${marker}${"  ".repeat(depth)}`;
+  const indent = `${marker} ${"  ".repeat(depth)}`;
   const summary = summarizeAction(action, childActions(actions, action.actionId));
   const card = options.agentCard;
   const glyphWeight = (card ? card.pulseDim : action.status === "running" && options.pulseDim)

@@ -398,7 +398,7 @@ def main() -> int:
                         and sent_exit
                         and b"Controlled Pi completion for:" in output
                         and "● IDLE".encode() in output
-                        and b"ctx   0%" in output
+                        and b"ctx 0%" in output
                     ):
                         os.write(master, b"/quit\n")
                         action = "prompt-selected"
@@ -451,8 +451,8 @@ def main() -> int:
                         and sent_exit
                         and last_write_label == "genuine-enter"
                         and "● IDLE".encode() in output
-                        and b"ctx   0%" in output
-                        and b"1t" in output
+                        and b"ctx 0%" in output
+                        and b"1 turn" in output
                         and b"MIXED-END" in output
                     ):
                         os.write(sys.stdout.fileno(), b"\n__NOESIS_MIXED_RESIZED__\n")

@@ -227,7 +227,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
 
     expect(output).toContain("███╗   ██╗ ██████╗");
     expect(hasStartupNote(output)).toBe(true);
-    expect(output).toContain("ctx   —");
+    expect(output).toContain("ctx —");
 
     expect(output).toContain("● IDLE");
     expect(result).toEqual({ code: 0, signal: null });
@@ -361,7 +361,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
 
     expect(output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u);
     expect(output).toContain("Controlled Pi completion for: show the polished shell");
-    expect(output).toContain("ctx   0%");
+    expect(output).toContain("ctx 0%");
     expect(result).toEqual({ code: 0, signal: null });
   }, 10_000);
 

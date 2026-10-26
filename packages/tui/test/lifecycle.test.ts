@@ -1387,9 +1387,9 @@ describe("Noesis TUI lifecycle", () => {
     expect(terminal.output).not.toContain("ACTIONS");
     expect(terminal.output).toContain("inspect");
     releaseTool?.();
-    await vi.waitFor(() => expect(terminal.output).toContain("ctx  25%"));
+    await vi.waitFor(() => expect(terminal.output).toContain("ctx 25%"));
     await vi.waitFor(() => expect(terminal.output).toContain("grounded answer"));
-    await vi.waitFor(() => expect(terminal.output).toContain("1t"));
+    await vi.waitFor(() => expect(terminal.output).toContain("1 turn"));
     expect(terminal.output.lastIndexOf("✓ inspect")).toBeLessThan(
       terminal.output.lastIndexOf("grounded answer"),
     );
@@ -1962,7 +1962,7 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("use a tool\r");
     await vi.waitFor(() => expect(terminal.output).toContain("authoritative final answer"));
-    await vi.waitFor(() => expect(terminal.output).toContain("1t"));
+    await vi.waitFor(() => expect(terminal.output).toContain("1 turn"));
     emitLate?.();
     await new Promise<void>((resolve) => setTimeout(resolve, 30));
 

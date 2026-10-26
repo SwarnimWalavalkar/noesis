@@ -124,3 +124,13 @@ Built on 2026-10-26. Where the build departed from the decisions above, this rec
 - **Strip scope.** `listSubAgents` returns every retained agent in the project, so a focused strip with nothing running listed dozens of agents from earlier processes. The focused strip now lists running agents from any session plus this session's agents and their descendants. `a` widens it to all sessions and marks other-session rows. `Ctrl+O` does nothing only when the session has no transcript actions, no agents of its own, and no running agent in any session.
 - **Note placement.** A transcript reload appended UI-only notes after every durable entry, so a route-change note jumped below the first exchange. Notes are now anchored to the nearest earlier entry that survives the reload (`withLocalNotes`).
 - **Notes versus notifications.** Feedback about the user's last attempt moved from transcript notes to the notification line: blocked or session-changing commands while busy, idle abort or queue, `/queue` usage, idle steer, composer and attachment problems, external editor results, and unavailable managers. An unconfirmed steer stays a note because it records held state. Notifications clear on the next non-Escape key, and one-line ones after six seconds (`notification-expiry.ts`).
+
+### Open issues found in the UI audit
+
+These were noted on 2026-10-26 and are deferred because each needs a design decision or a runtime change.
+
+1. **Navigation window.** `ctrl+o` swaps the transcript's visible tail for a window around the selected action. When the selection is not near the bottom this leaves blank rows and shows some blocks twice on screen. Navigation needs a real scrolling viewport.
+2. **Structured collaboration messages.** `AGENTS` blocks show the runtime's reminder text, including agent and task IDs (`Task update from subagent "x" (subagent_…)`, `Task task_… completed.`, `Result:`). With structured sender, task, and status on the message, the block could read `↳ data-model finished` and open the agent.
+3. **Structured mailbox entries in child transcripts.** The child view finds an agent's task by parsing the runtime's `[sender → recipient]` header. The runtime should expose sender and recipient on transcript messages instead.
+4. **Input focus model.** Navigation pauses the composer. Any change should be systemic rather than specific to one mode.
+5. **Execute rows.** A failed `execute` row says `failed` without the reason's first line, and `skills.load`-only `execute` calls appear as separate rows that add little.

@@ -75,10 +75,10 @@ export function formatContextUsage(usage: TuiContextUsage | undefined): {
   readonly percent: string;
   readonly tokens?: string;
 } {
-  if (!usage || usage.contextWindow <= 0 || usage.usedTokens < 0) return { percent: "ctx   —" };
+  if (!usage || usage.contextWindow <= 0 || usage.usedTokens < 0) return { percent: "ctx —" };
   const percent = Math.min(100, Math.max(0, Math.round((usage.usedTokens / usage.contextWindow) * 100)));
   return {
-    percent: `ctx ${usage.accuracy === "estimated" ? "~" : " "}${String(percent).padStart(2)}%`,
+    percent: `ctx ${usage.accuracy === "estimated" ? "~" : ""}${String(percent)}%`,
     tokens: `${formatTokenCount(usage.usedTokens)}/${formatTokenCount(usage.contextWindow)}`,
   };
 }
@@ -134,12 +134,14 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
     animated || state.execution === "closing" ? workingGlyph(state.execution, state.animationFrame) : "●";
   // Status uses WORKING for the thinking phase so the bar reads as general progress; reasoning
   // blocks keep their own ∴ THINKING label in the transcript.
+  // While the clock ticks the label keeps a fixed width so the fields after it never shift; a
+  // settled status has nothing moving, so it is not padded into a gap.
   const executionLabel = (state.execution === "thinking" ? "working" : state.execution)
     .toUpperCase()
-    .padEnd(10);
+    .padEnd(animated ? 10 : 0);
   const execution = `${glyph} ${executionLabel}${animated ? ` ${formatWorkingClock(state.animationFrame)}` : ""}`;
   const model = `${state.provider}/${state.model}`;
-  const turns = `${String(state.turnCount).padStart(3)} ${state.turnCount === 1 ? "turn" : "turns"}`;
+  const turns = `${String(state.turnCount)} ${state.turnCount === 1 ? "turn" : "turns"}`;
   const capabilities = Object.keys(state.capabilityVersions).length;
   const queue =
     state.interaction.queuedInputs.length > 0
@@ -164,7 +166,7 @@ export function createStatusFields(state: NoesisTuiState, layout: TuiLayout): re
       state.reasoningLevel,
       context.percent,
       ...(meter ? [meter] : []),
-      `${String(state.turnCount).padStart(3)}t`,
+      turns,
       ...(queue ? [queue] : []),
     ];
   return [execution, model, context.percent, turns, ...(queue ? [queue] : [])];
@@ -463,13 +465,15 @@ export function renderNoesisState(
         layout.expandedRowBudget,
       )
     : transcript;
-  return [
+  const body = [
     ...visibleTranscript,
     ...paneLines(state, layout).map((line) => elideText(line, inner)),
     ...(state.error
       ? [styled(state.colorEnabled, `${ANSI.bold}${ANSI.red}`, elideText(`Error · ${state.error}`, inner))]
       : []),
   ];
+  // One blank row separates the conversation from the strip and composer below it.
+  return body.length > 0 ? [...body, ""] : body;
 }
 
 const defaultTranscriptRenderer = createTranscriptRenderer();

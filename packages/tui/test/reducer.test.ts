@@ -278,7 +278,7 @@ describe("Noesis TUI reducer", () => {
 
     expect(transcript).toContain("NOESIS\n│ world");
     expect(renderBottomChrome(state, 100, 30).join("\n")).toContain("● IDLE");
-    expect(renderBottomChrome(state, 100, 30).join("\n")).toContain("ctx   —");
+    expect(renderBottomChrome(state, 100, 30).join("\n")).toContain("ctx —");
     expect(context).toContain("NOESIS");
     expect(capabilities).toContain("capability> research@2");
   });
@@ -361,7 +361,7 @@ describe("Noesis TUI reducer", () => {
   });
 
   test("formats context percentages honestly and clamps overflow", () => {
-    expect(formatContextUsage(undefined)).toEqual({ percent: "ctx   —" });
+    expect(formatContextUsage(undefined)).toEqual({ percent: "ctx —" });
     expect(
       formatContextUsage({
         usedTokens: 32_000,
@@ -369,7 +369,7 @@ describe("Noesis TUI reducer", () => {
         accuracy: "reported",
       }),
     ).toEqual({
-      percent: "ctx  28%",
+      percent: "ctx 28%",
       tokens: "32k/114k",
     });
     expect(
@@ -385,7 +385,7 @@ describe("Noesis TUI reducer", () => {
         contextWindow: 100_000,
         accuracy: "reported",
       }).percent,
-    ).toBe("ctx  100%");
+    ).toBe("ctx 100%");
   });
 
   test("drops low-priority status fields before essential state, model, and context", () => {
@@ -417,7 +417,7 @@ describe("Noesis TUI reducer", () => {
     expect(normal).not.toContain("2 caps");
     expect(normal).not.toContain("69b186a1");
     expect(narrow).toContain("openai-codex/gpt-5.6-sol");
-    expect(narrow).toContain("ctx  28%");
+    expect(narrow).toContain("ctx 28%");
     expect(narrow).not.toContain("session");
   });
 
