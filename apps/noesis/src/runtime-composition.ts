@@ -174,7 +174,7 @@ import {
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
 import { createConfigurationTools, type ConfigurationPort } from "./config-tools.ts";
-import { createSessionInspectionTool, type SessionInspectionPort } from "./session-tools.ts";
+import { createSessionTools, type SessionPort } from "./session-tools.ts";
 import { createMcpManagementTools } from "./mcp-management-tools.ts";
 import { createCapabilityTools } from "./capability-tools.ts";
 import { loadLearningAuditSnapshot } from "./learning-audit-read-model.ts";
@@ -1638,8 +1638,16 @@ export async function createApplicationRuntimeComposition(
   const workspace = await createWorkspaceStore(options.config.home, {
     recoverInterruptedOperations: options.recoverInterruptedOperations ?? true,
   });
-  const sessionInspectionPort: SessionInspectionPort = Object.freeze({
+  const sessionPort: SessionPort = Object.freeze({
     session: async (sessionId: string) => await workspace.operational.sessions.get(sessionId),
+    settings: (sessionId: string) => sessionSettings(sessionId),
+    setThinkingLevel: async (sessionId: string, thinkingLevel: FrozenTurnPlan["thinkingLevel"]) => {
+      await setTrailThinkingLevel(sessionId, thinkingLevel);
+    },
+    setTitle: async (sessionId: string, title: string) => {
+      await setTrailTitle(sessionId, title);
+    },
+    modelRoutes: () => options.listModelRoutes?.() ?? [],
     completedTurns: (sessionId: string) => getTrail(sessionId).turns.length,
     config: () => liveConfig,
     inspectContext: async (sessionId: string) => await inspectContext(sessionId),
@@ -3617,7 +3625,7 @@ export async function createApplicationRuntimeComposition(
               model: plan.model,
               thinkingLevel: plan.thinkingLevel,
             }),
-            createSessionInspectionTool(sessionInspectionPort, plan),
+            ...createSessionTools(sessionPort, plan),
           ]
         : []),
       ...(!plan.subAgentActor && options.mcp
@@ -5246,6 +5254,13 @@ export async function createApplicationRuntimeComposition(
       }),
     );
   };
+  /** Settings the user or agent may change while a turn runs; settlement keeps them instead of the turn's copy. */
+  const sessionSettings = (trailId: string) => {
+    const latest = getTrail(trailId);
+    return { title: latest.title, thinkingLevel: latest.thinkingLevel };
+  };
+  const setTrailTitle = async (trailId: string, title: string): Promise<TrailState> =>
+    await persistTrail(Object.freeze({ ...getTrail(trailId), title }));
   const setTrailThinkingLevel: NonNullable<NoesisTuiRuntime["setTrailThinkingLevel"]> = async (
     trailId,
     thinkingLevel,
@@ -6076,6 +6091,7 @@ export async function createApplicationRuntimeComposition(
           Object.freeze(
             createConditionalObject({
               ...running,
+              ...sessionSettings(trailId),
               status: result.outcome === "aborted" ? ("aborted" as const) : ("idle" as const),
               capabilityVersions: usedCapabilities,
             } as const)
@@ -6102,7 +6118,9 @@ export async function createApplicationRuntimeComposition(
       }
     } catch (error) {
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      await persistTrail(Object.freeze({ ...running, status: "failed" as const }));
+      await persistTrail(
+        Object.freeze({ ...running, ...sessionSettings(trailId), status: "failed" as const }),
+      );
       throw error;
     } finally {
       if (reminderReadyTurns.get(trailId) === turnId) reminderReadyTurns.delete(trailId);

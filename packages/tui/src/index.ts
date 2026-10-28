@@ -461,15 +461,8 @@ export async function startNoesisTui(
     command: TuiInteractionCommand,
   ): Promise<TuiInteractionResult> => {
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const result = await runtime.interact(
-      trailId,
-      command,
-      createConditionalObject({
-        onEvent: onInteractionEvent,
-      } as const)
-        .add({ thinkingLevel: view.state.reasoningLevel })
-        .finish(),
-    );
+    // The session owns its reasoning level; the runtime reads it when the turn starts.
+    const result = await runtime.interact(trailId, command, { onEvent: onInteractionEvent });
     applyInteractionSnapshot(result.snapshot);
     return result;
   };

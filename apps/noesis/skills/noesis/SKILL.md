@@ -1,6 +1,6 @@
 ---
 name: noesis
-description: Inspect and change Noesis itself. Use for its configuration (models, reasoning, subagent routes, context budget, compaction), provider sign-in, MCP servers, built-in skills, and deliberate refinement of lasting Capabilities, learned behavior, feedback, scope, activation, or restoration.
+description: Inspect and change Noesis itself. Use for its configuration (models, reasoning, subagent routes, context budget, compaction), the current session (model, reasoning, title, context use, compaction history), provider sign-in, MCP servers, built-in skills, and deliberate refinement of lasting Capabilities, learned behavior, feedback, scope, activation, or restoration.
 ---
 
 # Working on Noesis itself
@@ -11,7 +11,8 @@ When the user asks what can be configured, answer from this table and from `conf
 
 | Surface                                            | Tools                                                          | Notes                                                                                                                                                                                 |
 | -------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Foreground model, provider, and reasoning defaults | `config.inspect`, `config.update` (`agent`)                    | Used when Noesis next starts a session, normally the next launch. The user switches the current session with `/provider`, `/model`, or `/reasoning`.                                  |
+| Foreground model, provider, and reasoning defaults | `config.inspect`, `config.update` (`agent`)                    | Used when Noesis next starts a session, normally the next launch.                                                                                                                     |
+| This session's reasoning level and title           | `session.inspect`, `session.update`                            | See [Change this session](#change-this-session).                                                                                                                                      |
 | Subagent model route                               | `config.update` (`agents`)                                     | Applies from the next turn. `null` inherits the foreground session route.                                                                                                             |
 | Context budget and automatic compaction            | `config.update` (`context`)                                    | Applies from the next turn.                                                                                                                                                           |
 | Model provider sign-in                             | `providers.list`, `providers.authenticate`, `providers.logout` | Sign-in runs the `/provider` flow in the TUI.                                                                                                                                         |
@@ -27,12 +28,24 @@ Only the user enters credentials, through the sign-in flows above. Workspace tru
 Call `session.inspect` for questions about the running session, such as which model it uses, how full the context is, or whether it was compacted. It returns:
 
 - `session`: ID, title, project, start time, and completed turns.
-- `route`: the provider, model, and reasoning level this turn runs on, the configured default, which fields differ from it, and this turn's subagent defaults. The session route is pinned; `/provider`, `/model`, and `/reasoning` change it, and `config.update` changes only the default.
+- `route`: the provider, model, and reasoning level this turn runs on, the configured default, which fields differ from it, the reasoning level the next turn will use, and this turn's subagent defaults.
 - `context`: the context window, request budget, output reserve, estimated tokens used, and the same per-component breakdown as `/context`. It describes the last model request, so it reflects this turn's input but not your reply.
 - `compaction`: each compaction checkpoint with when it was made, how many messages it covered, its size, and the model that wrote it. The notes themselves are already in your prompt.
 - `permissions`: the effects and resources this turn may use.
 
 The full transcript before this turn is the codemode `context` object, not part of this result. Past sessions are under `history.*`.
+
+## Change this session
+
+`session.update({ thinkingLevel?, title? })` changes the running session:
+
+- `thinkingLevel` must be one the session's model supports; `providers.list({ provider })` lists them. Settings are frozen when a turn starts, so the new level applies from the next turn. Tell the user that.
+- `title` names the session in `/resume`. Sessions start named after their model, so offer a short descriptive title when the user asks or when the topic is clear.
+
+Two session changes stay with the user. Explain why and name the command instead of trying a workaround:
+
+- **Switching the model or provider.** A session is pinned to one model for its whole life. `/provider` and `/model` start a new session with the transcript left in `/resume`, and the turn you are running belongs to the current session, so you cannot move it. You can change the default for future sessions with `config.update`, and reasoning with `session.update`.
+- **Compacting.** Your context for this turn was fixed when the turn started, so compacting now could not free room for you. The user runs `/compact`, optionally with a focus, between turns. You can turn automatic compaction on or off with `config.update({ context: { autoCompact } })`.
 
 ## Configure Noesis
 

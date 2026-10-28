@@ -161,6 +161,8 @@ describe("working-adjustment notice presentation", () => {
       },
     );
     expect(presentation.pendingReflectionJobId).toBe("job-running");
+    // The session owns its reasoning level, which the agent may change during the turn.
+    expect(presentation.actions).toContainEqual({ type: "reasoning-level-changed", reasoningLevel: "high" });
     expect(presentation.actions).not.toContainEqual(
       expect.objectContaining({ type: "system-message", text: expect.stringContaining("reviewing") }),
     );
