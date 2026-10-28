@@ -53,6 +53,7 @@ import {
 } from "./state.ts";
 import type { ActiveTurnToken } from "./stream-delta-buffer.ts";
 import { detectTrueColor, safeTerminalText, shouldUseColor } from "./theme.ts";
+import { createNotificationExpiry } from "./notification-expiry.ts";
 import { pickStartupNote } from "./startup-note.ts";
 import { createTuiSubAgentOrchestration } from "./subagent-orchestration.ts";
 import { createTranscriptInputHandler } from "./transcript-input.ts";
@@ -95,6 +96,12 @@ export async function startNoesisTui(
     });
     tui.requestRender();
   };
+  /** Transient feedback about the user's last action belongs above the composer, not in the transcript. */
+  const notify = (text: string): void => {
+    view.dispatch({ type: "notification-shown", text: safeTerminalText(text), tone: "attention" });
+    tui.requestRender();
+  };
+  const notifications = createNotificationExpiry({ view, requestRender: () => tui.requestRender() });
   const reportLearningDiagnostic = (cause: unknown): void => {
     view.dispatch({ type: "system-message", text: learningDiagnosticNotice(cause) });
     tui.requestRender();
@@ -117,10 +124,7 @@ export async function startNoesisTui(
   const composer = createComposer({
     editor,
     requestRender: () => tui.requestRender(),
-    notice: (text) => {
-      view.dispatch({ type: "system-message", text });
-      tui.requestRender();
-    },
+    notice: notify,
     readPath: readAttachmentPath,
     readClipboard: (signal) => readClipboardAttachment(signal ? { signal } : {}),
     preview: (attachment) =>
@@ -143,7 +147,7 @@ export async function startNoesisTui(
       .addOptional(options.openUrl ? { openUrl: options.openUrl } : undefined)
       .add({
         mutationsEnabled: () => view.state.interaction.phase === "idle",
-        reportUnavailable: (text: string) => view.dispatch({ type: "system-message", text }),
+        reportUnavailable: notify,
       } as const)
       .finish(),
   );
@@ -158,7 +162,7 @@ export async function startNoesisTui(
     tui,
     colorEnabled,
     height: () => terminal.rows,
-    reportUnavailable: (text: string) => view.dispatch({ type: "system-message", text }),
+    reportUnavailable: notify,
   });
   const selection = createTuiSelectionOrchestration({
     runtime,
@@ -248,6 +252,7 @@ export async function startNoesisTui(
       editor.onSubmit = (): void => undefined;
       removeExitInputListener();
       removeSubAgentListener();
+      notifications.dispose();
       tui.requestRender();
       await waitForClosingFeedback();
       const shutdownFailures: unknown[] = [];
@@ -526,7 +531,7 @@ export async function startNoesisTui(
     tui,
     isActive: () => phase === "main",
     configuredCommand: options.externalEditorCommand,
-    notice: (text) => view.dispatch({ type: "system-message", text }),
+    notice: notify,
   });
   removeExitInputListener = tui.addInputListener((data) => {
     // Pi filters Kitty key releases before focused components, but global listeners run first.
@@ -541,6 +546,7 @@ export async function startNoesisTui(
       return undefined;
     }
     escapeRouting.observeInput(data);
+    notifications.observeInput(data);
     if (
       mcp.ownsKeyboardFocus() ||
       learning.ownsKeyboardFocus() ||
@@ -598,11 +604,7 @@ export async function startNoesisTui(
     const routed = exclusiveCommands?.routeSubmission(text) ?? "idle";
     if (routed !== "idle") {
       if (routed === "blocked") {
-        view.dispatch({
-          type: "system-message",
-          text: "A command is active. Wait for it to finish before submitting another command.",
-        });
-        tui.requestRender();
+        notify("A command is active. Wait for it to finish before submitting another command.");
       }
       return;
     }
@@ -623,7 +625,7 @@ export async function startNoesisTui(
     const performSubmission = async (): Promise<void> => {
       if (route.kind === "control" && route.name === "abort") {
         const result = await interruptActiveTurn();
-        if (result.effect === "idle") view.dispatch({ type: "system-message", text: "No turn is active." });
+        if (result.effect === "idle") notify("No turn is active.");
         tui.requestRender();
         return;
       }
@@ -638,7 +640,10 @@ export async function startNoesisTui(
             .finish(),
         );
         const feedback = steerFeedback(result, Boolean(steeringText));
-        if (feedback) view.dispatch({ type: "system-message", text: feedback });
+        // An unconfirmed steer is held for inspection, which the transcript must record.
+        if (feedback && result.effect === "unresolved")
+          view.dispatch({ type: "system-message", text: feedback });
+        else if (feedback) notify(feedback);
         if (result.restoredText) editor.setText(result.restoredText);
         composer.restore(result.restoredAttachments ?? []);
         tui.requestRender();
@@ -646,22 +651,17 @@ export async function startNoesisTui(
       }
       if (normalizedInput === "/queue resume") {
         const result = await interact({ type: "resume-queue" });
-        if (result.effect === "idle")
-          view.dispatch({ type: "system-message", text: "The queue is already idle." });
+        if (result.effect === "idle") notify("The queue is already idle.");
         tui.requestRender();
         return;
       }
       if (route.kind === "control" && route.name === "queue") {
-        view.dispatch({ type: "system-message", text: "Use /queue resume." });
+        notify("Use /queue resume.");
         tui.requestRender();
         return;
       }
       if (view.state.interaction.phase !== "idle" && route.kind === "exclusive") {
-        view.dispatch({
-          type: "system-message",
-          text: "That command changes the session. Wait for the turn to finish or press Esc to interrupt it.",
-        });
-        tui.requestRender();
+        notify("That command changes the session. Wait for the turn to finish or press Esc to interrupt it.");
         return;
       }
       let handled = false;
@@ -816,6 +816,7 @@ export async function startNoesisTui(
     }
   } catch (error) {
     learning.dispose();
+    notifications.dispose();
     subAgents.dispose();
     await mcp.dispose();
     throw error;

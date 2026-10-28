@@ -19,6 +19,7 @@ import {
   sessionPickerVisibleCount,
   shouldUseColor,
 } from "../src/index.ts";
+import { withLocalNotes } from "../src/timeline-adapter.ts";
 
 describe("Noesis TUI reducer", () => {
   test("local feedback does not split streaming assistant or reasoning text", () => {
@@ -937,6 +938,116 @@ describe("Noesis TUI reducer", () => {
 
     state = reduceTui(state, { type: "inspector-closed" });
     expect(state.inspector).toBeUndefined();
+  });
+
+  test("keeps a UI-only note where it was shown when the transcript reloads after a turn", () => {
+    let state = reduceTui(initialTuiState("fake"), {
+      type: "trail-selected",
+      trail: {
+        trailId: "trail-notes",
+        title: "Noesis session",
+        status: "idle",
+        provider: "openai-codex",
+        model: "gpt-6-luna",
+        thinkingLevel: "medium",
+        runtime: "pi",
+        turns: [],
+        capabilityVersions: {},
+      },
+    });
+    state = reduceTui(state, { type: "system-message", text: "Route changed." });
+    state = reduceTui(state, { type: "prompt-submitted", text: "hey there" });
+    state = reduceTui(state, { type: "stream-delta", text: "Hello!" });
+    state = reduceTui(state, {
+      type: "transcript-hydrated",
+      trailId: "trail-notes",
+      transcript: [
+        {
+          kind: "message",
+          messageId: "m-1",
+          role: "user",
+          text: "hey there",
+          turnId: "turn-1",
+          createdAt: "2026-10-26T00:00:00.000Z",
+        },
+        {
+          kind: "message",
+          messageId: "m-2",
+          role: "assistant",
+          text: "Hello!",
+          turnId: "turn-1",
+          createdAt: "2026-10-26T00:00:01.000Z",
+        },
+      ],
+    });
+    expect(state.timeline.map((entry) => (entry.kind === "message" ? entry.text : entry.kind))).toEqual([
+      "Route changed.",
+      "hey there",
+      "Hello!",
+    ]);
+  });
+
+  test("keeps notes after their exact predecessor, the nearest surviving entry, or streamed text", () => {
+    const message = (messageId: string, role: "user" | "assistant", text: string, turnId: string) =>
+      ({ kind: "message", messageId, role, text, turnId, createdAt: "2026-10-26T00:00:00.000Z" }) as const;
+    const prompt = message("m-1", "user", "first", "turn-1");
+    const steer = message("m-2", "user", "steer", "turn-1");
+    const reply = message("m-3", "assistant", "done", "turn-1");
+    const next = message("m-4", "user", "second", "turn-2");
+    const note = (text: string) => ({ kind: "message", role: "system", text }) as const;
+    const texts = (timeline: ReturnType<typeof withLocalNotes>) =>
+      timeline.map((entry) => (entry.kind === "message" ? entry.text : entry.kind));
+    // A steer shares its prompt's turn; the note follows the steer it was shown after.
+    expect(
+      texts(withLocalNotes([prompt, steer, reply], [prompt, steer, note("after steer"), reply])),
+    ).toEqual(["first", "steer", "after steer", "done"]);
+    // Between two turns, and after the nearest surviving entry when its own predecessor is gone.
+    expect(texts(withLocalNotes([prompt, reply, next], [prompt, reply, note("between"), next]))).toEqual([
+      "first",
+      "done",
+      "between",
+      "second",
+    ]);
+    expect(texts(withLocalNotes([prompt, next], [prompt, steer, note("orphan"), next]))).toEqual([
+      "first",
+      "orphan",
+      "second",
+    ]);
+    // A note shown after streamed text with no identity yet stays after that reply.
+    expect(
+      texts(
+        withLocalNotes(
+          [prompt, reply],
+          [prompt, { kind: "message", role: "assistant", text: "done" }, note("after reply")],
+        ),
+      ),
+    ).toEqual(["first", "done", "after reply"]);
+    // One streamed entry that persisted as two messages still keeps the note after both.
+    const partA = message("m-5", "assistant", "A", "turn-1");
+    const partB = message("m-6", "assistant", "B", "turn-1");
+    expect(
+      texts(
+        withLocalNotes(
+          [prompt, partA, partB],
+          [prompt, { kind: "message", role: "assistant", text: "AB" }, note("after both")],
+        ),
+      ),
+    ).toEqual(["first", "A", "B", "after both"]);
+    // Output that streamed after the note stays after it once reloaded.
+    const thinking = { kind: "reasoning", reasoningId: "r-1", text: "plan", turnId: "turn-1" } as const;
+    expect(
+      texts(
+        withLocalNotes(
+          [prompt, thinking, reply],
+          [
+            prompt,
+            { kind: "reasoning", text: "plan" },
+            note("help output"),
+            { kind: "message", role: "assistant", text: "done" },
+          ],
+        ),
+      ),
+    ).toEqual(["first", "reasoning", "help output", "done"]);
   });
 
   test("tracks an active subagent's live phase without requiring its inspector", () => {
