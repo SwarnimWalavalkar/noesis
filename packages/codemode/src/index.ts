@@ -258,18 +258,16 @@ function describeForModel(descriptor: FrozenToolDescriptor | undefined) {
   });
 }
 const MAX_REPORTED_COMPLETED_TOOLS = 20;
-/** Names tool calls that already succeeded so the model does not mistake a failed program for a failed effect. */
-function withCompletedTools(
-  error: Error,
-  completed: { readonly names: readonly string[]; readonly total: number },
-): Error {
-  if (completed.total === 0) return error;
+/** Names tools that already succeeded so the model does not mistake a failed program for a failed effect. */
+function withCompletedTools(error: Error, completed: ReadonlySet<string>): Error {
+  if (completed.size === 0) return error;
+  const names = [...completed];
   const more =
-    completed.total > completed.names.length
-      ? ` and ${String(completed.total - completed.names.length)} more`
+    names.length > MAX_REPORTED_COMPLETED_TOOLS
+      ? ` and ${String(names.length - MAX_REPORTED_COMPLETED_TOOLS)} more`
       : "";
   // Keep the original error and its stack; only the message gains the completed-call context.
-  error.message = `${error.message}\n\nThese tool calls succeeded before the program failed, so their effects already happened: ${completed.names.join(", ")}${more}. Check current state before repeating any of them.`;
+  error.message = `${error.message}\n\nThese tools succeeded before the program failed, so their effects already happened: ${names.slice(0, MAX_REPORTED_COMPLETED_TOOLS).join(", ")}${more}. Check current state before repeating any of them.`;
   return error;
 }
 function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
@@ -394,8 +392,15 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     let logsTruncated = false;
     let progressBytes = 0;
     let calls = 0;
-    /** Broker tools that returned successfully, so a later program failure can report effects that already happened. */
-    const completedTools: { names: string[]; total: number } = { names: [], total: 0 };
+    /**
+     * Distinct Broker tools that returned successfully, so a later program failure can report effects that
+     * already happened. Bounded by the frozen catalog size.
+     */
+    const completedTools = new Set<string>();
+    const recordCompleted = (result: ToolInvocationResult, name: string): ToolInvocationResult => {
+      if (result.ok) completedTools.add(name);
+      return result;
+    };
     let ready = false;
     let terminal = false;
     let settlingResult = false;
@@ -549,6 +554,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                 : message.kind === "describe"
                   ? describeForModel(options.broker.describe(message.name))
                   : invocationValue(
+                      recordCompleted(
                       await options.broker.invoke(
                         message.name,
                         message.input,
@@ -577,12 +583,10 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                           } as const)
                           .finish(),
                       ),
+                      name,
+                      ),
                     ),
             );
-            if (message.kind === "invoke") {
-              completedTools.total += 1;
-              if (completedTools.names.length < MAX_REPORTED_COMPLETED_TOOLS) completedTools.names.push(name);
-            }
             respond({
               type: "sdk-result",
               requestId: message.requestId,

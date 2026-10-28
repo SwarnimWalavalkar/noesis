@@ -48,7 +48,7 @@ The full transcript before this turn is the codemode `context` object, not part 
 4. If a changed provider's `authentication.configured` is false, offer to call `providers.authenticate({ provider })`. It opens a sign-in overlay and waits. OAuth opens the browser; API keys use a masked form. Never ask the user to paste a credential into chat. A cancelled or failed sign-in fails the call; report it and do not retry unless the user asks.
 5. Tell the user when the change takes effect, using `appliesWhen` from the result.
 
-If a program fails after a write, its error lists the tool calls that already succeeded. Do not repeat a listed `config.update`; return the values you need from a new read instead.
+If a program fails after a write, its error lists the tools that already succeeded. Do not repeat a listed `config.update`; return the values you need from a new read instead.
 
 Make the defaults match the current session:
 

@@ -379,7 +379,7 @@ describe("codemode runtime", () => {
         sessionId: "session-completed-before-failure",
       }),
     ).rejects.toThrow(
-      "These tool calls succeeded before the program failed, so their effects already happened: math.double.",
+      "These tools succeeded before the program failed, so their effects already happened: math.double. Check",
     );
   });
   it("leads noesis.describe with compact input and output signatures", async () => {
