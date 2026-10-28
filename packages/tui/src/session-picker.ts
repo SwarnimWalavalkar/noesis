@@ -22,6 +22,8 @@ export interface TuiStartOptions {
   readonly thinkingLevel?: RuntimeAgentDefaults["thinkingLevel"];
   /** One application-owned invitation shared across first-launch setup and the main shell. */
   readonly startupNote?: string;
+  /** Installed application version, reported by `/version`. */
+  readonly version?: string;
   /** Best-effort application update notice, resolved without blocking startup. */
   readonly updateNotice?: Promise<string | undefined>;
   /** Application cleanup runs before the closing surface relinquishes the terminal. */

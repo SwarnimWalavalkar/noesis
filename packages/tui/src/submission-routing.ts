@@ -24,7 +24,7 @@ type CommandDefinition = {
 // Match the command's grammar, not merely its first slash-prefixed word. For example,
 // `/help explain this` is prose, while `/skill NAME` is an inspection command.
 const COMMANDS: readonly CommandDefinition[] = [
-  ...["help", "context", "capabilities", "mcp", "skills", "programs", "runs", "learning"].map(
+  ...["help", "version", "context", "capabilities", "mcp", "skills", "programs", "runs", "learning"].map(
     (name): CommandDefinition => ({ name, kind: "local" }),
   ),
   ...["skill", "program", "run"].map((name): CommandDefinition => ({ name, kind: "local", arguments: true })),

@@ -123,6 +123,9 @@ export function parseArgs(argv: readonly string[]): CliInput {
   const helpIndexes = args.flatMap((argument, index) => (argument === "--help" ? [index] : []));
   if (helpIndexes.length > 1) throw new Error("--help may be specified only once");
   if (helpIndexes[0] !== undefined) consumed.add(helpIndexes[0]);
+  const versionIndexes = args.flatMap((argument, index) => (argument === "--version" ? [index] : []));
+  if (versionIndexes.length > 1) throw new Error("--version may be specified only once");
+  if (versionIndexes[0] !== undefined) consumed.add(versionIndexes[0]);
   const workspaceIndexes = args.flatMap((argument, index) => (argument === "--workspace" ? [index] : []));
   if (workspaceIndexes.length > 1) throw new Error("--workspace may be specified only once");
   if (workspaceIndexes[0] !== undefined) consumed.add(workspaceIndexes[0]);

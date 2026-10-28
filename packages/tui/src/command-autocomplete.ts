@@ -119,6 +119,7 @@ export const NOESIS_SLASH_COMMANDS = [
     name: "help",
     description: "Show commands and usage",
   },
+  { name: "version", description: "Show the installed Noesis version" },
   {
     name: "provider",
     description: "Start a fresh session with another provider",

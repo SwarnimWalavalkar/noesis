@@ -9,6 +9,7 @@ import {
   runSlashCommand,
   steerFeedback,
 } from "../src/index.ts";
+import { HELP_LINES } from "../src/commands.ts";
 import { createInMemoryTestRuntime } from "./support/in-memory-runtime.ts";
 
 const agent: NoesisAgentRuntime = {
@@ -97,6 +98,28 @@ describe("Noesis slash commands", () => {
 
     await expect(runSlashCommand("/mcp", context)).resolves.toBe(true);
     expect(published).toEqual(["MCP management isn't available here."]);
+  });
+
+  test("reports the installed version without contacting the runtime", async () => {
+    const dispatched: NoesisTuiAction[] = [];
+    const published: string[] = [];
+    const context = {
+      runtime: createInMemoryTestRuntime(agent),
+      trailId: "trail-version",
+      publishInspector: (message: string) => published.push(message),
+      dispatch: (action: NoesisTuiAction) => dispatched.push(action),
+      requestRender: () => undefined,
+    };
+
+    await expect(runSlashCommand("/version", { ...context, version: "1.2.3-beta.4" })).resolves.toBe(true);
+    expect(dispatched).toEqual([{ type: "system-message", text: "Noesis v1.2.3-beta.4" }]);
+
+    await expect(runSlashCommand("/version", context)).resolves.toBe(true);
+    expect(published).toEqual(["The Noesis version isn't available here."]);
+  });
+
+  test("keeps /version out of the help reference", () => {
+    expect(HELP_LINES.join("\n")).not.toContain("/version");
   });
 
   test("documents how to invoke skills whose names collide with built-in commands", async () => {

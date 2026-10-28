@@ -64,6 +64,10 @@ describe("CLI argument grammar", () => {
       args: ["help", "unexpected"],
       message: "Unexpected help argument unexpected",
     },
+    {
+      args: ["--version", "--version"],
+      message: "--version may be specified only once",
+    },
   ])("rejects malformed non-TUI arguments: $message", ({ args, message }) => {
     expect(() => parseArgs(args)).toThrow(message);
   });

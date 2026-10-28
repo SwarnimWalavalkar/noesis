@@ -702,6 +702,7 @@ export async function startNoesisTui(
                   }
                 : undefined,
             )
+            .addOptional(options.version ? { version: options.version } : undefined)
             .finish(),
         );
         handled = await commandWork;

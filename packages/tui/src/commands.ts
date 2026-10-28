@@ -36,6 +36,8 @@ export interface TuiRoutePickerSelection {
 export interface SlashCommandContext {
   readonly runtime: NoesisTuiRuntime;
   readonly trailId: string;
+  /** Installed application version, reported by `/version`. */
+  readonly version?: string;
   /** Publishes bounded read-only output, dropping results from superseded sessions. */
   readonly publishInspector: (message: string) => void;
   readonly dispatch: (action: NoesisTuiAction) => void;
@@ -330,6 +332,14 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   if (command === "?" || command === "/help") {
     dispatch({ type: "system-message", text: HELP_LINES.join("\n") });
     requestRender();
+    return true;
+  }
+
+  if (command === "/version") {
+    if (context.version) {
+      dispatch({ type: "system-message", text: `Noesis v${context.version}` });
+      requestRender();
+    } else publishInspector("The Noesis version isn't available here.");
     return true;
   }
 

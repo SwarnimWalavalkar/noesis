@@ -139,6 +139,20 @@ describe("Noesis CLI grammar", () => {
     expect(JSON.parse(await readFile(join(home, "config.json"), "utf8")) as unknown).toEqual(invalid);
   });
 
+  test("prints the package version without starting a session", async () => {
+    const manifest: unknown = JSON.parse(await readFile(join(repositoryRoot, "package.json"), "utf8"));
+    const version =
+      typeof manifest === "object" && manifest !== null && "version" in manifest
+        ? manifest.version
+        : undefined;
+    expect(typeof version).toBe("string");
+    for (const args of [["--version"], ["tui", "--version"], ["update", "--version"]]) {
+      const result = await runCli(args);
+      expect(result.code, result.output).toBe(0);
+      expect(result.output).toBe(`${String(version)}\n`);
+    }
+  });
+
   test("documents continue ordering and strict non-interactive semantics in help", async () => {
     const result = await runCli(["--help"]);
 

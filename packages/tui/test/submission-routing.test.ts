@@ -7,6 +7,7 @@ describe("submission routing", () => {
     "  /not-a-command explain this  ",
     "/tmp/report.txt",
     "/helpful",
+    "/version please",
     "/help explain this command",
     "/help\nexplain this command",
     "Explain /help and /steer",

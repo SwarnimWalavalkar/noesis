@@ -41,7 +41,7 @@ import {
 } from "./runtime-composition.ts";
 import { createApplicationMcpIntegration } from "./mcp-integration.ts";
 import { prepareNoesisBuiltInSkills } from "./noesis-skill.ts";
-import { checkForUpdate, updateNoesis } from "./update.ts";
+import { checkForUpdate, NOESIS_VERSION, updateNoesis } from "./update.ts";
 import { type CliInput, parseArgs } from "./cli-args.ts";
 const CLI_HELP = `Noesis
 
@@ -59,6 +59,7 @@ Usage:
   noesis skills update [SOURCE] [--workspace] [--trust-workspace] [--home PATH]
   noesis update
   noesis help
+  noesis --version
 
 Updates:
   noesis update               Install the newest release on your current npm channel globally
@@ -372,6 +373,10 @@ async function main(): Promise<void> {
     console.log(CLI_HELP);
     return;
   }
+  if (input.args.includes("--version")) {
+    console.log(NOESIS_VERSION);
+    return;
+  }
   if (input.command === "update") {
     await updateNoesis();
     return;
@@ -450,6 +455,7 @@ async function main(): Promise<void> {
         provider: config.agent.provider,
         model: config.agent.model,
         thinkingLevel: config.agent.thinkingLevel,
+        version: NOESIS_VERSION,
         startupNote,
         updateNotice,
         mcpInteractionBridge: created.mcpInteractionBridge,
