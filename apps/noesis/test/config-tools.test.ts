@@ -21,9 +21,15 @@ const configured = async (cli: { readonly provider?: string } = {}) => {
   return await resolveNoesisConfig({ home, env: {}, cli });
 };
 
-test("cleared foreground fields validate against the built-in default unless an override still wins", async () => {
+const session = { provider: "session-provider", model: "session-model", thinkingLevel: "off" } as const;
+
+test("cleared foreground fields resolve to the built-in default unless an override still wins", async () => {
   const before = await configured({ provider: "cli-provider" });
-  const { agent } = routesAfter(before, { agent: { provider: null, model: null, thinkingLevel: "high" } });
+  const { agent } = routesAfter(
+    before,
+    { agent: { provider: null, model: null, thinkingLevel: "high" } },
+    session,
+  );
   expect(agent).toEqual({
     provider: "cli-provider",
     model: BUILT_IN_AGENT_DEFAULTS.model,
@@ -31,17 +37,32 @@ test("cleared foreground fields validate against the built-in default unless an 
   });
 });
 
-test("cleared subagent fields inherit the patched foreground route", async () => {
+test("clearing only the provider keeps the stored model, so the changed route is validated", async () => {
   const before = await configured();
-  const { agent, agents } = routesAfter(before, {
-    agent: { model: "new-model" },
-    agents: { provider: null, model: null },
-  });
-  expect(agent).toEqual({ provider: "stored-provider", model: "new-model", thinkingLevel: "low" });
-  expect(agents).toEqual({ provider: "stored-provider", model: "new-model", thinkingLevel: "low" });
-  expect(routesAfter(before, { agent: { model: "new-model" } }).agents).toEqual({
-    provider: "sub-provider",
-    model: "sub-model",
+  const { agent } = routesAfter(before, { agent: { provider: null } }, session);
+  expect(agent).toEqual({
+    provider: BUILT_IN_AGENT_DEFAULTS.provider,
+    model: "stored-model",
     thinkingLevel: "low",
   });
+  expect(agent).not.toEqual(before.agent);
+});
+
+test("inherited and cleared subagent fields follow the current session route", async () => {
+  const before = await configured();
+  const reasoningOnly = routesAfter(before, { agents: { thinkingLevel: "minimal" } }, session);
+  expect(reasoningOnly.agentsBefore).toEqual({
+    provider: "sub-provider",
+    model: "sub-model",
+    thinkingLevel: "off",
+  });
+  expect(reasoningOnly.agents).toEqual({
+    provider: "sub-provider",
+    model: "sub-model",
+    thinkingLevel: "minimal",
+  });
+  expect(
+    routesAfter(before, { agent: { model: "new-model" }, agents: { provider: null, model: null } }, session)
+      .agents,
+  ).toEqual(session);
 });

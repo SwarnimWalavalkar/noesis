@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { noesisConfigPath, resolveNoesisConfig } from "@noesis/config";
+import { initializeNoesisConfig, noesisConfigPath, resolveNoesisConfig } from "@noesis/config";
 import { createPiAgentRoleRunner, createPiAgentRuntime } from "@noesis/runtime-pi";
 import type { TuiModelRoute, TuiProviderAuthenticationRequest, TuiProviderAuthStatus } from "@noesis/tui";
 import { afterEach, expect, test } from "vitest";
@@ -193,6 +193,68 @@ test("Pi codemode inspects and updates configuration and signs in through the el
     expect(second.frozenTurnPlan?.requestTokenBudget).toBeLessThan(
       first.frozenTurnPlan?.requestTokenBudget ?? 0,
     );
+  } finally {
+    await runtime.shutdown();
+  }
+}, 30000);
+
+test("Pi codemode validates route changes against the routes they will actually run", async () => {
+  const home = await mkdtemp(join(tmpdir(), "noesis-agent-configuration-routes-"));
+  roots.push(home);
+  await initializeNoesisConfig(home, {
+    schemaVersion: 1,
+    agent: { provider: "other-provider", model: "other-model", thinkingLevel: "high" },
+  });
+  const source = `
+    let cleared = null;
+    try {
+      await tools.config.update({ agent: { provider: null } });
+    } catch (error) {
+      cleared = String(error?.message ?? error);
+    }
+    const subagents = await tools.config.update({ agents: { thinkingLevel: "off" } });
+    return { cleared, subagents };
+  `;
+  const controlled = createControlledPiModels({
+    respond: (input) => {
+      if (input.systemPrompt.includes("role:")) return researchLoopControlledResponse(input);
+      if (!input.context.messages.some((message) => message.role === "toolResult"))
+        return controlledToolCallResponse("execute", { source }, "configure-routes");
+      return "Routes checked.";
+    },
+  });
+  const runtime = await createApplicationRuntimeComposition({
+    config: await resolveNoesisConfig({ home, env: {} }),
+    listModelRoutes: () => [
+      route(CONTROLLED_PI_PROVIDER, CONTROLLED_PI_MODEL, ["off", "high"]),
+      route("other-provider", "other-model", ["low", "high"]),
+    ],
+    createAgent: (_, codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
+    createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
+  });
+  try {
+    // The session runs a model that supports "off"; the configured default does not.
+    const trail = await runtime.startTrail({
+      title: "Validate routes",
+      provider: CONTROLLED_PI_PROVIDER,
+      model: CONTROLLED_PI_MODEL,
+    });
+    await runtime.debug.runTurn(
+      trail.trailId,
+      "Clear the default provider, then use off reasoning for subagents.",
+    );
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    const updates = calls.filter((call) => call.toolName === "config.update");
+    expect(updates.map((call) => call.status)).toEqual(["failed", "completed"]);
+    expect(JSON.stringify(updates[0]?.response)).toContain("is not a known provider");
+    expect(updates[1]?.response).toMatchObject({
+      output: { effective: { agents: { thinkingLevel: "off" } } },
+    });
+    expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8"))).toEqual({
+      schemaVersion: 1,
+      agent: { provider: "other-provider", model: "other-model", thinkingLevel: "high" },
+      agents: { thinkingLevel: "off" },
+    });
   } finally {
     await runtime.shutdown();
   }

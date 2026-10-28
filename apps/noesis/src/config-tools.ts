@@ -93,22 +93,20 @@ const effective = (config: ResolvedNoesisConfig) => ({
 });
 
 type Route = ResolvedNoesisConfig["agent"];
-type RoutePatch = NoesisConfigPatch["agent"];
 
 /** undefined keeps the current value, null falls back, and anything else replaces it. */
 const patched = <T>(next: T | null | undefined, kept: T, cleared: T): T =>
   next === undefined ? kept : next === null ? cleared : next;
 
-/** Whether the patch sets a route field to a value; clearing alone falls back to a known route. */
-const setsRouteField = (patch: RoutePatch): boolean =>
-  AGENT_KEYS.some((key) => patch?.[key] !== undefined && patch[key] !== null);
+const sameRoute = (left: Route, right: Route): boolean => AGENT_KEYS.every((key) => left[key] === right[key]);
 
 /**
- * The foreground and subagent routes the patch will resolve to, so validation sees what a cleared field
- * falls back to: the built-in default (or a command-line or environment override) for agent, and the
- * foreground route for agents.
+ * The routes before and after a patch, as they will actually run. A cleared foreground field falls back to
+ * its built-in default unless a command-line or environment override still wins. Subagent fields that
+ * inherit, or are cleared, take the current session's route, because that is what a subagent spawned from
+ * this session runs.
  */
-export const routesAfter = (before: ResolvedNoesisConfig, patch: NoesisConfigPatch) => {
+export const routesAfter = (before: ResolvedNoesisConfig, patch: NoesisConfigPatch, session: Route) => {
   const overridden = (key: (typeof AGENT_KEYS)[number]) =>
     before.sources[key] === "cli" || before.sources[key] === "environment";
   const agent: Route = {
@@ -129,20 +127,17 @@ export const routesAfter = (before: ResolvedNoesisConfig, patch: NoesisConfigPat
     ),
   };
   const inherits = (key: (typeof AGENT_KEYS)[number]) => before.agentsSources[key] === "foreground";
-  const agents: Route = {
-    provider: patched(
-      patch.agents?.provider,
-      inherits("provider") ? agent.provider : before.agents.provider,
-      agent.provider,
-    ),
-    model: patched(patch.agents?.model, inherits("model") ? agent.model : before.agents.model, agent.model),
-    thinkingLevel: patched(
-      patch.agents?.thinkingLevel,
-      inherits("thinkingLevel") ? agent.thinkingLevel : before.agents.thinkingLevel,
-      agent.thinkingLevel,
-    ),
+  const agentsBefore: Route = {
+    provider: inherits("provider") ? session.provider : before.agents.provider,
+    model: inherits("model") ? session.model : before.agents.model,
+    thinkingLevel: inherits("thinkingLevel") ? session.thinkingLevel : before.agents.thinkingLevel,
   };
-  return { agent, agents };
+  const agents: Route = {
+    provider: patched(patch.agents?.provider, agentsBefore.provider, session.provider),
+    model: patched(patch.agents?.model, agentsBefore.model, session.model),
+    thinkingLevel: patched(patch.agents?.thinkingLevel, agentsBefore.thinkingLevel, session.thinkingLevel),
+  };
+  return { agent, agents, agentsBefore };
 };
 
 const providerTarget = z.strictObject({ provider: z.string().min(1) });
@@ -234,8 +229,8 @@ const ProviderAuthenticationOutputSchema = z.strictObject({
   authentication: AuthenticationSchema,
 });
 
-/** Fixed foreground adapters for Noesis's own configuration and model provider credentials. */
-export function createConfigurationTools(port: ConfigurationPort): readonly ToolDefinition[] {
+/** Foreground adapters for Noesis's configuration and provider credentials, bound to the current session's route. */
+export function createConfigurationTools(port: ConfigurationPort, session: Route): readonly ToolDefinition[] {
   const routes = async (signal?: AbortSignal): Promise<readonly TuiModelRoute[]> => {
     if (!port.refreshModelRoutes) return port.listModelRoutes?.() ?? [];
     try {
@@ -321,9 +316,12 @@ export function createConfigurationTools(port: ConfigurationPort): readonly Tool
       effect: () => ({ effect: "write", resource: "config:noesis", estimatedCost: 0 }),
       execute: async (patch, context) => {
         const before = port.current();
-        const routes = routesAfter(before, patch);
-        if (setsRouteField(patch.agent)) await validateRoute("agent", routes.agent, context.signal);
-        if (setsRouteField(patch.agents)) await validateRoute("agents", routes.agents, context.signal);
+        // Validate every route the patch changes, including fields it clears; an unchanged route already runs.
+        const routes = routesAfter(before, patch, session);
+        if (!sameRoute(routes.agent, before.agent))
+          await validateRoute("agent", routes.agent, context.signal);
+        if (!sameRoute(routes.agents, routes.agentsBefore))
+          await validateRoute("agents", routes.agents, context.signal);
         context.signal.throwIfAborted();
         const after = await port.update(patch);
         const overridden = AGENT_KEYS.filter(

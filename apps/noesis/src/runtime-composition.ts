@@ -173,7 +173,7 @@ import {
   createWorkspaceRuntimeInternals,
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
-import { createConfigurationTools } from "./config-tools.ts";
+import { createConfigurationTools, type ConfigurationPort } from "./config-tools.ts";
 import { createSessionInspectionTool, type SessionInspectionPort } from "./session-tools.ts";
 import { createMcpManagementTools } from "./mcp-management-tools.ts";
 import { createCapabilityTools } from "./capability-tools.ts";
@@ -1612,7 +1612,7 @@ export async function createApplicationRuntimeComposition(
   const agentDefaults = options.config.agent;
   /** Rereads after `config.update`; context and subagent settings apply from the next turn. */
   let liveConfig = options.config;
-  const configurationTools = createConfigurationTools(
+  const configurationPort: ConfigurationPort = Object.freeze(
     createConditionalObject({
       current: () => liveConfig,
       update: async (patch: NoesisConfigPatch) => {
@@ -3611,7 +3611,14 @@ export async function createApplicationRuntimeComposition(
       ...capabilityProgramTools,
       ...mcpTools,
       ...(!plan.subAgentActor
-        ? [...configurationTools, createSessionInspectionTool(sessionInspectionPort, plan)]
+        ? [
+            ...createConfigurationTools(configurationPort, {
+              provider: plan.provider,
+              model: plan.model,
+              thinkingLevel: plan.thinkingLevel,
+            }),
+            createSessionInspectionTool(sessionInspectionPort, plan),
+          ]
         : []),
       ...(!plan.subAgentActor && options.mcp
         ? createMcpManagementTools(options.mcp, {
