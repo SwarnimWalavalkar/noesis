@@ -253,12 +253,22 @@ test("steering commits original text and image references only after Pi consumes
     release.resolve();
     await steering;
     await running;
-    expect(imagesIn(prompts.at(-1))).toEqual([image.data]);
-    const message = (await runtime.debug.workspace.operational.messages.listForSession(trail.trailId)).find(
-      (entry) => entry.metadata["deliveryMode"] === "steer",
-    );
-    expect(message?.content).toBe("Inspect this instead");
-    expect(ComposerAttachmentsSchema.parse(message?.metadata["attachments"])).toHaveLength(1);
+    // Under load Pi may take the steer on a later model call, so wait for the call that carries it.
+    const steered = await vi.waitFor(() => {
+      const prompt = prompts.find((entry) => entry.lastUserText.includes("Inspect this instead"));
+      if (!prompt) throw new Error("Pi has not received the steering message yet");
+      return prompt;
+    });
+    expect(imagesIn(steered)).toEqual([image.data]);
+    const message = await vi.waitFor(async () => {
+      const entry = (await runtime.debug.workspace.operational.messages.listForSession(trail.trailId)).find(
+        (candidate) => candidate.metadata["deliveryMode"] === "steer",
+      );
+      if (!entry) throw new Error("The steering message is not committed yet");
+      return entry;
+    });
+    expect(message.content).toBe("Inspect this instead");
+    expect(ComposerAttachmentsSchema.parse(message.metadata["attachments"])).toHaveLength(1);
   } finally {
     release.resolve();
     await runtime.shutdown();
