@@ -12,6 +12,8 @@ import { describe, expect, test } from "vitest";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const cliPath = join(repositoryRoot, "apps/noesis/src/cli.ts");
 const tsxLoader = import.meta.resolve("tsx");
+// Several tests start the CLI more than once, and CI runners take seconds per cold start.
+const CLI_TEST_TIMEOUT_MS = 60_000;
 
 async function runCli(
   args: readonly string[],
@@ -51,7 +53,7 @@ async function runCli(
   return { code, output };
 }
 
-describe("Noesis CLI grammar", () => {
+describe("Noesis CLI grammar", { timeout: CLI_TEST_TIMEOUT_MS }, () => {
   test("reports malformed arguments with a failing exit status", async () => {
     const result = await runCli(["inspect", "--continue"]);
     expect(result.code).toBe(1);
@@ -381,4 +383,5 @@ test.skipIf(process.platform === "win32")(
     expect(help.output).toContain("noesis update");
     expect(help.output).not.toContain("Updating Noesis");
   },
+  CLI_TEST_TIMEOUT_MS,
 );

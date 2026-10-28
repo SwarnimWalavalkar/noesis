@@ -268,9 +268,9 @@ def main() -> int:
     sent_exit = False
     next_write_at = None
     last_write_label = None
-    # Full-suite concurrency can delay the controlled completion slightly while the animated
-    # status is repainting. Keep the process watchdog below the TypeScript wrapper's deadline.
-    deadline = time.monotonic() + 8
+    # Full-suite concurrency and slow CI runners delay startup and the controlled completion.
+    # quit.test.ts sets this watchdog below its own process deadline.
+    deadline = time.monotonic() + float(os.environ.get("NOESIS_PTY_WATCHDOG_SECONDS", "8"))
     child_finished = False
     screen = VirtualScreen(columns, rows)
     try:

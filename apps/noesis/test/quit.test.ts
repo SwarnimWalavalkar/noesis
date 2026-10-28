@@ -23,6 +23,12 @@ const hasStartupNote = (text: string): boolean => startupNotesIn(text).length > 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const cliPath = join(repositoryRoot, "apps/noesis/src/cli.ts");
 const ptyDriverPath = join(repositoryRoot, "apps/noesis/test/pty_quit.py");
+// Hang guards, not performance budgets: a passing run returns as soon as the TUI exits. CI runners
+// start each CLI several times slower than a workstation, so each layer keeps generous headroom
+// and stays below the next: driver watchdog < process deadline < test timeout.
+const PTY_WATCHDOG_SECONDS = 25;
+const PTY_EXIT_TIMEOUT_MS = 27_000;
+const PTY_TEST_TIMEOUT_MS = 30_000;
 
 async function createTestRuntime(home: string) {
   const controlled = createControlledPiModels();
@@ -158,6 +164,7 @@ const test = baseTest.extend<{ runPtyExit: RunPtyExit }>({
             ...process.env,
             NO_COLOR: "1",
             NOESIS_DISABLE_BROWSER_OPEN: "1",
+            NOESIS_PTY_WATCHDOG_SECONDS: String(PTY_WATCHDOG_SECONDS),
             ...(firstLaunch ? { OPENROUTER_API_KEY: undefined } : { OPENROUTER_API_KEY: "test-key" }),
           },
           stdio: ["pipe", "pipe", "pipe"],
@@ -182,8 +189,12 @@ const test = baseTest.extend<{ runPtyExit: RunPtyExit }>({
       }>((resolveExit, reject) => {
         const timeout = setTimeout(() => {
           stopProcessGroup(child);
-          reject(new Error(`${task.name}: TUI did not exit within 9 seconds. Output:\n${output}`));
-        }, 9_000);
+          reject(
+            new Error(
+              `${task.name}: TUI did not exit within ${String(PTY_EXIT_TIMEOUT_MS / 1000)} seconds. Output:\n${output}`,
+            ),
+          );
+        }, PTY_EXIT_TIMEOUT_MS);
         child.once("error", (error) => {
           clearTimeout(timeout);
           reject(error);
@@ -209,40 +220,46 @@ const test = baseTest.extend<{ runPtyExit: RunPtyExit }>({
 });
 
 describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { concurrent: true }, () => {
-  test("/quit followed by LF exits its real PTY with code 0 without retaining an empty session", async ({
-    runPtyExit,
-  }) => {
-    const { home, output, result } = await runPtyExit(
-      "quit-lf",
-      async (home) => {
-        const runtime = await createTestRuntime(home);
-        const historical = await runtime.startTrail({ title: "retained history" });
-        await retainTrail(runtime, historical.trailId, "historical-only-message");
-        await runtime.shutdown();
-        return [];
-      },
-      { columns: 120, rows: 35 },
-    );
-    expect(output).not.toContain("historical-only-message");
+  test(
+    "/quit followed by LF exits its real PTY with code 0 without retaining an empty session",
+    async ({ runPtyExit }) => {
+      const { home, output, result } = await runPtyExit(
+        "quit-lf",
+        async (home) => {
+          const runtime = await createTestRuntime(home);
+          const historical = await runtime.startTrail({ title: "retained history" });
+          await retainTrail(runtime, historical.trailId, "historical-only-message");
+          await runtime.shutdown();
+          return [];
+        },
+        { columns: 120, rows: 35 },
+      );
+      expect(output).not.toContain("historical-only-message");
 
-    expect(output).toContain("███╗   ██╗ ██████╗");
-    expect(hasStartupNote(output)).toBe(true);
-    expect(output).toContain("ctx —");
+      expect(output).toContain("███╗   ██╗ ██████╗");
+      expect(hasStartupNote(output)).toBe(true);
+      expect(output).toContain("ctx —");
 
-    expect(output).toContain("● IDLE");
-    expect(result).toEqual({ code: 0, signal: null });
-    const reopened = await createTestRuntime(home);
-    expect(reopened.listTrails()).toMatchObject([{ title: "retained history" }]);
-    expect(reopened.listTrails()).toHaveLength(1);
-    await reopened.shutdown();
-  }, 10_000);
+      expect(output).toContain("● IDLE");
+      expect(result).toEqual({ code: 0, signal: null });
+      const reopened = await createTestRuntime(home);
+      expect(reopened.listTrails()).toMatchObject([{ title: "retained history" }]);
+      expect(reopened.listTrails()).toHaveLength(1);
+      await reopened.shutdown();
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
 
-  test("Ctrl+C exits with code 0 after the TUI is ready", async ({ runPtyExit }) => {
-    const { output, result } = await runPtyExit("ctrl-c");
+  test(
+    "Ctrl+C exits with code 0 after the TUI is ready",
+    async ({ runPtyExit }) => {
+      const { output, result } = await runPtyExit("ctrl-c");
 
-    expect(output).toContain("● IDLE");
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
+      expect(output).toContain("● IDLE");
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
 
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.for([
@@ -250,7 +267,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     ["first-launch-ctrl-c", "Ctrl+C"],
   ] as const)(
     "%s (%s) exits cleanly after interactive first-launch onboarding",
-    { timeout: 10_000 },
+    { timeout: PTY_TEST_TIMEOUT_MS },
     async ([action, _input], { runPtyExit }) => {
       const { output, result } = await runPtyExit(action);
 
@@ -266,7 +283,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     ["first-launch-oauth-ctrl-c", "Ctrl+C"],
   ] as const)(
     "%s (%s) exits cleanly after Codex OAuth first-launch onboarding",
-    { timeout: 10_000 },
+    { timeout: PTY_TEST_TIMEOUT_MS },
     async ([action, _input], { runPtyExit }) => {
       const { output, result } = await runPtyExit(action);
 
@@ -278,27 +295,31 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     },
   );
 
-  test("the resume picker selects the most recent session in a real PTY", async ({ runPtyExit }) => {
-    const { output, result } = await runPtyExit("picker-select-quit", async (home) => {
-      const runtime = await createTestRuntime(home);
-      const older = await runtime.startTrail({ title: "older" });
-      await runtime.debug.runTurn(older.trailId, "older real PTY history");
-      const selected = await runtime.startTrail({ title: "newer" });
-      await runtime.debug.runTurn(selected.trailId, "selected real PTY history");
-      await runtime.shutdown();
-      return ["--resume"];
-    });
+  test(
+    "the resume picker selects the most recent session in a real PTY",
+    async ({ runPtyExit }) => {
+      const { output, result } = await runPtyExit("picker-select-quit", async (home) => {
+        const runtime = await createTestRuntime(home);
+        const older = await runtime.startTrail({ title: "older" });
+        await runtime.debug.runTurn(older.trailId, "older real PTY history");
+        const selected = await runtime.startTrail({ title: "newer" });
+        await runtime.debug.runTurn(selected.trailId, "selected real PTY history");
+        await runtime.shutdown();
+        return ["--resume"];
+      });
 
-    expect(output).toContain("resume a session");
-    expect(output).toContain("selected real PTY history");
-    expect(output).not.toContain("older real PTY history");
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
+      expect(output).toContain("resume a session");
+      expect(output).toContain("selected real PTY history");
+      expect(output).not.toContain("older real PTY history");
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
 
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.for(["quit-lf", "ctrl-c"] as const)(
     "--continue renders the latest history and %s cleanup exits cleanly",
-    { timeout: 10_000 },
+    { timeout: PTY_TEST_TIMEOUT_MS },
     async (action, { runPtyExit }) => {
       const { output, result } = await runPtyExit(action, async (home) => {
         const runtime = await createTestRuntime(home);
@@ -353,31 +374,37 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     await reopened.shutdown();
   }, 12_000);
 
-  test("captures real streaming semantics in a normal 90x28 shell", async ({ runPtyExit }) => {
-    const { output, result } = await runPtyExit("prompt-quit", undefined, {
-      columns: 90,
-      rows: 28,
-    });
+  test(
+    "captures real streaming semantics in a normal 90x28 shell",
+    async ({ runPtyExit }) => {
+      const { output, result } = await runPtyExit("prompt-quit", undefined, {
+        columns: 90,
+        rows: 28,
+      });
 
-    expect(output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u);
-    expect(output).toContain("Controlled Pi completion for: show the polished shell");
-    expect(output).toContain("ctx 0%");
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
+      expect(output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] WORKING/u);
+      expect(output).toContain("Controlled Pi completion for: show the polished shell");
+      expect(output).toContain("ctx 0%");
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
 
-  test("selects a new model through the interactive picker and preserves cache isolation", async ({
-    runPtyExit,
-  }) => {
-    const { output, result } = await runPtyExit("model-picker-select-quit", undefined, {
-      columns: 90,
-      rows: 28,
-    });
+  test(
+    "selects a new model through the interactive picker and preserves cache isolation",
+    async ({ runPtyExit }) => {
+      const { output, result } = await runPtyExit("model-picker-select-quit", undefined, {
+        columns: 90,
+        rows: 28,
+      });
 
-    expect(output).toContain("SELECT MODEL · OpenRouter");
-    expect(output).toContain("Starts a new session · this one stays in /resume");
-    expect(output).toContain("● IDLE");
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
+      expect(output).toContain("SELECT MODEL · OpenRouter");
+      expect(output).toContain("Starts a new session · this one stays in /resume");
+      expect(output).toContain("● IDLE");
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
 
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.for([
@@ -385,7 +412,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     ["completed-turn-ctrl-c", "Ctrl+C"],
   ] as const)(
     "%s (%s) exits after a completed turn returns to IDLE and launches ambient reflection",
-    { timeout: 10_000 },
+    { timeout: PTY_TEST_TIMEOUT_MS },
     async ([action, _input], { runPtyExit }) => {
       const { home, output, result } = await runPtyExit(action);
       const workspace = await createWorkspaceStore(home);
@@ -410,7 +437,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     ["DEL grapheme", "backspace-grapheme-quit", "a"],
   ] as const)(
     "submits the value edited by ordinary %s Backspace in a real PTY",
-    { timeout: 10_000 },
+    { timeout: PTY_TEST_TIMEOUT_MS },
     async ([_variant, action, expected], { runPtyExit }) => {
       const { home, output, result } = await runPtyExit(action);
       const reopened = await createTestRuntime(home);
@@ -426,135 +453,155 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     },
   );
 
-  test("neutralizes bracketed C1 and OSC-like paste before the real PTY runtime sees it", async ({
-    runPtyExit,
-  }) => {
-    const { home, output, result } = await runPtyExit("paste-controls-quit", undefined, {
-      columns: 70,
-      rows: 22,
-    });
-    const reopened = await createTestRuntime(home);
-    const trail = reopened.listTrails()[0];
-    if (!trail) throw new Error("Expected the pasted prompt to create one trail");
-    const submitted = reopened.getTrail(trail.trailId).turns[0]?.input ?? "";
-    await reopened.shutdown();
+  test(
+    "neutralizes bracketed C1 and OSC-like paste before the real PTY runtime sees it",
+    async ({ runPtyExit }) => {
+      const { home, output, result } = await runPtyExit("paste-controls-quit", undefined, {
+        columns: 70,
+        rows: 22,
+      });
+      const reopened = await createTestRuntime(home);
+      const trail = reopened.listTrails()[0];
+      if (!trail) throw new Error("Expected the pasted prompt to create one trail");
+      const submitted = reopened.getTrail(trail.trailId).turns[0]?.input ?? "";
+      await reopened.shutdown();
 
-    expect(submitted).toContain("Unicode 界面");
-    expect(containsUnsafeTextControl(submitted)).toBe(false);
-    expect(containsC1(output)).toBe(false);
-    expect(output).toContain("Controlled Pi completion for:");
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
+      expect(submitted).toContain("Unicode 界面");
+      expect(containsUnsafeTextControl(submitted)).toBe(false);
+      expect(containsC1(output)).toBe(false);
+      expect(output).toContain("Controlled Pi completion for:");
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
 
-  test("does not submit fragmented hostile paste until a later genuine Enter", async ({ runPtyExit }) => {
-    const { home, output, result } = await runPtyExit("fragmented-hostile-paste-quit");
-    const reopened = await createTestRuntime(home);
-    const trail = reopened.listTrails()[0];
-    if (!trail) throw new Error("Expected the sanitized prompt to create one trail");
-    const turns = reopened.getTrail(trail.trailId).turns;
-    await reopened.shutdown();
+  test(
+    "does not submit fragmented hostile paste until a later genuine Enter",
+    async ({ runPtyExit }) => {
+      const { home, output, result } = await runPtyExit("fragmented-hostile-paste-quit");
+      const reopened = await createTestRuntime(home);
+      const trail = reopened.listTrails()[0];
+      if (!trail) throw new Error("Expected the sanitized prompt to create one trail");
+      const turns = reopened.getTrail(trail.trailId).turns;
+      await reopened.shutdown();
 
-    expect(output).not.toContain("__NOESIS_PREMATURE_SUBMIT__");
-    expect(turns).toHaveLength(1);
-    expect(turns[0]?.input).toBe("safe\nBAD [2J  31m ");
-    expect(containsUnsafeTextControl(turns[0]?.input ?? "")).toBe(false);
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
+      expect(output).not.toContain("__NOESIS_PREMATURE_SUBMIT__");
+      expect(turns).toHaveLength(1);
+      expect(turns[0]?.input).toBe("safe\nBAD [2J  31m ");
+      expect(containsUnsafeTextControl(turns[0]?.input ?? "")).toBe(false);
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
 
-  test("captures a resumed narrow 70x22 shell without crowding it with ASCII art", async ({ runPtyExit }) => {
-    const { output, result } = await runPtyExit(
-      "quit-lf",
-      async (home) => {
-        const runtime = await createTestRuntime(home);
-        const selected = await runtime.startTrail({
-          title: "narrow resumed",
-        });
-        await runtime.debug.runTurn(selected.trailId, "narrow history");
-        await runtime.shutdown();
-        return ["--resume", selected.trailId];
-      },
-      { columns: 70, rows: 22 },
-    );
-
-    expect(hasStartupNote(output)).toBe(true);
-    expect(output).toMatch(/NOESIS {2}.+/u);
-    expect(output).not.toContain("███╗   ██╗ ██████╗");
-    // A 70-column status line has no room for the session field; the resumed content is the
-    // evidence that the right session opened.
-    expect(output).toContain("narrow history");
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
-
-  test("reflows the main shell after a live PTY shrink", async ({ runPtyExit }) => {
-    const { output, result } = await runPtyExit("resize-main-quit", undefined, {
-      columns: 120,
-      rows: 35,
-    });
-    const resized = output.split("__NOESIS_RESIZED__").at(-1) ?? "";
-
-    expect(output).toContain("███╗   ██╗ ██████╗");
-    expect(resized).not.toContain("███╗   ██╗ ██████╗");
-    expect(hasStartupNote(resized)).toBe(false);
-    expect(resized).toContain("● IDLE");
-    expect(resized).toContain("› message");
-    expect(resized).toContain("? help · ctrl+o navigate");
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
-
-  test("recomputes picker rows after a live PTY shrink", async ({ runPtyExit }) => {
-    const { output, result } = await runPtyExit(
-      "resize-picker-cancel",
-      async (home) => {
-        const runtime = await createTestRuntime(home);
-        for (let index = 0; index < 12; index += 1) {
-          const trail = await runtime.startTrail({
-            title: `resize picker ${String(index).padStart(2, "0")}`,
+  test(
+    "captures a resumed narrow 70x22 shell without crowding it with ASCII art",
+    async ({ runPtyExit }) => {
+      const { output, result } = await runPtyExit(
+        "quit-lf",
+        async (home) => {
+          const runtime = await createTestRuntime(home);
+          const selected = await runtime.startTrail({
+            title: "narrow resumed",
           });
-          await retainTrail(runtime, trail.trailId, `resize picker history ${String(index)}`);
-        }
-        await runtime.shutdown();
-        return ["--resume"];
-      },
-      { columns: 100, rows: 30 },
-    );
-    const resized = output.split("__NOESIS_RESIZED__").at(-1) ?? "";
+          await runtime.debug.runTurn(selected.trailId, "narrow history");
+          await runtime.shutdown();
+          return ["--resume", selected.trailId];
+        },
+        { columns: 70, rows: 22 },
+      );
 
-    expect(resized).toContain("resume a session");
-    expect(resized).toContain("(1/12)");
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
+      expect(hasStartupNote(output)).toBe(true);
+      expect(output).toMatch(/NOESIS {2}.+/u);
+      expect(output).not.toContain("███╗   ██╗ ██████╗");
+      // A 70-column status line has no room for the session field; the resumed content is the
+      // evidence that the right session opened.
+      expect(output).toContain("narrow history");
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
 
-  test("renders a mixed Markdown and LaTeX transcript, streams, and survives a live shrink", async ({
-    runPtyExit,
-  }) => {
-    const { output, result } = await runPtyExit("mixed-resize-quit", undefined, { columns: 90, rows: 35 });
-    const resized = output.split("__NOESIS_MIXED_RESIZED__").at(-1) ?? "";
-    const finalScreen = resized
-      .split("__NOESIS_FINAL_SCREEN__")
-      .at(-1)
-      ?.split("__NOESIS_FINAL_SCREEN_END__")[0]
-      ?.trimEnd();
-    const screen = finalScreen ?? "";
+  test(
+    "reflows the main shell after a live PTY shrink",
+    async ({ runPtyExit }) => {
+      const { output, result } = await runPtyExit("resize-main-quit", undefined, {
+        columns: 120,
+        rows: 35,
+      });
+      const resized = output.split("__NOESIS_RESIZED__").at(-1) ?? "";
 
-    expect(output).toContain("```ts");
-    expect(output).toContain("$x_i^2$");
-    expect(output).toContain("╭─ math");
-    expect(output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] STREAMING/u);
-    expect(output).toContain("Controlled Pi completion for:");
-    expect(resized).not.toContain("███╗   ██╗");
-    // History scrolls into terminal scrollback instead of being replaced by a crop marker.
-    expect(screen).not.toContain("earlier conversation");
-    // The speaker label was rendered and has since scrolled above the viewport into scrollback,
-    // exactly as a long message behaves in any terminal transcript.
-    expect(output).toContain("NOESIS");
-    expect(screen).toContain("alpha");
-    expect(screen).toContain("MIXED-END");
-    expect(screen).toContain("● IDLE");
-    expect(screen).toContain("› message");
-    expect(screen).toContain("? help");
-    expect(screen.indexOf("› message")).toBeLessThan(screen.indexOf("● IDLE"));
-    expect(screen.indexOf("● IDLE")).toBeLessThan(screen.indexOf("? help"));
-    expect(screen.split("\n").every((line) => [...line].length <= 70)).toBe(true);
-    expect(result).toEqual({ code: 0, signal: null });
-  }, 10_000);
+      expect(output).toContain("███╗   ██╗ ██████╗");
+      expect(resized).not.toContain("███╗   ██╗ ██████╗");
+      expect(hasStartupNote(resized)).toBe(false);
+      expect(resized).toContain("● IDLE");
+      expect(resized).toContain("› message");
+      expect(resized).toContain("? help · ctrl+o navigate");
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "recomputes picker rows after a live PTY shrink",
+    async ({ runPtyExit }) => {
+      const { output, result } = await runPtyExit(
+        "resize-picker-cancel",
+        async (home) => {
+          const runtime = await createTestRuntime(home);
+          for (let index = 0; index < 12; index += 1) {
+            const trail = await runtime.startTrail({
+              title: `resize picker ${String(index).padStart(2, "0")}`,
+            });
+            await retainTrail(runtime, trail.trailId, `resize picker history ${String(index)}`);
+          }
+          await runtime.shutdown();
+          return ["--resume"];
+        },
+        { columns: 100, rows: 30 },
+      );
+      const resized = output.split("__NOESIS_RESIZED__").at(-1) ?? "";
+
+      expect(resized).toContain("resume a session");
+      expect(resized).toContain("(1/12)");
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
+
+  test(
+    "renders a mixed Markdown and LaTeX transcript, streams, and survives a live shrink",
+    async ({ runPtyExit }) => {
+      const { output, result } = await runPtyExit("mixed-resize-quit", undefined, { columns: 90, rows: 35 });
+      const resized = output.split("__NOESIS_MIXED_RESIZED__").at(-1) ?? "";
+      const finalScreen = resized
+        .split("__NOESIS_FINAL_SCREEN__")
+        .at(-1)
+        ?.split("__NOESIS_FINAL_SCREEN_END__")[0]
+        ?.trimEnd();
+      const screen = finalScreen ?? "";
+
+      expect(output).toContain("```ts");
+      expect(output).toContain("$x_i^2$");
+      expect(output).toContain("╭─ math");
+      expect(output).toMatch(/[⠉⠃⠆⡄⣀⢠⠰⠘] STREAMING/u);
+      expect(output).toContain("Controlled Pi completion for:");
+      expect(resized).not.toContain("███╗   ██╗");
+      // History scrolls into terminal scrollback instead of being replaced by a crop marker.
+      expect(screen).not.toContain("earlier conversation");
+      // The speaker label was rendered and has since scrolled above the viewport into scrollback,
+      // exactly as a long message behaves in any terminal transcript.
+      expect(output).toContain("NOESIS");
+      expect(screen).toContain("alpha");
+      expect(screen).toContain("MIXED-END");
+      expect(screen).toContain("● IDLE");
+      expect(screen).toContain("› message");
+      expect(screen).toContain("? help");
+      expect(screen.indexOf("› message")).toBeLessThan(screen.indexOf("● IDLE"));
+      expect(screen.indexOf("● IDLE")).toBeLessThan(screen.indexOf("? help"));
+      expect(screen.split("\n").every((line) => [...line].length <= 70)).toBe(true);
+      expect(result).toEqual({ code: 0, signal: null });
+    },
+    PTY_TEST_TIMEOUT_MS,
+  );
 });
