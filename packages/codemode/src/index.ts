@@ -259,17 +259,18 @@ function describeForModel(descriptor: FrozenToolDescriptor | undefined) {
 }
 const MAX_REPORTED_COMPLETED_TOOLS = 20;
 /** Names tool calls that already succeeded so the model does not mistake a failed program for a failed effect. */
-function withCompletedTools(error: Error, completed: readonly string[]): Error {
-  if (completed.length === 0) return error;
-  const listed = completed.slice(0, MAX_REPORTED_COMPLETED_TOOLS).join(", ");
+function withCompletedTools(
+  error: Error,
+  completed: { readonly names: readonly string[]; readonly total: number },
+): Error {
+  if (completed.total === 0) return error;
   const more =
-    completed.length > MAX_REPORTED_COMPLETED_TOOLS
-      ? ` and ${String(completed.length - MAX_REPORTED_COMPLETED_TOOLS)} more`
+    completed.total > completed.names.length
+      ? ` and ${String(completed.total - completed.names.length)} more`
       : "";
-  return new Error(
-    `${error.message}\n\nThese tool calls succeeded before the program failed, so their effects already happened: ${listed}${more}. Check current state before repeating any of them.`,
-    { cause: error },
-  );
+  // Keep the original error and its stack; only the message gains the completed-call context.
+  error.message = `${error.message}\n\nThese tool calls succeeded before the program failed, so their effects already happened: ${completed.names.join(", ")}${more}. Check current state before repeating any of them.`;
+  return error;
 }
 function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
   return Array.isArray(value);
@@ -394,7 +395,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     let progressBytes = 0;
     let calls = 0;
     /** Broker tools that returned successfully, so a later program failure can report effects that already happened. */
-    const completedTools: string[] = [];
+    const completedTools: { names: string[]; total: number } = { names: [], total: 0 };
     let ready = false;
     let terminal = false;
     let settlingResult = false;
@@ -578,6 +579,10 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                       ),
                     ),
             );
+            if (message.kind === "invoke") {
+              completedTools.total += 1;
+              if (completedTools.names.length < MAX_REPORTED_COMPLETED_TOOLS) completedTools.names.push(name);
+            }
             respond({
               type: "sdk-result",
               requestId: message.requestId,
@@ -585,7 +590,6 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               value,
               callId,
             });
-            if (message.kind === "invoke") completedTools.push(name);
             notify({ type: "tool-end", executionId, callId, name, callIndex, ok: true, result: value });
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);

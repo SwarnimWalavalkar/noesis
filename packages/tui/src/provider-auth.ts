@@ -378,16 +378,21 @@ export function createTuiProviderAuthOrchestration(options: {
     return await promise;
   };
 
-  const ensure = async (providerId: string, providerName: string): Promise<boolean> => {
+  async function ensure(providerId: string, providerName: string): Promise<boolean> {
     if (!options.runtime.providerAuthStatus || !options.runtime.authenticateProvider) return true;
     const status = await options.runtime.providerAuthStatus(providerId);
     if (status.configured) return true;
-    if (active) {
+    if (active?.providerId === providerId) {
       handle?.focus();
       return await active.promise;
     }
+    if (active) {
+      // Another provider is signing in; wait for it, then recheck this one before prompting.
+      await active.promise.catch(() => undefined);
+      return await ensure(providerId, providerName);
+    }
     return await authenticate(providerId, providerName);
-  };
+  }
 
   return Object.freeze({
     ensure,

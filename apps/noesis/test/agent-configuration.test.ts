@@ -112,6 +112,45 @@ test("Pi codemode inspects and updates configuration and signs in through the el
       ["config.update", "completed"],
       ["providers.authenticate", "completed"],
     ]);
+    expect(calls.find((call) => call.toolName === "config.inspect")?.response).toMatchObject({
+      output: {
+        home,
+        stored: null,
+        effective: {
+          agent: { provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL },
+          agents: { provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL },
+        },
+        sources: {
+          agent: { provider: "cli", model: "cli", thinkingLevel: "default" },
+          agents: { provider: "foreground", model: "foreground", thinkingLevel: "foreground" },
+        },
+      },
+    });
+    expect(calls.find((call) => call.toolName === "providers.list")?.response).toEqual({
+      output: {
+        providers: [
+          {
+            provider: CONTROLLED_PI_PROVIDER,
+            name: "Controlled",
+            authentication: {
+              provider: CONTROLLED_PI_PROVIDER,
+              configured: true,
+              source: "stored-api-key",
+              expired: null,
+            },
+            models: 1,
+            defaultModel: CONTROLLED_PI_MODEL,
+          },
+          {
+            provider: "other-provider",
+            name: "Other Provider",
+            authentication: { provider: "other-provider", configured: false, source: "none", expired: null },
+            models: 1,
+            defaultModel: "other-model",
+          },
+        ],
+      },
+    });
     const program = JSON.stringify(calls.find((call) => call.toolName === "execute")?.response);
     expect(program).toContain("Unrecognized key");
     expect(program).toContain(

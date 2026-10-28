@@ -29,4 +29,28 @@ describe("schemaSignature", () => {
     expect(signature(JsonValueSchema)).toBe("JSON");
     expect(signature(z.strictObject({ stored: JsonValueSchema }))).toBe("{ stored: JSON }");
   });
+  it("keeps the shape of other recursive schemas and bounds mutual recursion", () => {
+    const tree = {
+      $defs: {
+        node: {
+          type: "object",
+          properties: {
+            label: { type: "string" },
+            children: { type: "array", items: { $ref: "#/$defs/node" } },
+          },
+          required: ["label"],
+        },
+      },
+      $ref: "#/$defs/node",
+    };
+    expect(schemaSignature(tree)).toBe("{ label: string; children?: (recursive)[] }");
+    const mutual = {
+      $defs: {
+        a: { type: "object", properties: { b: { $ref: "#/$defs/b" } } },
+        b: { type: "object", properties: { a: { $ref: "#/$defs/a" } } },
+      },
+      $ref: "#/$defs/a",
+    };
+    expect(schemaSignature(mutual)).toBe("{ b?: { a?: (recursive) } }");
+  });
 });

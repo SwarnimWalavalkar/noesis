@@ -14,8 +14,8 @@ export default defineConfig({
       "packages/tools/test/broker.test.ts",
       "packages/runtime/test/{capability-coordinator,compounding-metrics,protected-activation,session-compaction,turn-interaction,turn-settlement}.test.ts",
       "packages/runtime-pi/test/{context-budget,context-inspection,execute-tool,image-input,prompt-efficiency}.test.ts",
-      "packages/tui/test/{attachment-presentation,command-autocomplete,commands,composer,external-editor,learning-audit-view,learning-presentation,mcp-elicitation-validation,optimistic-prompt,reducer,rendering,route-picker,syntax}.test.ts",
-      "apps/noesis/test/{attachment-history,browser-auth,cli-args,project-identity,prompt-surface,update}.test.ts",
+      "packages/tui/test/{attachment-presentation,command-autocomplete,commands,composer,external-editor,learning-audit-view,learning-presentation,elicitation-validation,optimistic-prompt,reducer,rendering,route-picker,syntax}.test.ts",
+      "apps/noesis/test/{attachment-history,browser-auth,cli-args,config-tools,project-identity,prompt-surface,update}.test.ts",
     ],
   },
 });

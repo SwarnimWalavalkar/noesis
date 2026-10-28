@@ -5221,8 +5221,9 @@ export async function createApplicationRuntimeComposition(
     );
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const startTrail: NoesisRuntime["startTrail"] = async (input) => {
-    const provider = input.provider ?? agentDefaults.provider;
-    const model = input.model ?? agentDefaults.model;
+    // New sessions follow the live configuration, so config.update applies without a restart.
+    const provider = input.provider ?? liveConfig.agent.provider;
+    const model = input.model ?? liveConfig.agent.model;
     options.resolveModelContext?.(provider, model);
     return await persistTrail(
       Object.freeze({
@@ -5231,7 +5232,7 @@ export async function createApplicationRuntimeComposition(
         status: "idle" as const,
         provider,
         model,
-        thinkingLevel: input.thinkingLevel ?? agentDefaults.thinkingLevel,
+        thinkingLevel: input.thinkingLevel ?? liveConfig.agent.thinkingLevel,
         runtime: agent.name,
         capabilityVersions: Object.freeze({}),
         turns: Object.freeze([]),

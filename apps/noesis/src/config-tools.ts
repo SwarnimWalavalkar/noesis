@@ -1,4 +1,5 @@
 import {
+  BUILT_IN_AGENT_DEFAULTS,
   NoesisConfigPatchSchema,
   ThinkingLevelSchema,
   readNoesisConfig,
@@ -90,6 +91,59 @@ const effective = (config: ResolvedNoesisConfig) => ({
     autoCompact: config.context.autoCompact ?? true,
   },
 });
+
+type Route = ResolvedNoesisConfig["agent"];
+type RoutePatch = NoesisConfigPatch["agent"];
+
+/** undefined keeps the current value, null falls back, and anything else replaces it. */
+const patched = <T>(next: T | null | undefined, kept: T, cleared: T): T =>
+  next === undefined ? kept : next === null ? cleared : next;
+
+/** Whether the patch sets a route field to a value; clearing alone falls back to a known route. */
+const setsRouteField = (patch: RoutePatch): boolean =>
+  AGENT_KEYS.some((key) => patch?.[key] !== undefined && patch[key] !== null);
+
+/**
+ * The foreground and subagent routes the patch will resolve to, so validation sees what a cleared field
+ * falls back to: the built-in default (or a command-line or environment override) for agent, and the
+ * foreground route for agents.
+ */
+export const routesAfter = (before: ResolvedNoesisConfig, patch: NoesisConfigPatch) => {
+  const overridden = (key: (typeof AGENT_KEYS)[number]) =>
+    before.sources[key] === "cli" || before.sources[key] === "environment";
+  const agent: Route = {
+    provider: patched(
+      patch.agent?.provider,
+      before.agent.provider,
+      overridden("provider") ? before.agent.provider : BUILT_IN_AGENT_DEFAULTS.provider,
+    ),
+    model: patched(
+      patch.agent?.model,
+      before.agent.model,
+      overridden("model") ? before.agent.model : BUILT_IN_AGENT_DEFAULTS.model,
+    ),
+    thinkingLevel: patched(
+      patch.agent?.thinkingLevel,
+      before.agent.thinkingLevel,
+      overridden("thinkingLevel") ? before.agent.thinkingLevel : BUILT_IN_AGENT_DEFAULTS.thinkingLevel,
+    ),
+  };
+  const inherits = (key: (typeof AGENT_KEYS)[number]) => before.agentsSources[key] === "foreground";
+  const agents: Route = {
+    provider: patched(
+      patch.agents?.provider,
+      inherits("provider") ? agent.provider : before.agents.provider,
+      agent.provider,
+    ),
+    model: patched(patch.agents?.model, inherits("model") ? agent.model : before.agents.model, agent.model),
+    thinkingLevel: patched(
+      patch.agents?.thinkingLevel,
+      inherits("thinkingLevel") ? agent.thinkingLevel : before.agents.thinkingLevel,
+      agent.thinkingLevel,
+    ),
+  };
+  return { agent, agents };
+};
 
 const providerTarget = z.strictObject({ provider: z.string().min(1) });
 
@@ -204,13 +258,9 @@ export function createConfigurationTools(port: ConfigurationPort): readonly Tool
   /** Rejects routes the model catalog does not offer. Skipped when no catalog is available. */
   const validateRoute = async (
     section: "agent" | "agents",
-    patch: NonNullable<NoesisConfigPatch["agent"]>,
-    current: ResolvedNoesisConfig["agent"],
+    { provider, model, thinkingLevel }: Route,
     signal: AbortSignal,
   ): Promise<void> => {
-    if (AGENT_KEYS.every((key) => patch[key] === undefined || patch[key] === null)) return;
-    const provider = patch.provider ?? current.provider;
-    const model = patch.model ?? current.model;
     const catalog = await knownRoutes(provider, model, signal);
     if (catalog.length === 0) return;
     const providerRoutes = catalog.filter((route) => route.provider === provider);
@@ -221,7 +271,6 @@ export function createConfigurationTools(port: ConfigurationPort): readonly Tool
       throw new Error(
         `${section}.model ${model} is not offered by ${provider}; inspect providers.list({ provider: ${JSON.stringify(provider)} })`,
       );
-    const thinkingLevel = patch.thinkingLevel ?? current.thinkingLevel;
     if (route && route.thinkingLevels.length > 0 && !route.thinkingLevels.includes(thinkingLevel))
       throw new Error(
         `${provider}/${model} does not support reasoning level ${thinkingLevel}. Supported: ${route.thinkingLevels.join(", ")}`,
@@ -272,8 +321,9 @@ export function createConfigurationTools(port: ConfigurationPort): readonly Tool
       effect: () => ({ effect: "write", resource: "config:noesis", estimatedCost: 0 }),
       execute: async (patch, context) => {
         const before = port.current();
-        if (patch.agent) await validateRoute("agent", patch.agent, before.agent, context.signal);
-        if (patch.agents) await validateRoute("agents", patch.agents, before.agents, context.signal);
+        const routes = routesAfter(before, patch);
+        if (setsRouteField(patch.agent)) await validateRoute("agent", routes.agent, context.signal);
+        if (setsRouteField(patch.agents)) await validateRoute("agents", routes.agents, context.signal);
         context.signal.throwIfAborted();
         const after = await port.update(patch);
         const overridden = AGENT_KEYS.filter(
@@ -284,7 +334,7 @@ export function createConfigurationTools(port: ConfigurationPort): readonly Tool
         const changedProviders = [
           ...new Set(
             [
-              patch.agent?.provider ? after.agent.provider : undefined,
+              patch.agent?.provider !== undefined ? after.agent.provider : undefined,
               patch.agents?.provider !== undefined ? after.agents.provider : undefined,
             ].filter((provider): provider is string => provider !== undefined),
           ),
