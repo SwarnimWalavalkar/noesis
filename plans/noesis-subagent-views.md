@@ -118,4 +118,3 @@ Built on 2026-10-26. Where the build departed from the decisions above, this rec
 - Unit and TUI tests: `packages/tui/test/agent-view.test.ts` (new), plus `rendering`, `reducer`, `run-inspector`, and `lifecycle` (an end-to-end keyboard test through `startNoesisTui`: strip, open, live delta, Right to the sibling, Esc twice, draft restored).
 - Acceptance: `apps/noesis/test/codemode-acceptance.test.ts` asserts that live child action IDs equal durable IDs and that a direct child `files.read` keeps its input. The assertion fails with the runtime fix reverted.
 - Real model: `openai-codex/gpt-6-astra` through `scripts/noesis-dev` over a PTY spawned two scouts. The collapsed strip, focused strip, spawn cards, live child view, sibling cycling, back navigation, and settled cards rendered as designed.
-
