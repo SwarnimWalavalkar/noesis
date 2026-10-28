@@ -1631,13 +1631,237 @@ describe("Noesis TUI lifecycle", () => {
     terminal.send("\u001b[27;1:1u");
     terminal.send("\u001b[27;1:3u");
     await vi.waitFor(() =>
-      expect(terminal.output.lastIndexOf("↑/↓ transcript")).toBeGreaterThan(
+      expect(terminal.output.lastIndexOf("↑/↓ move")).toBeGreaterThan(
         terminal.output.lastIndexOf("esc close"),
       ),
     );
 
     terminal.send("\u001b");
     terminal.type("/quit\n");
+    await running;
+  });
+
+  test("opens a running agent from the strip as a read-only transcript and returns to the draft", async () => {
+    const base = await createRuntime({
+      name: "subagent-view-scripted",
+      async run(request) {
+        return {
+          text: "ok",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const summary = (agentId: string, name: string) =>
+      Object.freeze({
+        agentId,
+        childSessionId: `session-${agentId}`,
+        projectId: "project-test",
+        originSessionId: "session-foreground",
+        name,
+        status: "running" as const,
+        route: Object.freeze({ provider: "child-provider", model: "child-model" }),
+        thinkingLevel: "high" as const,
+        activeTaskId: `task-${agentId}`,
+        latestTaskId: `task-${agentId}`,
+        latestTaskStatus: "running" as const,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    const agents = [summary("agent-a", "lifecycle"), summary("agent-b", "runtime")];
+    const prompts = new Map([
+      ["agent-a", "Map the capability lifecycle."],
+      ["agent-b", "Inspect the capability runtime."],
+    ]);
+    let listener: Parameters<NoesisTuiRuntime["subscribeSubAgents"]>[0] | undefined;
+    const runtime: NoesisTuiRuntime = Object.freeze({
+      ...base,
+      listSubAgents: async () => agents,
+      inspectSubAgent: async (agentId: string) => {
+        const found = agents.find((agent) => agent.agentId === agentId);
+        if (!found) throw new Error(`Subagent not found: ${agentId}`);
+        return Object.freeze({
+          ...found,
+          systemPrompt: "You are a focused subagent.",
+          tools: Object.freeze([]),
+          tasks: Object.freeze([]),
+          recentMessages: Object.freeze([]),
+        });
+      },
+      getSubAgentTranscript: async (agentId: string): Promise<readonly RuntimeTranscriptEntry[]> => [
+        {
+          kind: "message",
+          messageId: `task-message-${agentId}`,
+          role: "user",
+          text: prompts.get(agentId) ?? "",
+          createdAt: "2026-08-31T00:00:00.000Z",
+        },
+      ],
+      subscribeSubAgents: (next: Parameters<NoesisTuiRuntime["subscribeSubAgents"]>[0]) => {
+        listener = next;
+        return () => {
+          listener = undefined;
+        };
+      },
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("2 agents running"));
+    terminal.type("unsent draft");
+
+    terminal.send("\u000f");
+    await vi.waitFor(() => expect(terminal.output).toContain("AGENTS"));
+    expect(terminal.output).toContain("NAVIGATE");
+    const beforeOpen = terminal.output.length;
+    terminal.send("\r");
+    await vi.waitFor(() =>
+      expect(terminal.output.slice(beforeOpen)).toContain("Map the capability lifecycle."),
+    );
+    expect(terminal.output.slice(beforeOpen)).toContain("↳ SUBAGENT");
+    expect(terminal.output.slice(beforeOpen)).toContain("read-only");
+
+    listener?.({
+      type: "live",
+      agentId: "agent-a",
+      taskId: "task-agent-a",
+      event: { type: "delta", text: "Live lifecycle finding." },
+    });
+    await vi.waitFor(() => expect(terminal.output).toContain("Live lifecycle finding."));
+
+    const beforeCycle = terminal.output.length;
+    terminal.send("\u001b[C");
+    await vi.waitFor(() =>
+      expect(terminal.output.slice(beforeCycle)).toContain("Inspect the capability runtime."),
+    );
+
+    const beforeBack = terminal.output.length;
+    terminal.send("\u001b");
+    await vi.waitFor(() => expect(terminal.output.slice(beforeBack)).toContain("enter open"));
+    terminal.send("\u001b");
+    await vi.waitFor(() => expect(terminal.output.lastIndexOf("› message")).toBeGreaterThan(beforeBack));
+    expect(terminal.output.slice(beforeBack)).toContain("unsent draft");
+
+    terminal.send("\u0003");
+    await running;
+  });
+
+  test("returns from a nested agent to the parent card it was opened from", async () => {
+    const base = await createRuntime({
+      name: "nested-agent-scripted",
+      async run(request) {
+        return {
+          text: "ok",
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      steer: consumeSteer,
+      async abort() {},
+    });
+    const now = new Date().toISOString();
+    const summary = (agentId: string, name: string) =>
+      Object.freeze({
+        agentId,
+        childSessionId: `session-${agentId}`,
+        projectId: "project-test",
+        originSessionId: "session-foreground",
+        name,
+        status: "running" as const,
+        route: Object.freeze({ provider: "child-provider", model: "child-model" }),
+        thinkingLevel: "high" as const,
+        activeTaskId: `task-${agentId}`,
+        latestTaskId: `task-${agentId}`,
+        latestTaskStatus: "running" as const,
+        createdAt: now,
+        updatedAt: now,
+      });
+    const agents = [
+      summary("agent-parent", "outer-scout"),
+      { ...summary("agent-child", "inner-scout"), parentAgentId: "agent-parent" },
+    ];
+    const transcripts = new Map<string, readonly RuntimeTranscriptEntry[]>([
+      [
+        "agent-parent",
+        [
+          {
+            kind: "message",
+            messageId: "parent-task",
+            role: "user",
+            text: "Delegate one inner check.",
+            createdAt: now,
+          },
+          {
+            kind: "action",
+            actionId: "spawn-inner",
+            name: "agents.spawn",
+            status: "completed",
+            input: { name: "inner-scout" },
+            output: {
+              agentId: "agent-child",
+              taskId: "task-agent-child",
+              name: "inner-scout",
+              status: "accepted",
+            },
+            startedAt: now,
+            completedAt: now,
+          },
+        ],
+      ],
+      [
+        "agent-child",
+        [
+          {
+            kind: "message",
+            messageId: "child-task",
+            role: "user",
+            text: "Check the inner detail.",
+            createdAt: now,
+          },
+        ],
+      ],
+    ]);
+    const runtime: NoesisTuiRuntime = Object.freeze({
+      ...base,
+      listSubAgents: async () => agents,
+      inspectSubAgent: async (agentId: string) => {
+        const found = agents.find((agent) => agent.agentId === agentId);
+        if (!found) throw new Error(`Subagent not found: ${agentId}`);
+        return Object.freeze({
+          ...found,
+          systemPrompt: "You are a focused subagent.",
+          tools: Object.freeze([]),
+          tasks: Object.freeze([]),
+          recentMessages: Object.freeze([]),
+        });
+      },
+      getSubAgentTranscript: async (agentId: string) => transcripts.get(agentId) ?? [],
+      subscribeSubAgents: () => () => undefined,
+    });
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, {}, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("2 agents running"));
+
+    terminal.send("\u000f");
+    terminal.send("\r");
+    await vi.waitFor(() => expect(terminal.output).toContain("Delegate one inner check."));
+    terminal.send("\u001b[A");
+    await vi.waitFor(() => expect(terminal.output).toMatch(/▸ ?● inner-scout/u));
+    const beforeNested = terminal.output.length;
+    terminal.send("\r");
+    await vi.waitFor(() => expect(terminal.output.slice(beforeNested)).toContain("Check the inner detail."));
+    const beforeBack = terminal.output.length;
+    terminal.send("\u001b");
+    await vi.waitFor(() => expect(terminal.output.slice(beforeBack)).toContain("Delegate one inner check."));
+    // The parent's selection on the card survives the round trip through the nested agent.
+    await vi.waitFor(() => expect(terminal.output.slice(beforeBack)).toMatch(/▸ ?● inner-scout/u));
+
+    terminal.send("\u0003");
     await running;
   });
 
@@ -2059,7 +2283,7 @@ describe("Noesis TUI lifecycle", () => {
     });
     const terminal = createTestTerminal();
     const running = startNoesisTui(runtime, {}, terminal);
-    await vi.waitFor(() => expect(terminal.output).toContain("? help · ctrl+o inspect runs"));
+    await vi.waitFor(() => expect(terminal.output).toContain("? help · ctrl+o navigate"));
     expect(terminal.output).not.toContain("/learn · /evaluate");
 
     terminal.type("?\r");

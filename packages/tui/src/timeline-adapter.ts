@@ -98,3 +98,28 @@ export function tuiUserInputAction(
     .addOptional(attachments ? { attachments } : undefined)
     .finish();
 }
+
+/** Model rounds are runtime bookkeeping, not conversation; a subagent view omits them. */
+export const MODEL_ROUND_ACTION_NAME = "model.round";
+
+/** The runtime's inspection header on a mailbox message: `[sender → recipient]`. */
+const MAILBOX_HEADER = /^\[(?<sender>[a-z]+:[^\s\]]+) → (?<recipient>[a-z]+:[^\s\]]+)\]\n/u;
+
+/**
+ * A subagent's durable transcript in the same entry shape the session transcript renders. A
+ * mailbox message addressed to the agent is its task, shown as the requester's turn rather than
+ * a system note carrying actor identifiers.
+ */
+export function subAgentTimelineFromRuntime(
+  transcript: readonly RuntimeTranscriptEntry[],
+  agentId: string,
+): readonly TuiTimelineEntry[] {
+  return tuiTimelineFromRuntime(
+    transcript.filter((entry) => entry.kind !== "action" || entry.name !== MODEL_ROUND_ACTION_NAME),
+  ).map((entry) => {
+    if (entry.kind !== "message" || entry.role !== "system") return entry;
+    const header = MAILBOX_HEADER.exec(entry.text);
+    if (header?.groups?.["recipient"] !== `subagent:${agentId}`) return entry;
+    return { ...entry, role: "user", text: entry.text.slice(header[0].length) };
+  });
+}

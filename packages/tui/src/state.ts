@@ -1,17 +1,27 @@
 export { interactionViewFromSnapshot } from "./interaction-view.ts";
 import { createConditionalObject, type JsonValue, type ComposerAttachment } from "@noesis/domain";
 import type { ContextSnapshot } from "@noesis/context";
-import type { SubAgentRuntimeEvent, SubAgentSummary } from "@noesis/agent-types";
+import type { AgentRuntimeEvent, SubAgentSummary } from "@noesis/agent-types";
 import type { RuntimeAgentDefaults, RuntimeTranscriptEntry, TrailState } from "@noesis/runtime";
-import { appendReasoningDelta, reconcileReasoning } from "./reasoning-timeline.ts";
+import { timelineEventForAgentEvent } from "./agent-event.ts";
 import type { TuiExecutionDetail } from "./runtime-port.ts";
 import { reduceSubAgentPhase, retainActiveSubAgentPhases } from "./subagent-presentation-state.ts";
 import {
   isLocalSystemMessage,
   lastContentEntryIndex,
+  subAgentTimelineFromRuntime,
   tuiTimelineFromRuntime,
   tuiUserMessage,
 } from "./timeline-adapter.ts";
+import { numberField } from "./record-fields.ts";
+import {
+  mergeDurableTimeline,
+  moveActionCursor,
+  reduceTimeline,
+  runningToolName,
+  selectableActions,
+  type TimelineEvent,
+} from "./transcript-slice.ts";
 export { tuiTimelineFromRuntime };
 export type Pane = "trail" | "context" | "capabilities";
 export type TuiAttachmentLabel = Pick<ComposerAttachment, "name" | "mimeType">;
@@ -109,9 +119,46 @@ export interface TuiInspectorState {
   readonly detail?: TuiExecutionDetail;
   readonly view: "semantic" | "raw";
   readonly scroll: number;
-  /** Process-scoped subagents do not add a synthetic tool call to the foreground transcript. */
-  readonly syntheticAction?: TuiAgentAction;
-  readonly liveEvents?: readonly SubAgentRuntimeEvent[];
+}
+/** The part of an agent view the user moved through, restored when they return to it. */
+export type TuiAgentViewNavigation = Pick<
+  TuiAgentViewState,
+  "actionCursor" | "expandedActionIds" | "scroll" | "scrollAnchor"
+>;
+/** Rows a scrolled-back agent view sits above the newest output, including output since it scrolled. */
+export function effectiveAgentScroll(view: TuiAgentViewState, documentRows: number): number {
+  if (view.scroll <= 0) return 0;
+  return view.scroll + Math.max(0, documentRows - (view.scrollAnchor ?? documentRows));
+}
+/** Collapsed or expanded presentation of the running-agent strip above the composer. */
+export interface TuiAgentStripState {
+  readonly expanded: boolean;
+  /** While the strip has focus, list retained agents from every session instead of this one. */
+  readonly allSessions: boolean;
+}
+/**
+ * A read-only subagent transcript opened over the session. It is a disposable projection of the
+ * runtime's durable child transcript plus live events; it is dropped when the view closes.
+ */
+export interface TuiAgentViewState {
+  readonly agentId: string;
+  /** Agents opened before this one through nested cards; Esc returns to the newest. */
+  readonly parents: readonly string[];
+  readonly status: "loading" | "ready";
+  readonly timeline: readonly TuiTimelineEntry[];
+  readonly expandedActionIds: ReadonlySet<string>;
+  readonly actionCursor?: string;
+  readonly execution: ExecutionState;
+  /** Rows scrolled back from the newest content; zero follows live output. */
+  readonly scroll: number;
+  /** Document rows when `scroll` was set; later output deepens the offset so the view holds still. */
+  readonly scrollAnchor?: number;
+  readonly systemPrompt?: string;
+  readonly systemPromptShown: boolean;
+  /** Why the agent's latest task failed, as recorded by the runtime. */
+  readonly taskError?: string;
+  readonly totalTokens?: number;
+  readonly contextUsage?: TuiContextUsage;
 }
 export interface NoesisTuiState {
   readonly trailId?: string;
@@ -127,11 +174,15 @@ export interface NoesisTuiState {
   readonly expandedActionIds: ReadonlySet<string>;
   /** Set while the transcript is navigable by keyboard; undefined means the editor owns input. */
   readonly actionCursor?: string;
-  /** Independent process-scoped actor navigation while Ctrl+O owns input. */
+  /** Selected row of the agent strip while navigation owns input. */
   readonly subAgentCursor?: string;
   readonly subAgents: readonly SubAgentSummary[];
   /** Ephemeral live phase text; durable actor/task state remains authoritative in the runtime. */
   readonly subAgentPhases: Readonly<Record<string, string>>;
+  /** View-local wall clock for agent elapsed time and pulse; zero until the first tick. */
+  readonly agentClock: number;
+  readonly agentStrip: TuiAgentStripState;
+  readonly agentView?: TuiAgentViewState;
   readonly inspector?: TuiInspectorState;
   readonly context?: ContextSnapshot;
   readonly contextUsage?: TuiContextUsage;
@@ -234,16 +285,64 @@ export type NoesisTuiAction =
       readonly subAgents: readonly SubAgentSummary[];
     }
   | {
-      readonly type: "subagent-cursor-moved";
+      /** Ctrl+O: focus the agent strip while agents run, otherwise the newest transcript action. */
+      readonly type: "navigation-entered";
+    }
+  | {
+      /** Spatial movement: transcript actions sit above the strip, which sits above the composer. */
+      readonly type: "navigation-moved";
       readonly direction: "previous" | "next";
     }
   | {
-      readonly type: "inspection-navigation-toggled";
+      readonly type: "agent-strip-toggled";
+    }
+  | {
+      readonly type: "agent-strip-scope-toggled";
+    }
+  | {
+      readonly type: "agents-ticked";
+      readonly now: number;
+    }
+  | {
+      readonly type: "agent-view-opened";
+      readonly agentId: string;
+      readonly parents: readonly string[];
+      /** Where the user was in this agent's view when they opened a nested agent from it. */
+      readonly navigation?: TuiAgentViewNavigation;
+    }
+  | {
+      readonly type: "agent-view-hydrated";
+      readonly agentId: string;
+      readonly transcript: readonly RuntimeTranscriptEntry[];
+      readonly systemPrompt?: string;
+      readonly taskError?: string;
+    }
+  | {
+      readonly type: "agent-view-closed";
+    }
+  | {
+      readonly type: "agent-view-cursor-moved";
+      readonly direction: "previous" | "next";
+    }
+  | {
+      readonly type: "agent-view-cursor-cleared";
+    }
+  | {
+      readonly type: "agent-view-scrolled";
+      readonly delta: number;
+      readonly maxScroll: number;
+      /** Rendered document rows, which anchor a scrolled-back position against new output. */
+      readonly documentRows: number;
+    }
+  | {
+      readonly type: "agent-view-expansion-toggled";
+    }
+  | {
+      readonly type: "agent-view-system-prompt-toggled";
     }
   | {
       readonly type: "inspector-opened";
       readonly actionId: string;
-      readonly syntheticAction?: TuiAgentAction;
     }
   | {
       readonly type: "inspector-loaded";
@@ -263,8 +362,9 @@ export type NoesisTuiAction =
     }
   | {
       readonly type: "subagent-live-event";
-      readonly actionId: string;
-      readonly event: Extract<SubAgentRuntimeEvent, { readonly type: "live" }>;
+      readonly agentId: string;
+      readonly event: AgentRuntimeEvent;
+      readonly at?: number;
     }
   | {
       readonly type: "execution-changed";
@@ -324,6 +424,7 @@ export type NoesisTuiAction =
       readonly text: string;
     };
 const NO_EXPANDED_ACTIONS: ReadonlySet<string> = new Set<string>();
+const NO_AGENT_STRIP: TuiAgentStripState = Object.freeze({ expanded: false, allSessions: false });
 const EMPTY_INTERACTION: TuiInteractionView = Object.freeze({
   phase: "idle",
   queuePaused: false,
@@ -348,6 +449,8 @@ export const initialTuiState = (
   timeline: [],
   subAgents: [],
   subAgentPhases: {},
+  agentClock: 0,
+  agentStrip: NO_AGENT_STRIP,
   expandedActionIds: NO_EXPANDED_ACTIONS,
   interaction: EMPTY_INTERACTION,
   turnCount: 0,
@@ -370,47 +473,151 @@ export function visibleTranscriptActions(
 ): readonly TuiAgentActionEntry[] {
   return timelineActions(timeline);
 }
-function moveCursor(state: NoesisTuiState, direction: "previous" | "next"): NoesisTuiState {
-  const actions = visibleTranscriptActions(state.timeline);
-  if (actions.length === 0) return state;
-  const currentIndex = actions.findIndex((action) => action.actionId === state.actionCursor);
-  // Entering navigation with no cursor selects the most recent action, which is what the user
-  // is almost always looking at when work has just finished.
-  if (currentIndex < 0) {
-    const last = actions.at(-1);
-    return last ? { ...state, actionCursor: last.actionId } : state;
-  }
-  const nextIndex = Math.min(actions.length - 1, Math.max(0, currentIndex + (direction === "next" ? 1 : -1)));
-  const next = actions[nextIndex];
-  return next ? { ...state, actionCursor: next.actionId } : state;
-}
+export const isActiveSubAgent = (agent: Pick<SubAgentSummary, "status">): boolean =>
+  agent.status === "starting" || agent.status === "running";
 export function hasSessionSubagents(state: NoesisTuiState): boolean {
   return (
     state.trailId !== undefined && state.subAgents.some((agent) => agent.originSessionId === state.trailId)
   );
 }
-function moveSubAgentCursor(state: NoesisTuiState, direction: "previous" | "next"): NoesisTuiState {
-  if (!hasSessionSubagents(state)) return state;
-  const currentIndex = state.subAgents.findIndex((agent) => agent.agentId === state.subAgentCursor);
-  if (currentIndex < 0) {
-    const active = [...state.subAgents]
-      .reverse()
-      .find((agent) => agent.status === "starting" || agent.status === "running");
-    const selected = active ?? state.subAgents.at(-1);
-    return selected ? { ...state, subAgentCursor: selected.agentId } : state;
+const newestFirst = (agents: readonly SubAgentSummary[]): readonly SubAgentSummary[] =>
+  agents.toSorted((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+/**
+ * Whether an agent belongs to the current session: started by it, or by one of its agents.
+ * Retained records from earlier sessions and processes are history, reached on request.
+ */
+export function isSessionAgent(state: NoesisTuiState, agent: SubAgentSummary): boolean {
+  if (state.trailId === undefined) return false;
+  const visited = new Set<string>();
+  let current: SubAgentSummary | undefined = agent;
+  while (current && !visited.has(current.agentId)) {
+    if (current.originSessionId === state.trailId) return true;
+    visited.add(current.agentId);
+    const parentId: string | undefined = current.parentAgentId;
+    current = parentId ? state.subAgents.find((candidate) => candidate.agentId === parentId) : undefined;
   }
-  const nextIndex = Math.min(
-    state.subAgents.length - 1,
-    Math.max(0, currentIndex + (direction === "next" ? 1 : -1)),
+  return false;
+}
+/**
+ * Rows of the agent strip. Unfocused, it lists running agents from any session. With focus, or
+ * when pinned open, it adds this session's finished agents, or every retained agent when the user
+ * widens the scope.
+ */
+export function stripAgents(state: NoesisTuiState): readonly SubAgentSummary[] {
+  const running = state.subAgents.filter(isActiveSubAgent);
+  // A pinned strip keeps this session's finished agents after navigation leaves it.
+  if (state.subAgentCursor === undefined && !state.agentStrip.expanded) return running;
+  const finished = newestFirst(
+    state.subAgents.filter(
+      (agent) => !isActiveSubAgent(agent) && (state.agentStrip.allSessions || isSessionAgent(state, agent)),
+    ),
   );
-  const next = state.subAgents[nextIndex];
-  return next ? { ...state, subAgentCursor: next.agentId } : state;
+  const rows = [...running, ...finished];
+  // A row selected before the scope narrowed stays visible until the cursor moves off it.
+  const selected = rows.some((agent) => agent.agentId === state.subAgentCursor)
+    ? undefined
+    : state.subAgents.find((agent) => agent.agentId === state.subAgentCursor);
+  return selected ? [...rows, selected] : rows;
+}
+/**
+ * Agents that Left/Right cycle through from an opened agent: those started by the same requester,
+ * running first, then finished ones newest first.
+ */
+export function siblingAgents(state: NoesisTuiState, agentId: string): readonly SubAgentSummary[] {
+  const current = state.subAgents.find((agent) => agent.agentId === agentId);
+  if (!current) return [];
+  const family = state.subAgents.filter(
+    (agent) =>
+      agent.originSessionId === current.originSessionId && agent.parentAgentId === current.parentAgentId,
+  );
+  return [
+    ...family.filter(isActiveSubAgent),
+    ...newestFirst(family.filter((agent) => !isActiveSubAgent(agent))),
+  ];
+}
+function focusStrip(state: NoesisTuiState, agentId: string): NoesisTuiState {
+  const { actionCursor: _actionCursor, ...rest } = state;
+  return { ...rest, subAgentCursor: agentId };
+}
+function focusTranscript(state: NoesisTuiState, actionId: string): NoesisTuiState {
+  const { subAgentCursor: _subAgentCursor, ...rest } = state;
+  return { ...rest, actionCursor: actionId, agentStrip: { ...state.agentStrip, allSessions: false } };
+}
+/** First strip row a focus move would land on: a running agent, else this session's newest. */
+function firstFocusableAgent(state: NoesisTuiState): string | undefined {
+  const running = state.subAgents.find(isActiveSubAgent);
+  if (running) return running.agentId;
+  return newestFirst(state.subAgents.filter((agent) => isSessionAgent(state, agent)))[0]?.agentId;
+}
+function enterNavigation(state: NoesisTuiState): NoesisTuiState {
+  const running = state.subAgents.find(isActiveSubAgent);
+  if (running) return focusStrip(state, running.agentId);
+  const action = moveActionCursor(state.timeline, undefined, "previous");
+  if (action) return focusTranscript(state, action);
+  const agent = firstFocusableAgent(state);
+  return agent ? focusStrip(state, agent) : state;
+}
+function moveNavigation(state: NoesisTuiState, direction: "previous" | "next"): NoesisTuiState {
+  if (state.subAgentCursor !== undefined) {
+    const rows = stripAgents(state);
+    const index = rows.findIndex((agent) => agent.agentId === state.subAgentCursor);
+    if (direction === "previous" && index <= 0) {
+      const action = moveActionCursor(state.timeline, undefined, "previous");
+      return action ? focusTranscript(state, action) : state;
+    }
+    const next = rows[Math.min(rows.length - 1, Math.max(0, index + (direction === "next" ? 1 : -1)))];
+    return next ? { ...state, subAgentCursor: next.agentId } : state;
+  }
+  const atLast = selectableActions(state.timeline).at(-1)?.actionId === state.actionCursor;
+  if (direction === "next" && atLast) {
+    const agent = firstFocusableAgent(state);
+    if (agent) return focusStrip(state, agent);
+  }
+  const action = moveActionCursor(state.timeline, state.actionCursor, direction);
+  return action ? { ...state, actionCursor: action } : state;
 }
 function toggleExpansion(state: NoesisTuiState, actionId: string): NoesisTuiState {
   const expanded = new Set(state.expandedActionIds);
   if (expanded.has(actionId)) expanded.delete(actionId);
   else expanded.add(actionId);
   return { ...state, expandedActionIds: expanded };
+}
+function toggled(set: ReadonlySet<string>, value: string): ReadonlySet<string> {
+  const next = new Set(set);
+  if (next.has(value)) next.delete(value);
+  else next.add(value);
+  return next;
+}
+/** Model rounds are runtime bookkeeping rather than transcript content; only their usage is kept. */
+const sumTokens = (transcript: readonly RuntimeTranscriptEntry[]): number | undefined => {
+  let total: number | undefined;
+  for (const entry of transcript) {
+    if (entry.kind !== "action" || entry.name !== "model.round") continue;
+    const tokens = numberField(entry.output, "totalTokens");
+    if (tokens !== undefined) total = (total ?? 0) + tokens;
+  }
+  return total;
+};
+function reduceAgentView(
+  view: TuiAgentViewState,
+  event: AgentRuntimeEvent,
+  at: number | undefined,
+): TuiAgentViewState {
+  if (event.type === "usage")
+    return {
+      ...view,
+      contextUsage: {
+        usedTokens: event.usedTokens,
+        contextWindow: event.contextWindow,
+        accuracy: event.accuracy,
+      },
+    };
+  if (event.type === "status")
+    return event.status === "started" ? { ...view, execution: "thinking" } : { ...view, execution: "idle" };
+  const timelineEvent: TimelineEvent | undefined = timelineEventForAgentEvent(event, at);
+  if (!timelineEvent) return view;
+  const next = reduceTimeline(view, timelineEvent);
+  return { ...view, timeline: next.timeline, execution: next.execution };
 }
 export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): NoesisTuiState {
   switch (action.type) {
@@ -419,6 +626,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         activeTool: _activeTool,
         actionCursor: _actionCursor,
         subAgentCursor: _subAgentCursor,
+        agentView: _agentView,
         context: _context,
         contextUsage: _contextUsage,
         error: _error,
@@ -505,158 +713,165 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
           { kind: "message", role: "user", origin: "collaboration", text: action.text },
         ],
       };
-    case "stream-delta": {
-      const timeline = [...state.timeline];
-      const index = lastContentEntryIndex(timeline);
-      const last = timeline[index];
-      if (last?.kind === "message" && last.role === "assistant") {
-        timeline[index] = {
-          ...last,
-          text: last.text + action.text,
-        };
-      } else {
-        timeline.push({
-          kind: "message",
-          role: "assistant",
-          text: action.text,
-        });
-      }
-      return { ...state, execution: "streaming", timeline };
-    }
-    case "stream-reconciled": {
-      const timeline = [...state.timeline];
-      const index = lastContentEntryIndex(timeline);
-      const last = timeline[index];
-      if (last?.kind === "message" && last.role === "assistant") {
-        timeline[index] = { ...last, text: action.text };
-      } else {
-        timeline.push({
-          kind: "message",
-          role: "assistant",
-          text: action.text,
-        });
-      }
-      return { ...state, timeline };
-    }
-    case "reasoning-delta": {
-      return {
-        ...state,
-        execution: "thinking",
-        timeline: appendReasoningDelta(state.timeline, action.text),
-      };
-    }
+    case "stream-delta":
+    case "stream-reconciled":
+    case "reasoning-delta":
     case "reasoning-reconciled":
-      return { ...state, timeline: reconcileReasoning(state.timeline, action.text) };
-    case "action-started": {
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      const next: TuiAgentActionEntry = createConditionalObject({
-        kind: "action",
-        actionId: action.actionId,
-      } as const)
-        .addOptional(action.parentActionId ? { parentActionId: action.parentActionId } : undefined)
-        .add({
-          name: action.name,
-          status: "running",
-        } as const)
-        .addOptional(!(action.input === undefined) ? { input: action.input } : undefined)
-        .addOptional(!(action.at === undefined) ? { startedAt: action.at } : undefined)
-        .finish();
-      const existing = state.timeline.findIndex(
-        (entry) => entry.kind === "action" && entry.actionId === action.actionId,
-      );
-      const timeline =
-        existing < 0
-          ? [...state.timeline, next]
-          : state.timeline.map((entry, index) => (index === existing ? next : entry));
-      return { ...state, execution: "tool", activeTool: action.name, timeline };
+    case "action-updated": {
+      const next = reduceTimeline(state, action);
+      return { ...state, timeline: next.timeline, execution: next.execution };
     }
-    case "action-updated":
-      return {
-        ...state,
-        timeline: state.timeline.map((entry) =>
-          entry.kind === "action" && entry.actionId === action.actionId
-            ? { ...entry, update: action.update }
-            : entry,
-        ),
-      };
+    case "action-started": {
+      const next = reduceTimeline(state, action);
+      return { ...state, timeline: next.timeline, execution: next.execution, activeTool: action.name };
+    }
     case "action-ended": {
-      const timeline = state.timeline.map((entry): TuiTimelineEntry => {
-        if (entry.kind !== "action" || entry.actionId !== action.actionId) return entry;
-        const durationMs =
-          action.at !== undefined && entry.startedAt !== undefined
-            ? Math.max(0, action.at - entry.startedAt)
-            : undefined;
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        return createConditionalObject({
-          ...entry,
-          status: action.isError ? "failed" : "completed",
-        } as const)
-          .addOptional(!(action.output === undefined) ? { output: action.output } : undefined)
-          .addOptional(!(durationMs === undefined) ? { durationMs } : undefined)
-          .finish();
-      });
-      const activeTool = [...timeline]
-        .reverse()
-        .find(
-          (entry): entry is TuiAgentActionEntry => entry.kind === "action" && entry.status === "running",
-        )?.name;
+      const next = reduceTimeline(state, action);
+      const activeTool = runningToolName(next.timeline);
       const { activeTool: _activeTool, ...rest } = state;
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      return createConditionalObject({
-        ...rest,
-      } as const)
+      return createConditionalObject({ ...rest } as const)
         .addOptional(activeTool ? { activeTool } : undefined)
-        .add({
-          timeline,
-          execution: activeTool ? "tool" : "thinking",
-        } as const)
+        .add({ timeline: next.timeline, execution: next.execution } as const)
         .finish();
     }
     case "action-expansion-toggled":
       return toggleExpansion(state, action.actionId);
     case "action-cursor-moved": {
       const { subAgentCursor: _subAgentCursor, ...rest } = state;
-      return moveCursor(rest, action.direction);
+      const actionCursor = moveActionCursor(rest.timeline, rest.actionCursor, action.direction);
+      return actionCursor ? { ...rest, actionCursor } : rest;
     }
+    case "navigation-entered":
+      return enterNavigation(state);
+    case "navigation-moved":
+      return moveNavigation(state, action.direction);
+    case "agent-strip-toggled":
+      return { ...state, agentStrip: { ...state.agentStrip, expanded: !state.agentStrip.expanded } };
+    case "agent-strip-scope-toggled":
+      return { ...state, agentStrip: { ...state.agentStrip, allSessions: !state.agentStrip.allSessions } };
+    case "agents-ticked":
+      return { ...state, agentClock: action.now };
     case "subagents-hydrated": {
-      const cursorStillExists = action.subAgents.some((agent) => agent.agentId === state.subAgentCursor);
+      const subAgents = Object.freeze([...action.subAgents]);
       const subAgentPhases = retainActiveSubAgentPhases(action.subAgents, state.subAgentPhases);
-      if (cursorStillExists || state.subAgentCursor === undefined)
-        return { ...state, subAgents: Object.freeze([...action.subAgents]), subAgentPhases };
-      const { subAgentCursor: _subAgentCursor, ...rest } = state;
-      return { ...rest, subAgents: Object.freeze([...action.subAgents]), subAgentPhases };
-    }
-    case "subagent-cursor-moved": {
-      const { actionCursor: _actionCursor, ...rest } = state;
-      return moveSubAgentCursor(rest, action.direction);
-    }
-    case "inspection-navigation-toggled": {
-      if (state.subAgentCursor !== undefined) {
-        const { subAgentCursor: _subAgentCursor, ...rest } = state;
-        return moveCursor(rest, "previous");
-      }
-      if (hasSessionSubagents(state)) {
-        const { actionCursor: _actionCursor, ...rest } = state;
-        return moveSubAgentCursor(rest, "previous");
-      }
-      return state;
+      const cursorStillExists = action.subAgents.some((agent) => agent.agentId === state.subAgentCursor);
+      const settledView =
+        state.agentView &&
+        !action.subAgents.some(
+          (agent) => agent.agentId === state.agentView?.agentId && isActiveSubAgent(agent),
+        )
+          ? { ...state.agentView, execution: "idle" as const }
+          : state.agentView;
+      const next = createConditionalObject({ ...state, subAgents, subAgentPhases })
+        .addOptional(settledView ? { agentView: settledView } : undefined)
+        .finish();
+      if (cursorStillExists || state.subAgentCursor === undefined) return next;
+      const { subAgentCursor: _subAgentCursor, ...rest } = next;
+      return rest;
     }
     case "action-cursor-cleared": {
       const { actionCursor: _actionCursor, subAgentCursor: _subAgentCursor, ...rest } = state;
-      return { ...rest, expandedActionIds: NO_EXPANDED_ACTIONS };
+      return {
+        ...rest,
+        expandedActionIds: NO_EXPANDED_ACTIONS,
+        agentStrip: { ...state.agentStrip, allSessions: false },
+      };
+    }
+    case "agent-view-opened": {
+      const summary = state.subAgents.find((agent) => agent.agentId === action.agentId);
+      // The session's navigation cursor is kept so closing the view returns to the same row, and a
+      // parent agent's own position comes back when the user returns from a nested agent.
+      const navigation = action.navigation;
+      return {
+        ...state,
+        agentView: createConditionalObject({
+          agentId: action.agentId,
+          parents: Object.freeze([...action.parents]),
+          status: "loading",
+          timeline: [],
+          expandedActionIds: navigation?.expandedActionIds ?? NO_EXPANDED_ACTIONS,
+          execution: summary && isActiveSubAgent(summary) ? "thinking" : "idle",
+          scroll: navigation?.scroll ?? 0,
+          systemPromptShown: false,
+        } as const)
+          .addOptional(navigation?.actionCursor ? { actionCursor: navigation.actionCursor } : undefined)
+          .addOptional(
+            navigation?.scrollAnchor === undefined ? undefined : { scrollAnchor: navigation.scrollAnchor },
+          )
+          .finish(),
+      };
+    }
+    case "agent-view-hydrated": {
+      const view = state.agentView;
+      if (view?.agentId !== action.agentId) return state;
+      const totalTokens = sumTokens(action.transcript);
+      // Each snapshot describes the latest task, so an earlier failure never outlives a later success.
+      const { taskError: _taskError, ...current } = view;
+      const hydrated = createConditionalObject({
+        ...current,
+        status: "ready",
+        timeline: mergeDurableTimeline(
+          subAgentTimelineFromRuntime(action.transcript, action.agentId),
+          view.timeline,
+        ),
+      } as const)
+        .addOptional(action.systemPrompt === undefined ? undefined : { systemPrompt: action.systemPrompt })
+        .addOptional(action.taskError === undefined ? undefined : { taskError: action.taskError })
+        .addOptional(totalTokens === undefined ? undefined : { totalTokens })
+        .finish();
+      return { ...state, agentView: hydrated };
+    }
+    case "agent-view-closed": {
+      const { agentView: _agentView, ...rest } = state;
+      return rest;
+    }
+    case "agent-view-cursor-moved": {
+      const view = state.agentView;
+      if (!view) return state;
+      const actionCursor = moveActionCursor(view.timeline, view.actionCursor, action.direction);
+      return actionCursor ? { ...state, agentView: { ...view, actionCursor, scroll: 0 } } : state;
+    }
+    case "agent-view-cursor-cleared": {
+      const view = state.agentView;
+      if (!view) return state;
+      const { actionCursor: _actionCursor, ...rest } = view;
+      return { ...state, agentView: { ...rest, expandedActionIds: NO_EXPANDED_ACTIONS } };
+    }
+    case "agent-view-scrolled": {
+      const view = state.agentView;
+      if (!view) return state;
+      const current = effectiveAgentScroll(view, action.documentRows);
+      const scroll = Math.min(Math.max(0, action.maxScroll), Math.max(0, current + action.delta));
+      const { actionCursor: _actionCursor, scrollAnchor: _scrollAnchor, ...rest } = view;
+      return {
+        ...state,
+        agentView: scroll > 0 ? { ...rest, scroll, scrollAnchor: action.documentRows } : { ...rest, scroll },
+      };
+    }
+    case "agent-view-expansion-toggled": {
+      const view = state.agentView;
+      if (!view?.actionCursor) return state;
+      return {
+        ...state,
+        agentView: { ...view, expandedActionIds: toggled(view.expandedActionIds, view.actionCursor) },
+      };
+    }
+    case "agent-view-system-prompt-toggled": {
+      const view = state.agentView;
+      if (!view) return state;
+      return { ...state, agentView: { ...view, systemPromptShown: !view.systemPromptShown } };
     }
     case "inspector-opened": {
-      const inspector = createConditionalObject({
+      const inspector = {
         actionId: action.actionId,
         status: "loading",
         view: "semantic",
         scroll: 0,
-      } as const)
-        .addOptional(action.syntheticAction ? { syntheticAction: action.syntheticAction } : undefined)
-        .finish();
-      return createConditionalObject({ ...state, inspector })
-        .addOptional(action.syntheticAction ? undefined : { actionCursor: action.actionId })
-        .finish();
+      } as const;
+      return state.agentView
+        ? { ...state, inspector }
+        : { ...state, inspector, actionCursor: action.actionId };
     }
     case "inspector-loaded": {
       // A slow inspector fetch must never replace a newer selection.
@@ -666,18 +881,7 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         status: action.detail ? "ready" : "fallback",
       } as const)
         .addOptional(action.detail ? { detail: action.detail } : undefined)
-        .add({
-          view: state.inspector.view,
-          scroll: 0,
-        } as const)
-        .addOptional(
-          state.inspector.syntheticAction ? { syntheticAction: state.inspector.syntheticAction } : undefined,
-        )
-        .addOptional(
-          state.inspector.liveEvents && action.detail?.status === "running"
-            ? { liveEvents: state.inspector.liveEvents }
-            : undefined,
-        )
+        .add({ view: state.inspector.view, scroll: 0 } as const)
         .finish();
       return { ...state, inspector };
     }
@@ -707,18 +911,10 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
       return rest;
     }
     case "subagent-live-event": {
-      const agentId = action.actionId.slice("subagent:".length);
-      const event = action.event.event;
-      const subAgentPhases = reduceSubAgentPhase(state.subAgentPhases, agentId, event);
-      if (state.inspector?.actionId !== action.actionId) return { ...state, subAgentPhases };
-      return {
-        ...state,
-        subAgentPhases,
-        inspector: {
-          ...state.inspector,
-          liveEvents: Object.freeze([...(state.inspector.liveEvents ?? []), action.event].slice(-100)),
-        },
-      };
+      const subAgentPhases = reduceSubAgentPhase(state.subAgentPhases, action.agentId, action.event);
+      const view = state.agentView;
+      if (view?.agentId !== action.agentId) return { ...state, subAgentPhases };
+      return { ...state, subAgentPhases, agentView: reduceAgentView(view, action.event, action.at) };
     }
     case "execution-changed": {
       const { activeTool: _activeTool, ...rest } = state;

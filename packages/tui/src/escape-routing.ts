@@ -57,6 +57,8 @@ export function createEscapeRouting(options: {
     },
     createStandaloneEscapeHandler: () => {
       if (!options.isMainPhase()) return undefined;
+      // An opened agent view routes its own Escape through the navigation key handler.
+      if (view.state.agentView) return () => true;
       const inspectedActionId = view.state.inspector?.actionId;
       if (inspectedActionId)
         return () => {

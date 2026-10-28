@@ -1,12 +1,21 @@
 import { attachmentLabel } from "./attachment-label.ts";
 import { visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { isJsonObject, type JsonValue } from "@noesis/domain";
+import { createConditionalObject, isJsonObject, type JsonValue } from "@noesis/domain";
 import { collaborationReminderBody } from "@noesis/runtime";
 import { EXECUTE_ACTION_NAME, formatCount, sourceOf, summarizeAction } from "./action-summary.ts";
 import { renderRichText } from "./rich-text.ts";
 import {
+  type AgentCardPresentation,
+  AGENTS_SPAWN_ACTION_NAME,
+  agentCardPresentation,
+  agentColor,
+  agentDisplayName,
+  agentGlyph,
+  boundAgent,
+} from "./agent-presentation.ts";
+import type { TranscriptSpeakerLabels, TuiTranscriptSlice } from "./transcript-slice.ts";
+import {
   childActions,
-  type NoesisTuiState,
   type TuiAgentAction,
   type TuiMessage,
   type TuiReasoningEntry,
@@ -36,7 +45,7 @@ function renderCollaborationBlock(message: TuiMessage, width: number, colorEnabl
     hidden > 1
       ? [
           ...rendered.slice(0, COLLABORATION_PREVIEW_ROWS),
-          styled(colorEnabled, ANSI.dim, `… ${formatCount(hidden, "more line")} · Ctrl+O inspects agents`),
+          styled(colorEnabled, ANSI.dim, `… ${formatCount(hidden, "more line")} · ctrl+o opens the agent`),
         ]
       : rendered;
   return [
@@ -45,10 +54,18 @@ function renderCollaborationBlock(message: TuiMessage, width: number, colorEnabl
   ];
 }
 
-export function renderMessageBlock(message: TuiMessage, width: number, colorEnabled = false): string[] {
+const SESSION_SPEAKERS: TranscriptSpeakerLabels = Object.freeze({ user: "YOU", assistant: "NOESIS" });
+
+export function renderMessageBlock(
+  message: TuiMessage,
+  width: number,
+  colorEnabled = false,
+  speakers: TranscriptSpeakerLabels = SESSION_SPEAKERS,
+): string[] {
   if (width <= 0) return [];
   if (message.origin === "collaboration") return renderCollaborationBlock(message, width, colorEnabled);
-  const label = message.role === "user" ? "YOU" : message.role === "assistant" ? "NOESIS" : "NOTE";
+  const label =
+    message.role === "user" ? speakers.user : message.role === "assistant" ? speakers.assistant : "NOTE";
   const labelColor =
     message.role === "user" ? ANSI.cyan : message.role === "assistant" ? ANSI.green : ANSI.yellow;
   const shownLabel = width === 1 ? (label[0] ?? "") : elideText(label, width);
@@ -209,6 +226,10 @@ export interface ActionBlockOptions {
    * previous viewport changes, which erases terminal scrollback.
    */
   readonly maxBodyRows?: number;
+  /** A spawn call renders as the agent it started, carrying that agent's live status. */
+  readonly agentCard?: AgentCardPresentation;
+  /** Other `agents.*` calls name the agent they address. */
+  readonly agentName?: string;
 }
 
 /**
@@ -227,18 +248,21 @@ export function renderAgentActionBlock(
   const marker = options.selected ? "▸" : " ";
   const indent = `${marker}${"  ".repeat(depth)}`;
   const summary = summarizeAction(action, childActions(actions, action.actionId));
-  const glyphWeight = action.status === "running" && options.pulseDim ? ANSI.dim : ANSI.bold;
-  const glyph = styled(
-    colorEnabled,
-    `${glyphWeight}${statusColor(action.status)}`,
-    statusGlyph(action.status),
-  );
+  const card = options.agentCard;
+  const glyphWeight = (card ? card.pulseDim : action.status === "running" && options.pulseDim)
+    ? ANSI.dim
+    : ANSI.bold;
+  const glyph = card
+    ? styled(colorEnabled, `${glyphWeight}${agentColor(card.outcome)}`, agentGlyph(card.outcome))
+    : styled(colorEnabled, `${glyphWeight}${statusColor(action.status)}`, statusGlyph(action.status));
   const name = styled(
     colorEnabled,
     options.selected ? `${ANSI.bold}${ANSI.underline}` : ANSI.bold,
-    summary.name,
+    card ? card.title : summary.name,
   );
-  const trailing = [summary.subject, summary.outcome].filter((part): part is string => Boolean(part));
+  const trailing = card
+    ? [...card.detail]
+    : [options.agentName ?? summary.subject, summary.outcome].filter((part): part is string => Boolean(part));
   const header = elideText(
     `${indent}${glyph} ${name}${trailing.length > 0 ? `  ${styled(colorEnabled, ANSI.dim, trailing.join(" · "))}` : ""}`,
     width,
@@ -293,13 +317,13 @@ export interface TranscriptRenderer {
    * Renders the whole conversation. Output taller than the terminal scrolls into native terminal
    * scrollback rather than being cropped, so no transcript content is ever unreachable.
    */
-  readonly render: (state: NoesisTuiState, width: number, maxBodyRows?: number) => readonly string[];
+  readonly render: (state: TuiTranscriptSlice, width: number, maxBodyRows?: number) => readonly string[];
   /**
    * Renders a bounded window around the selected action for navigation in the ordinary transcript
    * view. The full transcript remains unbounded so native terminal scrollback is preserved.
    */
   readonly renderWindow: (
-    state: NoesisTuiState,
+    state: TuiTranscriptSlice,
     width: number,
     height: number,
     maxBodyRows?: number,
@@ -318,7 +342,7 @@ export function createTranscriptRenderer(): TranscriptRenderer {
     entry: TuiTimelineEntry,
     actions: readonly TuiAgentAction[],
     width: number,
-    state: NoesisTuiState,
+    state: TuiTranscriptSlice,
     maxBodyRows: number,
   ): RenderedTimelineBlock => {
     const expanded = entry.kind === "action" && state.expandedActionIds.has(entry.actionId);
@@ -346,6 +370,14 @@ export function createTranscriptRenderer(): TranscriptRenderer {
       entry.kind === "action" && entry.name === EXECUTE_ACTION_NAME
         ? JSON.stringify(childActions(actions, entry.actionId).map((child) => [child.name, child.status]))
         : "";
+    // Agent rows read live actor state, which changes while the action entry itself stays identical.
+    const agent = entry.kind === "action" ? boundAgent(entry, state.subAgents) : undefined;
+    const agentCard =
+      agent && entry.kind === "action" && entry.name === AGENTS_SPAWN_ACTION_NAME
+        ? agentCardPresentation(agent)
+        : undefined;
+    const agentName = agent && !agentCard ? agentDisplayName(agent) : undefined;
+    const speakers = state.speakerLabels ?? SESSION_SPEAKERS;
     const key = [
       String(width),
       state.colorEnabled ? "color" : "plain",
@@ -356,6 +388,8 @@ export function createTranscriptRenderer(): TranscriptRenderer {
       shimmerFrame === undefined ? "static" : String(shimmerFrame),
       pulseDim ? "pulse" : "steady",
       childSummaryKey,
+      agentCard ? JSON.stringify(agentCard) : (agentName ?? ""),
+      entry.kind === "message" ? `${speakers.user}/${speakers.assistant}` : "",
     ].join(":");
     const cached = cache.get(entry);
     if (cached?.key === key) {
@@ -366,7 +400,7 @@ export function createTranscriptRenderer(): TranscriptRenderer {
     const block = {
       lines:
         entry.kind === "message"
-          ? renderMessageBlock(entry, width, state.colorEnabled)
+          ? renderMessageBlock(entry, width, state.colorEnabled, speakers)
           : entry.kind === "reasoning"
             ? renderReasoningBlock(
                 entry,
@@ -374,19 +408,27 @@ export function createTranscriptRenderer(): TranscriptRenderer {
                 state.colorEnabled,
                 shimmerFrame === undefined ? {} : { shimmerFrame },
               )
-            : renderAgentActionBlock(entry, actions, width, {
-                expanded,
-                selected,
-                colorEnabled: state.colorEnabled,
-                pulseDim,
-                maxBodyRows,
-              }),
+            : renderAgentActionBlock(
+                entry,
+                actions,
+                width,
+                createConditionalObject({
+                  expanded,
+                  selected,
+                  colorEnabled: state.colorEnabled,
+                  pulseDim,
+                  maxBodyRows,
+                } as const)
+                  .addOptional(agentCard ? { agentCard } : undefined)
+                  .addOptional(agentName ? { agentName } : undefined)
+                  .finish(),
+              ),
     };
     cache.set(entry, { key, block });
     return block;
   };
   const renderTimeline = (
-    state: NoesisTuiState,
+    state: TuiTranscriptSlice,
     width: number,
     maxBodyRows: number,
   ): readonly {

@@ -14,7 +14,7 @@ import {
   renderHeader,
   renderNoesisState,
   renderQueuedInputs,
-  renderSubagents,
+  renderAgentStrip,
   safeTerminalText,
   sessionPickerVisibleCount,
   shouldUseColor,
@@ -961,23 +961,33 @@ describe("Noesis TUI reducer", () => {
     });
     state = reduceTui(state, {
       type: "subagent-live-event",
-      actionId: "subagent:agent-live",
+      agentId: "agent-live",
       event: {
-        type: "live",
-        agentId: "agent-live",
-        taskId: "task-live",
-        event: {
-          type: "tool-start",
-          actionId: "tool-1",
-          name: "shell.run",
-          input: {},
-        },
+        type: "tool-start",
+        actionId: "tool-1",
+        name: "shell.run",
+        input: { command: "rg capability\nmore" },
       },
     });
-    expect(state.subAgentPhases).toEqual({ "agent-live": "tool · shell.run" });
-    expect(renderSubagents({ ...state, trailId: "session-foreground" }, 120, 30).join("\n")).toContain(
-      "running · tool · shell.run · controlled/model",
-    );
+    expect(state.subAgentPhases).toEqual({ "agent-live": "shell.run rg capability" });
+    expect(
+      renderAgentStrip({ ...state, agentStrip: { expanded: true, allSessions: false } }, 120, 30).join("\n"),
+    ).toContain("shell.run rg capability · controlled/model");
+
+    // An update for a start this listener missed still names the tool instead of "starting…".
+    const missed = reduceTui(state, {
+      type: "subagent-live-event",
+      agentId: "agent-other",
+      event: { type: "tool-update", actionId: "tool-2", name: "files.read", update: {} },
+    });
+    expect(missed.subAgentPhases["agent-other"]).toBe("files.read");
+    expect(
+      reduceTui(state, {
+        type: "subagent-live-event",
+        agentId: "agent-live",
+        event: { type: "tool-update", actionId: "tool-1", name: "shell.run", update: {} },
+      }).subAgentPhases["agent-live"],
+    ).toBe("shell.run rg capability");
 
     state = reduceTui(state, {
       type: "subagents-hydrated",

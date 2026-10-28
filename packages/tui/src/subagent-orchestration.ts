@@ -1,21 +1,11 @@
+import type { OverlayHandle, TUI } from "@earendil-works/pi-tui";
 import { createConditionalObject } from "@noesis/domain";
 import type { SubAgentInspection, SubAgentRuntimeEvent } from "@noesis/agent-types";
+import { createAgentViewOverlay } from "./agent-view.ts";
 import type { NoesisView } from "./rendering.ts";
-import type { NoesisTuiRuntime, TuiExecutionDetail } from "./runtime-port.ts";
-import type { TuiAgentAction } from "./state.ts";
-
-const subAgentActionId = (agentId: string): string => `subagent:${agentId}`;
-
-const subAgentExecutionStatus = (
-  status: SubAgentInspection["status"],
-): Extract<TuiAgentAction["status"], TuiExecutionDetail["status"]> =>
-  status === "starting" || status === "running"
-    ? "running"
-    : status === "idle"
-      ? "completed"
-      : status === "closed"
-        ? "cancelled"
-        : "interrupted";
+import type { NoesisTuiRuntime } from "./runtime-port.ts";
+import { isActiveSubAgent, siblingAgents, type TuiAgentViewNavigation } from "./state.ts";
+import { startWorkingAnimation } from "./working-animation.ts";
 
 /** Say who reported and when the foreground agent will actually see it. */
 export function foregroundMessageNotice(
@@ -35,122 +25,180 @@ export function foregroundMessageNotice(
 }
 
 export interface TuiSubAgentOrchestration {
-  readonly openInspector: (agentId: string) => void;
+  /** Opens an agent's transcript; `nested` keeps the current agent as the Esc destination. */
+  readonly open: (agentId: string, options?: { readonly nested?: boolean }) => void;
+  /** Esc: return to the agent this one was opened from, or to the session. */
+  readonly back: () => void;
+  /** Left/Right: open the previous or next agent in strip order. */
+  readonly cycle: (direction: "previous" | "next") => void;
+  readonly bounds: () => { readonly maxScroll: number; readonly documentRows: number };
+  readonly hideOverlay: () => void;
   readonly dispose: () => void;
 }
 
 export function createTuiSubAgentOrchestration(options: {
   readonly runtime: NoesisTuiRuntime;
   readonly view: NoesisView;
-  readonly showInspector: (actionId: string, syntheticAction: TuiAgentAction) => void;
-  readonly requestRender: () => void;
+  readonly tui: TUI;
+  readonly height: () => number;
   readonly reportFailure: (cause: unknown) => void;
 }): TuiSubAgentOrchestration {
+  const { view, tui } = options;
   let disposed = false;
-  const loadDetail = async (agentId: string): Promise<TuiExecutionDetail> => {
-    const [inspection, transcript] = await Promise.all([
-      options.runtime.inspectSubAgent(agentId),
-      options.runtime.getSubAgentTranscript(agentId),
-    ]);
-    const latestTask = inspection.tasks.at(-1);
-    const initialMessage = inspection.recentMessages.find(
-      (message) => message.recipient.kind === "subagent" && message.recipient.id === agentId,
-    );
-    return Object.freeze(
-      createConditionalObject({
-        kind: "subagent" as const,
-        executionId: inspection.agentId,
-        label: inspection.name ?? `Subagent ${inspection.agentId.slice(-8)}`,
-        status: subAgentExecutionStatus(inspection.status),
-        toolNames: Object.freeze([...inspection.tools]),
-        callCount: transcript.filter((entry) => entry.kind === "action").length,
-        startedAt: inspection.createdAt,
-      } as const)
-        .addOptional(inspection.status === "closed" ? { completedAt: inspection.updatedAt } : undefined)
-        .add({
-          provider: inspection.route.provider,
-          model: inspection.route.model,
-          thinkingLevel: inspection.thinkingLevel,
+  let bounds = { maxScroll: 0, documentRows: 0 };
+  // Each parent's position, saved when a nested agent opens from it and restored on return.
+  const parentNavigation = new Map<string, TuiAgentViewNavigation>();
+  // Reads can overlap when lifecycle events arrive while one is in flight; only the newest applies.
+  let hydration = 0;
+  let handle: OverlayHandle | undefined;
+  const overlay = createAgentViewOverlay(
+    () => view.state,
+    options.height,
+    (next) => {
+      bounds = { maxScroll: next.maxScroll, documentRows: next.documentRows };
+    },
+  );
+  const hideOverlay = (): void => {
+    handle?.hide();
+    handle = undefined;
+  };
+  const hydrate = async (agentId: string): Promise<void> => {
+    const generation = ++hydration;
+    const current = (): boolean =>
+      !disposed && generation === hydration && view.state.agentView?.agentId === agentId;
+    try {
+      const [inspection, transcript] = await Promise.all([
+        options.runtime.inspectSubAgent(agentId),
+        options.runtime.getSubAgentTranscript(agentId),
+      ]);
+      if (!current()) return;
+      const failure = inspection.tasks.at(-1)?.error;
+      view.dispatch(
+        createConditionalObject({
+          type: "agent-view-hydrated",
+          agentId,
+          transcript,
           systemPrompt: inspection.systemPrompt,
         } as const)
-        .addOptional(initialMessage ? { prompt: initialMessage.content } : undefined)
-        .addOptional(latestTask?.result ? { result: latestTask.result } : undefined)
-        .addOptional(latestTask?.error ? { error: latestTask.error } : undefined)
-        .add({ subAgent: inspection, transcript } as const)
+          .addOptional(failure ? { taskError: failure } : undefined)
+          .finish(),
+      );
+      tui.requestRender();
+    } catch (cause) {
+      if (current()) options.reportFailure(cause);
+    }
+  };
+  const show = (agentId: string, parents: readonly string[], navigation?: TuiAgentViewNavigation): void => {
+    bounds = { maxScroll: 0, documentRows: 0 };
+    view.dispatch(
+      createConditionalObject({ type: "agent-view-opened", agentId, parents } as const)
+        .addOptional(navigation ? { navigation } : undefined)
         .finish(),
     );
+    // Non-capturing: the session's input listener routes keys, and the composer keeps its draft.
+    handle ??= tui.showOverlay(overlay, { anchor: "top-left", width: "100%", nonCapturing: true });
+    tui.requestRender();
+    void hydrate(agentId);
   };
-  const refreshInspector = async (agentId: string): Promise<void> => {
-    const actionId = subAgentActionId(agentId);
-    try {
-      const detail = await loadDetail(agentId);
-      if (disposed) return;
-      options.view.dispatch({ type: "inspector-loaded", actionId, detail });
-      options.requestRender();
-    } catch (cause) {
-      if (!disposed && options.view.state.inspector?.actionId === actionId) options.reportFailure(cause);
+  const open: TuiSubAgentOrchestration["open"] = (agentId, openOptions = {}) => {
+    const current = view.state.agentView;
+    if (current?.agentId === agentId) return;
+    const nested = current !== undefined && openOptions.nested === true;
+    if (current && nested)
+      parentNavigation.set(
+        current.agentId,
+        createConditionalObject({
+          expandedActionIds: current.expandedActionIds,
+          scroll: current.scroll,
+        } as const)
+          .addOptional(current.actionCursor ? { actionCursor: current.actionCursor } : undefined)
+          .addOptional(
+            current.scrollAnchor === undefined ? undefined : { scrollAnchor: current.scrollAnchor },
+          )
+          .finish(),
+      );
+    const parents = current && nested ? [...current.parents, current.agentId] : (current?.parents ?? []);
+    show(agentId, parents);
+  };
+  const back = (): void => {
+    const current = view.state.agentView;
+    if (!current) return;
+    const parent = current.parents.at(-1);
+    if (parent) {
+      const navigation = parentNavigation.get(parent);
+      parentNavigation.delete(parent);
+      show(parent, current.parents.slice(0, -1), navigation);
+      return;
     }
+    parentNavigation.clear();
+    view.dispatch({ type: "agent-view-closed" });
+    hideOverlay();
+    tui.requestRender();
+  };
+  const cycle = (direction: "previous" | "next"): void => {
+    const current = view.state.agentView;
+    if (!current) return;
+    const siblings = siblingAgents(view.state, current.agentId);
+    if (siblings.length < 2) return;
+    const index = siblings.findIndex((agent) => agent.agentId === current.agentId);
+    const offset = direction === "next" ? 1 : -1;
+    const next = siblings[(Math.max(0, index) + offset + siblings.length) % siblings.length];
+    if (next) show(next.agentId, current.parents);
   };
   const refresh = async (): Promise<void> => {
     const subAgents = await options.runtime.listSubAgents();
     if (disposed) return;
-    options.view.dispatch({ type: "subagents-hydrated", subAgents });
-    options.requestRender();
-  };
-  const openInspector = (agentId: string): void => {
-    const summary = options.view.state.subAgents.find((agent) => agent.agentId === agentId);
-    if (!summary) return;
-    const actionId = subAgentActionId(agentId);
-    const syntheticAction = createConditionalObject({
-      actionId,
-      name: summary.name ?? "subagent",
-      status: subAgentExecutionStatus(summary.status),
-      startedAt: Date.parse(summary.createdAt),
-    } as const)
-      .addOptional(
-        summary.latestActivity
-          ? {
-              durationMs: Math.max(0, Date.parse(summary.latestActivity) - Date.parse(summary.createdAt)),
-            }
-          : undefined,
-      )
-      .finish();
-    options.showInspector(actionId, syntheticAction);
-    void refreshInspector(agentId);
+    view.dispatch({ type: "subagents-hydrated", subAgents });
+    tui.requestRender();
   };
   const onEvent = (event: SubAgentRuntimeEvent): void => {
+    if (disposed) return;
     if (event.type === "live") {
-      options.view.dispatch({
+      view.dispatch({
         type: "subagent-live-event",
-        actionId: subAgentActionId(event.agentId),
-        event,
+        agentId: event.agentId,
+        event: event.event,
+        at: Date.now(),
       });
-      options.requestRender();
+      tui.requestRender();
       return;
     }
     if (event.type === "reminder-delivered") {
-      if (event.sessionId === options.view.state.trailId) {
-        options.view.dispatch({ type: "collaboration-delivered", text: event.text });
-        options.requestRender();
+      if (event.sessionId === view.state.trailId) {
+        view.dispatch({ type: "collaboration-delivered", text: event.text });
+        tui.requestRender();
       }
       return;
     }
     if (event.type === "message" && event.status === "accepted" && event.recipient.kind === "foreground")
-      options.view.dispatch({
+      view.dispatch({
         type: "notification-shown",
-        text: foregroundMessageNotice(event, options.view.state),
+        text: foregroundMessageNotice(event, view.state),
         tone: "info",
       });
     void refresh().catch(options.reportFailure);
-    if (options.view.state.inspector?.actionId === subAgentActionId(event.agentId))
-      void refreshInspector(event.agentId);
+    if (view.state.agentView?.agentId === event.agentId) void hydrate(event.agentId);
   };
   const removeListener = options.runtime.subscribeSubAgents(onEvent);
+  // Agents keep their own clock: elapsed time and the pulse advance even while the session idles.
+  const stopClock = startWorkingAnimation(
+    () => !disposed && view.state.subAgents.some(isActiveSubAgent),
+    () => {
+      view.dispatch({ type: "agents-ticked", now: Date.now() });
+      tui.requestRender();
+    },
+  );
   void refresh().catch(options.reportFailure);
   return Object.freeze({
-    openInspector,
+    open,
+    back,
+    cycle,
+    bounds: () => bounds,
+    hideOverlay,
     dispose: () => {
       disposed = true;
+      stopClock();
+      hideOverlay();
       removeListener();
     },
   });

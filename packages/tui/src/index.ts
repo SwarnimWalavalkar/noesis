@@ -240,6 +240,7 @@ export async function startNoesisTui(
       inspectorGeneration += 1;
       activeTurnToken = undefined;
       inspector.hideOverlay();
+      subAgents.hideOverlay();
       optimisticPrompts.clear();
       view.dispatch({ type: "execution-changed", execution: "closing" });
       composer.dispose();
@@ -304,8 +305,8 @@ export async function startNoesisTui(
   const subAgents = createTuiSubAgentOrchestration({
     runtime,
     view,
-    showInspector: inspector.openSynthetic,
-    requestRender: () => tui.requestRender(),
+    tui,
+    height: () => terminal.rows,
     reportFailure,
   });
   removeSubAgentListener = subAgents.dispose;
@@ -313,10 +314,17 @@ export async function startNoesisTui(
     tui,
     view,
     inspectorMaxScroll: inspector.maxScroll,
+    agentViewBounds: subAgents.bounds,
     openRunInspector: inspector.openRun,
-    openSubAgentInspector: subAgents.openInspector,
+    openAgent: subAgents.open,
+    closeAgent: subAgents.back,
+    cycleAgent: subAgents.cycle,
     closeRunInspector: inspector.close,
   });
+  const navigationOwnsInput = (): boolean =>
+    Boolean(
+      view.state.actionCursor || view.state.subAgentCursor || view.state.inspector || view.state.agentView,
+    );
   const applyInteractionSnapshot = (snapshot: TuiInteractionSnapshot): void => {
     if (view.state.trailId !== snapshot.sessionId) return;
     view.dispatch({
@@ -545,8 +553,12 @@ export async function startNoesisTui(
       }
       return undefined;
     }
-    // Inspection owns every byte; bypassing the editor preserves its draft and paste parser.
-    if (view.state.actionCursor || view.state.subAgentCursor || view.state.inspector) {
+    // Navigation owns every byte; bypassing the editor preserves its draft and paste parser.
+    if (navigationOwnsInput()) {
+      if (matchesKey(data, "ctrl+c")) {
+        void shutdown();
+        return { consume: true };
+      }
       handleTranscriptKey(data);
       return { consume: true };
     }
@@ -734,7 +746,7 @@ export async function startNoesisTui(
     else void performSubmission().catch(reportSubmissionFailure);
   };
   const editorSlot = createComposerSlot(editor, composer, {
-    hidden: () => Boolean(view.state.actionCursor || view.state.subAgentCursor || view.state.inspector),
+    hidden: navigationOwnsInput,
     showPreviews: () => terminal.rows >= 12,
   });
   tui.addChild(root);
@@ -745,6 +757,7 @@ export async function startNoesisTui(
   ): void => {
     phase = "main";
     inspector.hideOverlay();
+    subAgents.hideOverlay();
     optimisticPrompts.clear();
     view.dispatch({ type: "trail-selected", trail });
     view.dispatch({
@@ -803,6 +816,7 @@ export async function startNoesisTui(
     }
   } catch (error) {
     learning.dispose();
+    subAgents.dispose();
     await mcp.dispose();
     throw error;
   }

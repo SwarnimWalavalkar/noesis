@@ -70,7 +70,7 @@ export const HELP_LINES = [
   "shift+enter newline · ctrl+g external editor",
   "ctrl+v copied files or image · /attach PATH adds a file · /attachments PAGE inspects · /detach NUMBER or all removes",
   "pasted snippets and paths remain literal editable text",
-  "ctrl+o inspect runs · space expand · enter open the run inspector",
+  "ctrl+o navigates runs and agents · space expands · enter opens a run or an agent",
   "/quit · learning, experiments, activation, and revert run ambiently",
 ] as const;
 

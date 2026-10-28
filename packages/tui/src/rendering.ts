@@ -4,17 +4,30 @@ import { type Component, visibleWidth } from "@earendil-works/pi-tui";
 import { formatCount } from "./action-summary.ts";
 import { renderRunInspectorFrame } from "./run-inspector.ts";
 import {
+  agentActivity,
+  agentColor,
+  agentDisplayName,
+  agentElapsed,
+  agentGlyph,
+  agentOutcome,
+  agentPulseDim,
+  agentRoute,
+  singleLine,
+} from "./agent-presentation.ts";
+import {
   type ExecutionState,
+  isActiveSubAgent,
+  isSessionAgent,
   type NoesisTuiAction,
   type NoesisTuiState,
   reduceTui,
-  hasSessionSubagents,
+  stripAgents,
   type TuiContextUsage,
 } from "./state.ts";
 import { ANSI, brandGradient, elideText, NOESIS_WORDMARK, safeTerminalText, styled } from "./theme.ts";
 import { NOESIS_STARTUP_NOTES } from "./startup-note.ts";
 import { createTranscriptRenderer, type TranscriptRenderer } from "./transcript.ts";
-import { isPulseDimFrame, isWorkingExecution, WORKING_ANIMATION_INTERVAL_MS } from "./working-animation.ts";
+import { isWorkingExecution, WORKING_ANIMATION_INTERVAL_MS } from "./working-animation.ts";
 
 export * from "./action-summary.ts";
 export * from "./rich-text.ts";
@@ -197,16 +210,16 @@ export function helpHint(state: NoesisTuiState): string {
   if (state.execution === "closing") return "closing session…";
   if (state.inspector)
     return `↑/↓ scroll · space ${state.inspector.view === "raw" ? "semantic" : "exact"} · esc close`;
-  if (state.subAgentCursor) return "↑/↓ agents · enter inspect · tab transcript · esc leave · ctrl+c quit";
-  if (state.actionCursor)
-    return "↑/↓ transcript · space expand · enter inspect · tab subagents · esc leave · ctrl+c quit";
+  if (state.subAgentCursor)
+    return `↑/↓ move · enter open · space ${state.agentStrip.expanded ? "collapse" : "pin open"} · a ${state.agentStrip.allSessions ? "this session" : "all sessions"} · esc leave`;
+  if (state.actionCursor) return "↑/↓ move · space expand · enter open · esc leave · ctrl+c quit";
   if (state.interaction.phase !== "idle")
     return "enter queue · /steer redirect · alt+↑ edit newest · esc esc interrupt";
   if (state.execution === "compacting" && state.interaction.queuedInputs.length > 0)
     return "enter queue · waiting for compaction · alt+↑ edit newest";
   if (state.interaction.queuePaused && state.interaction.queuedInputs.length > 0)
     return "/queue resume · alt+↑ edit newest";
-  return "? help · ctrl+o inspect runs · ctrl+c quit";
+  return "? help · ctrl+o navigate · ctrl+c quit";
 }
 
 export function renderQueuedInputs(state: NoesisTuiState, width: number, maxVisible = 3): readonly string[] {
@@ -246,8 +259,8 @@ const safeTerminalQueueText = (text: string): string =>
 export function inputModeLine(state: NoesisTuiState, width: number): string {
   if (!state.actionCursor && !state.subAgentCursor && !state.inspector)
     return elideText(styled(state.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "› message"), width);
-  const badge = styled(state.colorEnabled, `${ANSI.bold}${ANSI.reverse}${ANSI.yellow}`, " ⊙ INSPECT ");
-  const hint = styled(state.colorEnabled, ANSI.dim, "  typing paused · esc to return");
+  const badge = styled(state.colorEnabled, `${ANSI.bold}${ANSI.reverse}${ANSI.yellow}`, " ⊙ NAVIGATE ");
+  const hint = styled(state.colorEnabled, ANSI.dim, "  typing paused");
   return elideText(`${badge}${hint}`, width);
 }
 
@@ -262,98 +275,93 @@ export function notificationBadge(tone: "info" | "success" | "attention" | "lear
   return { glyph: "◆", color: ANSI.cyan };
 }
 
-const subagentStatusGlyph = (status: NoesisTuiState["subAgents"][number]["status"]): string =>
-  status === "running" || status === "starting"
-    ? "●"
-    : status === "idle"
-      ? "✓"
-      : status === "closed"
-        ? "○"
-        : "■";
+const STRIP_NAME_MAX_COLUMNS = 32;
 
-const subagentStatusColor = (status: NoesisTuiState["subAgents"][number]["status"]): string =>
-  status === "running" || status === "starting"
-    ? ANSI.cyan
-    : status === "idle"
-      ? ANSI.green
-      : status === "closed"
-        ? ANSI.dim
-        : ANSI.yellow;
+/** Places a dim hint at the right edge when the row has room for it. */
+function withRightHint(line: string, hint: string, width: number, colorEnabled: boolean): string {
+  const gap = width - visibleWidth(line) - visibleWidth(hint);
+  return gap >= 2
+    ? `${line}${" ".repeat(gap)}${styled(colorEnabled, ANSI.dim, hint)}`
+    : elideText(line, width);
+}
 
-/** A footer-adjacent projection inspired by agent tabs/panels, never a second state authority. */
-export function renderSubagents(state: NoesisTuiState, width: number, height = 30): readonly string[] {
+/**
+ * The running-agent strip above the composer. Collapsed it is one line naming each running agent
+ * and its elapsed time; expanded, or while it has focus, it lists one row per agent. It renders
+ * nothing when no agent is running and the strip is not focused.
+ */
+export function renderAgentStrip(state: NoesisTuiState, width: number, height = 30): readonly string[] {
   const safeWidth = Math.max(0, Math.floor(width));
-  const subagents = state.subAgents;
-  if (safeWidth <= 0 || !hasSessionSubagents(state) || height < 10) return [];
-  const running = subagents.filter((agent) => agent.status === "running" || agent.status === "starting");
-  const idle = subagents.filter((agent) => agent.status === "idle");
-  const stopped = subagents.filter((agent) => agent.status === "suspended" || agent.status === "closed");
+  if (safeWidth <= 0 || height < 10) return [];
+  const rows = stripAgents(state);
+  if (rows.length === 0) return [];
+  const focused = state.subAgentCursor !== undefined;
+  const color = state.colorEnabled;
+  const running = rows.filter(isActiveSubAgent);
+  const clock = state.agentClock;
+  const glyphFor = (agent: (typeof rows)[number]): string => {
+    const outcome = agentOutcome(agent);
+    const weight = agentPulseDim(outcome, clock) ? ANSI.dim : ANSI.bold;
+    return styled(color, `${weight}${agentColor(outcome)}`, agentGlyph(outcome));
+  };
+  if (!focused && !state.agentStrip.expanded) {
+    const summary = running.map((agent) => {
+      const elapsed = agentElapsed(agent, clock);
+      return `${agentDisplayName(agent)}${elapsed ? ` ${styled(color, ANSI.dim, elapsed)}` : ""}`;
+    });
+    const leadAgent = running[0];
+    const lead = leadAgent ? glyphFor(leadAgent) : "●";
+    const label = styled(
+      color,
+      `${ANSI.bold}${ANSI.cyan}`,
+      `${String(running.length)} ${running.length === 1 ? "agent" : "agents"} running`,
+    );
+    return [withRightHint(`${lead} ${label} · ${summary.join(" · ")}`, "ctrl+o", safeWidth, color)];
+  }
+  const inactiveCount = rows.length - running.length;
+  const heading = [
+    styled(color, `${ANSI.bold}${ANSI.cyan}`, "AGENTS"),
+    ...(focused
+      ? [styled(color, ANSI.dim, state.agentStrip.allSessions ? "all sessions" : "this session")]
+      : []),
+    ...(running.length > 0 ? [styled(color, ANSI.dim, `${String(running.length)} running`)] : []),
+    ...(inactiveCount > 0 ? [styled(color, ANSI.dim, `${String(inactiveCount)} finished`)] : []),
+  ].join(styled(color, ANSI.dim, " · "));
   const maximumRows = createTuiLayout(safeWidth, height).subagentRows;
-  const inspecting = state.subAgentCursor !== undefined;
-  const selected = inspecting ? subagents.find((agent) => agent.agentId === state.subAgentCursor) : undefined;
-  const priority = [
-    ...(selected ? [selected] : []),
-    ...running.filter((agent) => agent.agentId !== selected?.agentId),
-  ].slice(0, maximumRows);
-  const priorityIds = new Set(priority.map((agent) => agent.agentId));
-  const additionalCapacity = Math.max(0, maximumRows - priority.length);
-  const additional =
-    !inspecting || additionalCapacity === 0
-      ? []
-      : subagents.filter((agent) => !priorityIds.has(agent.agentId)).slice(-additionalCapacity);
-  const shownIds = new Set([...priority, ...additional].map((agent) => agent.agentId));
-  const candidates = inspecting ? subagents : running;
-  const shown = candidates.filter((agent) => shownIds.has(agent.agentId));
-  const hidden = candidates.length - shown.length;
-  const collapsed = inspecting ? 0 : subagents.length - running.length;
-  const headerColor = running.length > 0 ? ANSI.cyan : stopped.length > 0 ? ANSI.yellow : ANSI.green;
-  const headerStatus = [
-    ...(running.length > 0 ? [formatCount(running.length, "running subagent")] : []),
-    ...(idle.length > 0 ? [formatCount(idle.length, "idle subagent")] : []),
-    ...(stopped.length > 0 ? [formatCount(stopped.length, "stopped subagent")] : []),
-  ].join(" · ");
-  const headerHint = inspecting
-    ? "enter inspect · tab transcript"
-    : collapsed > 0
-      ? "ctrl+o expand"
-      : "ctrl+o inspect";
+  const cursorIndex = Math.max(
+    0,
+    rows.findIndex((agent) => agent.agentId === state.subAgentCursor),
+  );
+  const start = Math.min(Math.max(0, cursorIndex - maximumRows + 1), Math.max(0, rows.length - maximumRows));
+  const shown = rows.slice(start, start + maximumRows);
+  const nameWidth = Math.min(
+    STRIP_NAME_MAX_COLUMNS,
+    Math.max(...shown.map((agent) => visibleWidth(agentDisplayName(agent)))),
+  );
+  const foregroundRoute = singleLine(`${state.provider}/${state.model}`);
   return [
-    elideText(
-      `${styled(state.colorEnabled, `${ANSI.bold}${headerColor}`, `SUBAGENTS · ${String(subagents.length)}`)}${headerStatus ? `  ${styled(state.colorEnabled, ANSI.dim, `${headerStatus} · ${headerHint}`)}` : ""}`,
-      safeWidth,
-    ),
-    ...shown.map((agent, index) => {
+    focused ? elideText(heading, safeWidth) : withRightHint(heading, "ctrl+o", safeWidth, color),
+    ...shown.map((agent) => {
       const selected = state.subAgentCursor === agent.agentId;
-      const subject = safeTerminalText(agent.name ?? `Subagent ${String(index + 1)}`)
-        .replaceAll(/\s+/gu, " ")
-        .trim();
-      const outcome = [
-        agent.status,
-        state.subAgentPhases[agent.agentId],
-        agent.latestTaskStatus === agent.status ? undefined : agent.latestTaskStatus,
-        `${agent.route.provider}/${agent.route.model}`,
-      ]
-        .filter((part): part is string => Boolean(part))
-        .join(" · ");
-      // The glyph character stays stable; only its intensity breathes while work is live.
-      const pulseDim =
-        (agent.status === "running" || agent.status === "starting") &&
-        isWorkingExecution(state.execution) &&
-        isPulseDimFrame(state.animationFrame);
-      const glyphStyle = `${pulseDim ? ANSI.dim : ANSI.bold}${subagentStatusColor(agent.status)}`;
+      const name = elideText(agentDisplayName(agent), nameWidth);
+      const route = agentRoute(agent);
+      const detail = [
+        agentElapsed(agent, clock) ?? "",
+        agentActivity(agent, state.subAgentPhases),
+        ...(route === foregroundRoute ? [] : [route]),
+        ...(isSessionAgent(state, agent) ? [] : ["other session"]),
+      ].filter(Boolean);
+      const label = styled(color, selected ? `${ANSI.bold}${ANSI.underline}` : "", name);
+      const padding = " ".repeat(Math.max(0, nameWidth - visibleWidth(name)));
       return elideText(
-        `${selected ? "▸" : " "} ${styled(state.colorEnabled, glyphStyle, subagentStatusGlyph(agent.status))} ${styled(state.colorEnabled, selected ? `${ANSI.bold}${ANSI.underline}` : "", subject)}${outcome ? `  ${styled(state.colorEnabled, ANSI.dim, outcome)}` : ""}`,
+        `${selected ? "▸" : " "} ${glyphFor(agent)} ${label}${padding}  ${styled(color, ANSI.dim, detail.join(" · "))}`,
         safeWidth,
       );
     }),
-    ...(hidden > 0
+    ...(rows.length > shown.length
       ? [
           elideText(
-            styled(
-              state.colorEnabled,
-              ANSI.dim,
-              `  … ${formatCount(hidden, inspecting ? "more subagent" : "more active subagent")} in this run · ${headerHint}`,
-            ),
+            styled(color, ANSI.dim, `  … ${formatCount(rows.length - shown.length, "more agent")}`),
             safeWidth,
           ),
         ]
@@ -365,7 +373,7 @@ export function renderBottomChrome(state: NoesisTuiState, width: number, height 
   const safeWidth = Math.max(0, Math.floor(width));
   const badge = state.notification ? notificationBadge(state.notification.tone) : undefined;
   return [
-    ...renderSubagents(state, safeWidth, height),
+    ...renderAgentStrip(state, safeWidth, height),
     ...(state.notification && badge
       ? [
           elideText(
@@ -612,7 +620,7 @@ export function createSubagentsView(view: NoesisView, height: () => number): Com
   return {
     invalidate() {},
     render(width) {
-      return [...renderSubagents(view.state, Math.max(0, width), height())];
+      return [...renderAgentStrip(view.state, Math.max(0, width), height())];
     },
   };
 }
