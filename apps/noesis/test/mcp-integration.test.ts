@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { PiMcpSamplingPort } from "@noesis/runtime-pi";
-import { createTuiMcpInteractionBridge } from "@noesis/tui";
+import { createTuiInteractionBridge } from "@noesis/tui";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createApplicationMcpIntegration } from "../src/mcp-integration.ts";
 
@@ -44,7 +44,7 @@ describe("application MCP integration", () => {
       home,
       projectDirectory,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
@@ -79,7 +79,7 @@ describe("application MCP integration", () => {
       home,
       projectDirectory,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
@@ -111,7 +111,7 @@ describe("application MCP integration", () => {
       home: retryHome,
       projectDirectory: retryProject,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
@@ -144,7 +144,7 @@ describe("application MCP integration", () => {
       home: uncertainHome,
       projectDirectory: uncertainProject,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
@@ -175,7 +175,7 @@ describe("application MCP integration", () => {
       home,
       projectDirectory,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
@@ -228,7 +228,7 @@ describe("application MCP integration", () => {
       home,
       projectDirectory,
       sampling: controlledSampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
@@ -288,7 +288,7 @@ describe("application MCP integration", () => {
       home,
       projectDirectory,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: false,
     });
@@ -344,7 +344,7 @@ describe("application MCP integration", () => {
       home,
       projectDirectory,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: false,
     });
@@ -395,7 +395,7 @@ describe("application MCP integration", () => {
       home,
       projectDirectory,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
@@ -461,7 +461,7 @@ describe("application MCP integration", () => {
       home,
       projectDirectory,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });
@@ -507,7 +507,7 @@ describe("application MCP integration", () => {
       home,
       projectDirectory,
       sampling,
-      interactions: createTuiMcpInteractionBridge(),
+      interactions: createTuiInteractionBridge(),
       openUrl: async () => undefined,
       workspaceTrusted: true,
     });

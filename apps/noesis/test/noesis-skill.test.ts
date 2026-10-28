@@ -33,7 +33,7 @@ describe("built-in Noesis skill", () => {
       filePath: join(root, "skills/builtin/noesis/SKILL.md"),
       name: "noesis",
       aliases: ["refine"],
-      description: expect.stringContaining("deliberately refine Noesis"),
+      description: expect.stringContaining("Inspect and change Noesis itself"),
       content: expect.stringContaining("capabilities.refine"),
     });
     expect(noesis?.description).toBe(NOESIS_BUILT_IN_SKILL.description);

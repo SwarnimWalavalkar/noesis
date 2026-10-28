@@ -33,7 +33,15 @@ interface AuthOverlay extends Component, Focusable {
 }
 
 export interface TuiProviderAuthOrchestration {
+  /** Signs in only when the provider has no usable credentials. */
   readonly ensure: (providerId: string, providerName: string) => Promise<boolean>;
+  /** Always runs the provider sign-in flow, replacing any stored credentials on success. */
+  readonly authenticate: (
+    providerId: string,
+    providerName: string,
+    reason?: string,
+    signal?: AbortSignal,
+  ) => Promise<boolean>;
   readonly ownsKeyboardFocus: () => boolean;
   readonly dispose: () => void;
 }
@@ -80,13 +88,14 @@ function redactSecrets(value: string, secrets: ReadonlySet<string>): string {
 
 function createAuthOverlay(options: {
   readonly providerName: string;
+  readonly reason: string;
   readonly theme: SelectListTheme;
   readonly colorEnabled: boolean;
   readonly requestRender: () => void;
   readonly openUrl?: (url: string) => Promise<void>;
   readonly abort: () => void;
 }): AuthOverlay {
-  const notes: string[] = [`${options.providerName} needs authentication before the new session starts.`];
+  const notes: string[] = [options.reason];
   const secrets = new Set<string>();
   let focused = false;
   let question: string | undefined;
@@ -291,14 +300,16 @@ export function createTuiProviderAuthOrchestration(options: {
       }
     | undefined;
 
-  const ensure = async (providerId: string, providerName: string): Promise<boolean> => {
-    if (!options.runtime.providerAuthStatus || !options.runtime.authenticateProvider) return true;
-    const status = await options.runtime.providerAuthStatus(providerId);
-    if (status.configured) return true;
-    if (active) {
-      handle?.focus();
-      return await active.promise;
-    }
+  const authenticate = async (
+    providerId: string,
+    providerName: string,
+    reason = `${providerName} needs authentication before the new session starts.`,
+    signal?: AbortSignal,
+  ): Promise<boolean> => {
+    const authenticateProvider = options.runtime.authenticateProvider;
+    if (!authenticateProvider) throw new Error("Provider sign-in isn't available here.");
+    while (active && !signal?.aborted) await active.promise.catch(() => undefined);
+    if (signal?.aborted) return false;
     const controller = new AbortController();
     let resolve: ((value: boolean) => void) | undefined;
     let reject: ((cause: Error) => void) | undefined;
@@ -307,9 +318,12 @@ export function createTuiProviderAuthOrchestration(options: {
       reject = rejectPromise;
     });
     let settled = false;
+    // The listener is removed on settle, so `overlay` is still this request's overlay when it fires.
+    const abort = (): void => overlay?.cancel();
     const settle = (result: boolean, error?: Error): void => {
       if (settled) return;
       settled = true;
+      signal?.removeEventListener("abort", abort);
       const secrets = overlay?.secrets ?? new Set<string>();
       const safeError = error ? redactedAuthenticationError(error, providerName, secrets) : undefined;
       overlay?.clearSecrets();
@@ -324,6 +338,7 @@ export function createTuiProviderAuthOrchestration(options: {
     overlay = createAuthOverlay(
       createConditionalObject({
         providerName,
+        reason,
         theme: options.theme,
         colorEnabled: options.colorEnabled,
         requestRender: () => options.tui.requestRender(),
@@ -343,12 +358,13 @@ export function createTuiProviderAuthOrchestration(options: {
     });
     handle.focus();
     active = { providerId, promise, settle };
+    signal?.addEventListener("abort", abort, { once: true });
     const callbacks: TuiProviderAuthCallbacks = {
       signal: controller.signal,
       prompt: overlay.prompt,
       notify: overlay.notify,
     };
-    void options.runtime.authenticateProvider(providerId, callbacks).then(
+    void authenticateProvider(providerId, callbacks).then(
       (authenticated) => {
         if (!authenticated.configured)
           settle(false, new Error(`Authentication completed without configuring ${providerId}.`));
@@ -362,8 +378,20 @@ export function createTuiProviderAuthOrchestration(options: {
     return await promise;
   };
 
+  const ensure = async (providerId: string, providerName: string): Promise<boolean> => {
+    if (!options.runtime.providerAuthStatus || !options.runtime.authenticateProvider) return true;
+    const status = await options.runtime.providerAuthStatus(providerId);
+    if (status.configured) return true;
+    if (active) {
+      handle?.focus();
+      return await active.promise;
+    }
+    return await authenticate(providerId, providerName);
+  };
+
   return Object.freeze({
     ensure,
+    authenticate,
     ownsKeyboardFocus: () => Boolean(handle?.isFocused()),
     dispose: () => overlay?.cancel(),
   });

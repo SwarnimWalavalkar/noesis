@@ -1,4 +1,4 @@
-import { createConditionalObject, isJsonObject } from "@noesis/domain";
+import { createConditionalObject, schemaSignature } from "@noesis/domain";
 import type { AgentHarnessTool } from "@earendil-works/pi-agent-core";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import type { JsonValue } from "@noesis/domain";
@@ -20,65 +20,12 @@ const EXECUTE_DESCRIPTION = [
   "Compose related multi-call work in one program.",
   'Load the `execute` skill with tools.skills.load({ name: "execute" }) for SDK, composition, subagent, and Program guidance.',
 ].join(" ");
-function jsonSchemaLiteral(value: JsonValue): string {
-  return JSON.stringify(value) ?? "unknown";
-}
-function jsonSchemaPropertyName(value: string): string {
-  return /^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(value) ? value : JSON.stringify(value);
-}
-function jsonSchemaType(schema: JsonValue, depth = 0): string | undefined {
-  if (!isJsonObject(schema) || depth > 8) return undefined;
-  if (Object.hasOwn(schema, "const")) return jsonSchemaLiteral(schema["const"] ?? null);
-  const enumValues = schema["enum"];
-  if (Array.isArray(enumValues) && enumValues.length > 0) return enumValues.map(jsonSchemaLiteral).join("|");
-  for (const unionKey of ["oneOf", "anyOf"] as const) {
-    const variants = schema[unionKey];
-    if (!Array.isArray(variants) || variants.length === 0) continue;
-    const rendered = variants.map((variant) => jsonSchemaType(variant, depth + 1));
-    if (rendered.some((variant) => variant === undefined)) return undefined;
-    return rendered.join("|");
-  }
-  const declaredType = schema["type"];
-  if (Array.isArray(declaredType)) {
-    const rendered = declaredType.map((type) =>
-      typeof type === "string" ? jsonSchemaType({ type }, depth + 1) : undefined,
-    );
-    if (rendered.some((type) => type === undefined)) return undefined;
-    return rendered.join("|");
-  }
-  if (declaredType === "null") return "null";
-  if (declaredType === "string") return "string";
-  if (declaredType === "number" || declaredType === "integer") return "number";
-  if (declaredType === "boolean") return "boolean";
-  if (declaredType === "array") {
-    const itemType = jsonSchemaType(schema["items"] ?? {}, depth + 1) ?? "JsonValue";
-    return `${itemType.includes("|") ? `(${itemType})` : itemType}[]`;
-  }
-  if (declaredType === "object" || isJsonObject(schema["properties"])) {
-    const properties = schema["properties"];
-    if (!isJsonObject(properties)) return "Record<string,JsonValue>";
-    const requiredValue = schema["required"];
-    const required = new Set(
-      Array.isArray(requiredValue)
-        ? requiredValue.filter((value): value is string => typeof value === "string")
-        : [],
-    );
-    return `{${Object.entries(properties)
-      .map(([name, propertySchema]) => {
-        const propertyType = jsonSchemaType(propertySchema, depth + 1) ?? "JsonValue";
-        return `${jsonSchemaPropertyName(name)}${required.has(name) ? "" : "?"}:${propertyType}`;
-      })
-      .join(";")}}`;
-  }
-  return "JsonValue";
-}
 function shellOutputContract(catalog: {
   readonly tools: readonly Pick<PiFrozenToolCatalog["tools"][number], "name" | "outputSchema">[];
 }): string {
   const descriptor = catalog.tools.find((tool) => tool.name === "shell.run");
   if (!descriptor) return 'Before depending on shell.run result fields, use noesis.describe("shell.run").';
-  const outputType = jsonSchemaType(descriptor.outputSchema);
-  if (!outputType) return 'Before depending on shell.run result fields, use noesis.describe("shell.run").';
+  const outputType = schemaSignature(descriptor.outputSchema);
   const contract = `Schema-derived shell.run result: ${outputType}.`;
   return new TextEncoder().encode(contract).byteLength <= MAX_STARTER_OUTPUT_CONTRACT_BYTES
     ? contract

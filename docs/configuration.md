@@ -37,6 +37,29 @@ Noesis stores local state under `~/.noesis/` by default. Set model options and t
 
 `agent` configures the foreground model. `agents` configures subagents, with omitted fields inherited from `agent`. See [subagent routing](codemode.md#model-routing) for the runtime contract.
 
+Earlier versions also accepted `learning`, `autonomy`, and `experiments` sections. Noesis never applied them. Files that still contain them load normally, and the next configuration change removes them.
+
+### Ask Noesis to change its configuration
+
+You can ask Noesis what it can change about itself, or ask for a specific change, such as "use Claude for subagents" or "lower the context budget to 96k". The bundled `noesis` skill guides the agent. It uses these tools through codemode:
+
+| Tool                     | What it does                                                                                                            |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `config.inspect`         | Shows the stored file, the effective values, where each value came from, and what each setting does.                    |
+| `config.update`          | Validates and writes one change. `null` clears a field so its default applies.                                          |
+| `providers.list`         | Lists providers, their sign-in status, and their models and reasoning levels.                                           |
+| `providers.authenticate` | Opens the same sign-in overlay as `/provider` and waits for you to finish.                                              |
+| `providers.logout`       | Removes stored credentials for a provider.                                                                              |
+| `session.inspect`        | Shows the model the current session runs, how full its context is, its compaction history, and this turn's permissions. |
+
+Changes made this way apply without a restart where possible:
+
+- Subagent routes and context settings apply from the next turn.
+- Foreground model defaults apply the next time Noesis starts a session without a chosen route, normally the next launch. Use `/provider`, `/model`, or `/reasoning` to change the current session.
+- Command-line flags and `NOESIS_*` environment variables still take precedence. Noesis tells you when one of them overrides a change.
+
+When Noesis needs you to sign in, it opens the sign-in overlay in the terminal. OAuth providers open your browser. API keys go into a masked field. The key goes directly to protected storage; it never appears in the conversation, tool results, or logs. Subagents cannot change configuration or credentials.
+
 The default context budget is 160,000 tokens. Set `context.tokenBudget` to another positive value to change it. The budget covers the whole model request, not only the transcript. Noesis keeps it below the selected model's context window and reserves room for the model's maximum output.
 
 ### Compaction controls
@@ -52,7 +75,7 @@ Noesis makes room in long sessions by extracting continuity notes from older set
 
 See [long sessions and compaction](session-compaction.md) for the design and its cost tradeoffs.
 
-Automatic compaction is enabled by default. Before a new turn, Noesis uses the same notebook compactor if history exceeds its allocation. To disable automatic compaction, set `context.autoCompact` to `false` and restart Noesis. Manual `/compact` remains available. With automation disabled, an over-budget turn stops with guidance instead of silently dropping history.
+Automatic compaction is enabled by default. Before a new turn, Noesis uses the same notebook compactor if history exceeds its allocation. To disable automatic compaction, ask Noesis to turn it off, or set `context.autoCompact` to `false` and restart Noesis. Manual `/compact` remains available. With automation disabled, an over-budget turn stops with guidance instead of silently dropping history.
 
 The notebook uses at most one quarter of the history allocation, capped at 8,000 estimated tokens. If an existing note exceeds a reduced allocation, increase `context.tokenBudget` or shorten the new request. `/compact` cannot shrink an immutable note, and the selected model still limits the available budget.
 

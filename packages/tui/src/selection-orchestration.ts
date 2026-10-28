@@ -1,4 +1,5 @@
 import type { SelectListTheme, TUI } from "@earendil-works/pi-tui";
+import type { TuiInteractionPresenter, TuiProviderAuthenticationResult } from "./interaction.ts";
 import { createTuiProviderAuthOrchestration } from "./provider-auth.ts";
 import { createTuiProviderPickerOrchestration } from "./provider-picker.ts";
 import { createTuiRoutePickerOrchestration } from "./route-picker.ts";
@@ -51,6 +52,23 @@ export function createTuiSelectionOrchestration(options: {
     selectRoute: route.select,
     selectProvider: provider.select,
     ensureProviderAuthenticated: auth.ensure,
+    presentProviderAuthentication: ((request) => {
+      const controller = new AbortController();
+      return {
+        result: auth
+          .authenticate(request.providerId, request.providerName, request.reason, controller.signal)
+          .then(
+            (authenticated): TuiProviderAuthenticationResult => ({
+              action: authenticated ? "accept" : "cancel",
+            }),
+            (cause: unknown): TuiProviderAuthenticationResult => ({
+              action: "error",
+              message: cause instanceof Error ? cause.message : String(cause),
+            }),
+          ),
+        cancel: () => controller.abort(),
+      };
+    }) satisfies TuiInteractionPresenter["presentProviderAuthentication"],
     selectSession: session.select,
     ownsKeyboardFocus: () =>
       route.ownsKeyboardFocus() ||

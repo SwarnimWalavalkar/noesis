@@ -38,10 +38,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     let visibleValue: unknown;
     const controlled = createControlledPiModels({
       respond: ({ context }) => {
@@ -122,10 +119,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: "stale-default-provider", model: "stale-default-model" }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const nestedRequests: PiSubAgentTaskRequest[] = [];
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
@@ -231,10 +225,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText, systemPrompt }) => {
         if (systemPrompt.includes("subagent inside Noesis"))
@@ -375,10 +366,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const childStarted = Promise.withResolvers<void>();
     const releaseInitialChildRound = Promise.withResolvers<void>();
     let childRounds = 0;
@@ -509,10 +497,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     let receiverId: string | undefined;
     let outsiderId: string | undefined;
     const controlled = createControlledPiModels({
@@ -655,10 +640,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const releaseReport = Promise.withResolvers<void>();
     let foregroundSessionId: string | undefined;
     const controlled = createControlledPiModels({
@@ -760,10 +742,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const releaseWorker = Promise.withResolvers<void>();
     let replayed: readonly string[] = [];
     const controlled = createControlledPiModels({
@@ -858,10 +837,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const releaseWorker = Promise.withResolvers<void>();
     let trailId: string | undefined;
     let runtimeForPolling: Awaited<ReturnType<typeof createApplicationRuntimeComposition>> | undefined;
@@ -949,10 +925,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const objectSchema = (properties: string): string =>
       `{ type: "object", properties: ${properties}, required: ${JSON.stringify(
         [...properties.matchAll(/(\w+):/gu)]
@@ -1036,10 +1009,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const releaseReport = Promise.withResolvers<void>();
     const controlled = createControlledPiModels({
       respond: async ({ context, systemPrompt }) => {
@@ -1131,10 +1101,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const nestedRequests: PiSubAgentTaskRequest[] = [];
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText, systemPrompt }) => {
@@ -1245,10 +1212,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText, systemPrompt }) => {
         const settled = context.messages.at(-1)?.role === "toolResult";
@@ -1327,10 +1291,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const controlled = createControlledPiModels({
       respond: ({ context }) =>
         context.messages.at(-1)?.role === "toolResult"
@@ -1374,10 +1335,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const controlled = createControlledPiModels({
       respond: ({ context }) =>
         context.messages.at(-1)?.role === "toolResult"
@@ -1418,10 +1376,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     let observedToolNames: readonly string[] = [];
     const executionSource = [
       'console.log("source output");',
@@ -1541,10 +1496,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const controlled = createControlledPiModels({
       respond: ({ context }) => {
         if (context.messages.at(-1)?.role === "toolResult") return "External directory inspected.";
@@ -1604,10 +1556,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const outputScript = 'process.stdout.write("line\\n".repeat(30_000) + "tail\\n")';
     const command = `${JSON.stringify(process.execPath)} -e ${JSON.stringify(outputScript)}`;
     const controlled = createControlledPiModels({
@@ -1671,10 +1620,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     let originalRevisionId: string | undefined;
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
@@ -1938,10 +1884,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
         if (context.messages.at(-1)?.role === "toolResult")
@@ -2201,10 +2144,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
         if (context.messages.at(-1)?.role === "toolResult")
@@ -2288,10 +2228,7 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
         const lastMessage = context.messages.at(-1);

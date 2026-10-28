@@ -24,7 +24,7 @@ import {
 } from "@noesis/runtime-pi";
 import {
   OnboardingInterruptedError,
-  createTuiMcpInteractionBridge,
+  createTuiInteractionBridge,
   type OnboardingSurface,
   pickStartupNote,
   runNoesisOnboardingTui,
@@ -97,7 +97,7 @@ async function createRuntime(
 ): Promise<
   Readonly<{
     runtime: ApplicationRuntime;
-    mcpInteractionBridge: ReturnType<typeof createTuiMcpInteractionBridge>;
+    interactionBridge: ReturnType<typeof createTuiInteractionBridge>;
   }>
 > {
   const services = await createPiModelServices(config.home);
@@ -110,7 +110,7 @@ async function createRuntime(
     workspaceTrusted: options.workspaceTrusted,
     builtInSkills: await prepareNoesisBuiltInSkills(config.home),
   });
-  const mcpInteractionBridge = createTuiMcpInteractionBridge();
+  const interactionBridge = createTuiInteractionBridge();
   const mcp = options.enableMcp
     ? createApplicationMcpIntegration({
         home: config.home,
@@ -121,7 +121,7 @@ async function createRuntime(
           model: config.agent.model,
           reasoning: config.agent.thinkingLevel,
         }),
-        interactions: mcpInteractionBridge,
+        interactions: interactionBridge,
         workspaceTrusted: options.workspaceTrusted,
         openUrl: async (url) => {
           openAuthUrl(url);
@@ -160,6 +160,7 @@ async function createRuntime(
           },
           providerAuthStatus: services.auth.status,
           authenticateProvider: services.auth.login,
+          interactions: interactionBridge.handlers,
           disconnectProvider: async (providerId) => {
             await services.auth.logout(providerId);
             return await services.auth.status(providerId);
@@ -183,11 +184,12 @@ async function createRuntime(
           | "providerAuthStatus"
           | "authenticateProvider"
           | "disconnectProvider"
+          | "interactions"
           | "resolveModelContext"
         >)
         .finish(),
     );
-    return Object.freeze({ runtime, mcpInteractionBridge });
+    return Object.freeze({ runtime, interactionBridge });
   } catch (error) {
     await mcp?.close().catch(() => undefined);
     throw error;
@@ -319,7 +321,7 @@ async function runConfig(input: CliInput): Promise<void> {
       const services = await createPiModelServices(input.home);
       preparePiModelSelection(services.catalog, selection);
     }
-    console.log(JSON.stringify(await updateNoesisConfig(input.home, input.overrides), null, 2));
+    console.log(JSON.stringify(await updateNoesisConfig(input.home, { agent: input.overrides }), null, 2));
     return;
   }
   throw new Error("Unknown config command. Use config show, config init, or config set.");
@@ -458,7 +460,7 @@ async function main(): Promise<void> {
         version: NOESIS_VERSION,
         startupNote,
         updateNotice,
-        mcpInteractionBridge: created.mcpInteractionBridge,
+        interactionBridge: created.interactionBridge,
         onShutdown: () => runtime.shutdown(),
         openUrl: async (url) => {
           openAuthUrl(url);

@@ -49,7 +49,7 @@ test("inspects startup context and the actual Pi request without invoking a mode
     ],
   });
   const runtime = await createApplicationRuntimeComposition({
-    config: { ...config, learning: { ...config.learning, enabled: false } },
+    config,
     skills,
     resolveModelContext: () => ({ contextWindow: 200000, maxOutputTokens: 1000 }),
     createAgent: (_tools, codeExecution) =>

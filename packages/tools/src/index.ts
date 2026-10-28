@@ -8,6 +8,7 @@ import {
   JsonValueSchema,
   type PermissionManifest,
   type ProgramMode,
+  schemaSignature,
   sha256,
   toJsonValue,
 } from "@noesis/domain";
@@ -498,7 +499,7 @@ export function createToolBroker(options: CreateToolBrokerOptions): ToolBroker {
             : String(error);
       return failure(
         "invalid_input",
-        `Invalid input for ${name}: ${detail} Inspect the exact input schema with noesis.describe("${name}").`,
+        `Invalid input for ${name}: ${detail}\nExpected input: ${schemaSignature(entry.descriptor.inputSchema)}`,
       );
     }
     const callId = invocationContext.callId ?? createId("tool_call");

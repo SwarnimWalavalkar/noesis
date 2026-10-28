@@ -372,6 +372,27 @@ describe("codemode runtime", () => {
       "Unknown tool: math.multiply. Discover the frozen catalog with noesis.search(query), then inspect an exact contract with noesis.describe(name).",
     );
   });
+  it("reports tool calls that succeeded before the program failed", async () => {
+    await expect(
+      runtime().execute({
+        source: "const doubled = await tools.math.double({ value: 2 });\nreturn doubled.missing.value;",
+        sessionId: "session-completed-before-failure",
+      }),
+    ).rejects.toThrow(
+      "These tool calls succeeded before the program failed, so their effects already happened: math.double.",
+    );
+  });
+  it("leads noesis.describe with compact input and output signatures", async () => {
+    const result = await runtime().execute({
+      source: 'return await noesis.describe("math.double");',
+      sessionId: "session-describe-signature",
+    });
+    expect(result.value).toMatchObject({
+      name: "math.double",
+      signature: { input: "{ value: number }", output: "{ value: number }" },
+      inputSchema: { type: "object" },
+    });
+  });
   it("allows local SDK shadowing without changing completion or session storage", async () => {
     const code = runtime();
     for (const completionMode of ["explicit", "last-expression"] as const) {

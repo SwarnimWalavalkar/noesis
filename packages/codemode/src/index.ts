@@ -4,10 +4,11 @@ import {
   createId,
   type JsonValue,
   JsonValueSchema,
+  schemaSignature,
   sha256,
   toJsonValue,
 } from "@noesis/domain";
-import type { ToolBroker, ToolInvocationResult } from "@noesis/tools";
+import { type FrozenToolDescriptor, type ToolBroker, type ToolInvocationResult } from "@noesis/tools";
 import { z } from "zod";
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_MAX_PROGRESS_BYTES = 256 * 1024;
@@ -242,6 +243,34 @@ function sdkActionInput(
   if (message.kind === "describe") return Object.freeze({ name: message.name });
   return message.input;
 }
+/** Leads with compact input and output types so the model can read field names before the full JSON Schemas. */
+function describeForModel(descriptor: FrozenToolDescriptor | undefined) {
+  if (!descriptor) return null;
+  const { name, description, ...contract } = descriptor;
+  return Object.freeze({
+    name,
+    description,
+    signature: Object.freeze({
+      input: schemaSignature(descriptor.inputSchema),
+      output: schemaSignature(descriptor.outputSchema),
+    }),
+    ...contract,
+  });
+}
+const MAX_REPORTED_COMPLETED_TOOLS = 20;
+/** Names tool calls that already succeeded so the model does not mistake a failed program for a failed effect. */
+function withCompletedTools(error: Error, completed: readonly string[]): Error {
+  if (completed.length === 0) return error;
+  const listed = completed.slice(0, MAX_REPORTED_COMPLETED_TOOLS).join(", ");
+  const more =
+    completed.length > MAX_REPORTED_COMPLETED_TOOLS
+      ? ` and ${String(completed.length - MAX_REPORTED_COMPLETED_TOOLS)} more`
+      : "";
+  return new Error(
+    `${error.message}\n\nThese tool calls succeeded before the program failed, so their effects already happened: ${listed}${more}. Check current state before repeating any of them.`,
+    { cause: error },
+  );
+}
 function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
   return Array.isArray(value);
 }
@@ -364,6 +393,8 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     let logsTruncated = false;
     let progressBytes = 0;
     let calls = 0;
+    /** Broker tools that returned successfully, so a later program failure can report effects that already happened. */
+    const completedTools: string[] = [];
     let ready = false;
     let terminal = false;
     let settlingResult = false;
@@ -411,7 +442,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
             executionId,
             error: error.message,
           });
-          reject(error);
+          reject(withCompletedTools(error, completedTools));
         };
         const finishSuccess = async (
           value: JsonValue,
@@ -515,7 +546,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               message.kind === "search"
                 ? options.broker.search(message.query, message.limit)
                 : message.kind === "describe"
-                  ? (options.broker.describe(message.name) ?? null)
+                  ? describeForModel(options.broker.describe(message.name))
                   : invocationValue(
                       await options.broker.invoke(
                         message.name,
@@ -554,6 +585,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               value,
               callId,
             });
+            if (message.kind === "invoke") completedTools.push(name);
             notify({ type: "tool-end", executionId, callId, name, callIndex, ok: true, result: value });
           } catch (error) {
             const reason = error instanceof Error ? error.message : String(error);

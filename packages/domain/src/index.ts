@@ -208,3 +208,4 @@ export * from "./storage-schemas.ts";
 export * from "./workspace.ts";
 
 export * from "./attachments.ts";
+export * from "./json-schema-signature.ts";

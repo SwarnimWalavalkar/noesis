@@ -37,8 +37,8 @@ import {
 } from "@noesis/domain";
 import type {
   NoesisTuiRuntime,
-  TuiMcpFormField,
-  TuiMcpInteractionBridge,
+  TuiFormField,
+  TuiInteractionBridge,
   TuiMcpRecentError,
   TuiMcpServerConfig,
   TuiMcpServerDetail,
@@ -114,10 +114,10 @@ function formFields(
       mode: "url";
     }
   >,
-): readonly TuiMcpFormField[] {
+): readonly TuiFormField[] {
   const required = new Set(request.requestedSchema.required ?? []);
   return Object.freeze(
-    Object.entries(request.requestedSchema.properties).map(([name, property]): TuiMcpFormField => {
+    Object.entries(request.requestedSchema.properties).map(([name, property]): TuiFormField => {
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       const common = createConditionalObject({
         name,
@@ -232,13 +232,13 @@ function formFields(
 async function presentElicitation(
   serverName: string,
   request: McpElicitRequest,
-  bridge: TuiMcpInteractionBridge,
+  bridge: TuiInteractionBridge,
   signal: AbortSignal,
 ): Promise<McpElicitResult> {
   if (request.params.mode === "url") {
     const result = await bridge.handlers.elicitUrl(
       {
-        serverName,
+        source: serverName,
         title: "Open MCP interaction",
         message: request.params.message,
         url: request.params.url,
@@ -250,7 +250,7 @@ async function presentElicitation(
   }
   const result = await bridge.handlers.elicitForm(
     {
-      serverName,
+      source: serverName,
       title: "MCP request",
       message: request.params.message,
       fields: formFields(request.params),
@@ -310,7 +310,7 @@ export function createApplicationMcpIntegration(input: {
   readonly home: string;
   readonly projectDirectory: string;
   readonly sampling: PiMcpSamplingPort;
-  readonly interactions: TuiMcpInteractionBridge;
+  readonly interactions: TuiInteractionBridge;
   readonly openUrl: (url: string) => Promise<void>;
   readonly workspaceTrusted: boolean;
 }): ApplicationMcpIntegration {
@@ -869,7 +869,7 @@ export function createApplicationMcpIntegration(input: {
     if (secretNames.length > 0) {
       const result = await input.interactions.handlers.elicitForm(
         {
-          serverName: name,
+          source: name,
           title: "Authenticate MCP server",
           message: `Enter credentials for ${scope}/${name}. Values are saved in protected credential storage and restored automatically after restart. For HTTP headers, enter the complete value (for example, Bearer followed by the token).`,
           fields: secretNames.map((name) => ({ name, label: name, type: "secret", required: true })),

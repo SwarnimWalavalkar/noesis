@@ -23,6 +23,7 @@ import { boundedInspectorText, TUI_TIMINGS, type ShutdownSettlement } from "./li
 import { createTuiInspectorOrchestration } from "./inspector-orchestration.ts";
 import { createContextInspector } from "./context-inspector.ts";
 import { createTuiLearningOrchestration } from "./learning.ts";
+import { createTuiInteractionOrchestration } from "./interaction-orchestration.ts";
 import { createTuiMcpOrchestration } from "./mcp.ts";
 import { createOptimisticPromptEcho } from "./optimistic-prompt.ts";
 import {
@@ -134,23 +135,14 @@ export async function startNoesisTui(
       await submitPrompt({ type: "submit", text, attachments });
     },
   });
-  const mcp = createTuiMcpOrchestration(
-    createConditionalObject({
-      runtime,
-      tui,
-      colorEnabled,
-      height: () => terminal.rows,
-    } as const)
-      .addOptional(
-        options.mcpInteractionBridge ? { interactionBridge: options.mcpInteractionBridge } : undefined,
-      )
-      .addOptional(options.openUrl ? { openUrl: options.openUrl } : undefined)
-      .add({
-        mutationsEnabled: () => view.state.interaction.phase === "idle",
-        reportUnavailable: notify,
-      } as const)
-      .finish(),
-  );
+  const mcp = createTuiMcpOrchestration({
+    runtime,
+    tui,
+    colorEnabled,
+    height: () => terminal.rows,
+    mutationsEnabled: () => view.state.interaction.phase === "idle",
+    reportUnavailable: notify,
+  });
   const contextInspector = createContextInspector({
     runtime,
     tui,
@@ -173,6 +165,17 @@ export async function startNoesisTui(
     currentTrailId: () => view.state.trailId,
     openUrl: options.openUrl,
   });
+  const interactions = createTuiInteractionOrchestration(
+    createConditionalObject({
+      tui,
+      colorEnabled,
+      height: () => terminal.rows,
+      authenticateProvider: selection.presentProviderAuthentication,
+    } as const)
+      .addOptional(options.interactionBridge ? { bridge: options.interactionBridge } : undefined)
+      .addOptional(options.openUrl ? { openUrl: options.openUrl } : undefined)
+      .finish(),
+  );
   const statusView = createStatusView(view, () => terminal.rows);
   const subagentsView = createSubagentsView(view, () => terminal.rows);
   const queuedInputsView = createQueuedInputsView(view, () => terminal.rows);
@@ -264,6 +267,7 @@ export async function startNoesisTui(
         }
       };
       try {
+        await attemptCleanup(() => interactions.dispose());
         await attemptCleanup(() => selection.dispose());
         await attemptCleanup(() => learning.dispose());
         await attemptCleanup(() => contextInspector.dispose());
@@ -548,6 +552,7 @@ export async function startNoesisTui(
     escapeRouting.observeInput(data);
     notifications.observeInput(data);
     if (
+      interactions.ownsKeyboardFocus() ||
       mcp.ownsKeyboardFocus() ||
       learning.ownsKeyboardFocus() ||
       contextInspector.ownsKeyboardFocus() ||
@@ -816,6 +821,8 @@ export async function startNoesisTui(
       tui.start();
     }
   } catch (error) {
+    interactions.dispose();
+    selection.dispose();
     learning.dispose();
     notifications.dispose();
     subAgents.dispose();

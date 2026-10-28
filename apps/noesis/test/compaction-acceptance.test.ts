@@ -19,7 +19,6 @@ test.each([undefined, true, false])(
       schemaVersion: 1,
       agent: { provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL },
       context: autoCompact === undefined ? { tokenBudget: 50_000 } : { tokenBudget: 50_000, autoCompact },
-      learning: { enabled: false },
     });
     const compactorInputs: string[] = [];
     const foregroundInputs: string[] = [];
