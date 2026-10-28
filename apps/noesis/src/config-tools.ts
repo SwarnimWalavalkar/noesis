@@ -397,7 +397,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
               model: route.model,
               name: route.name,
               default: route.default,
-              thinkingLevels: [...route.thinkingLevels],
+              thinkingLevels: [...supportedThinkingLevels(route)],
             })),
           };
         }
