@@ -2,6 +2,7 @@ import type { AgentContextInspection, FrozenTurnPlan } from "@noesis/agent-types
 import { ThinkingLevelSchema, type ResolvedNoesisConfig } from "@noesis/config";
 import { createConditionalObject } from "@noesis/domain";
 import { defineTool, type ToolDefinition } from "@noesis/tools";
+import { supportedThinkingLevels } from "./config-tools.ts";
 import type { TuiModelRoute } from "@noesis/tui";
 import type { ContextCheckpointRecord, SessionRecord } from "@noesis/workspace";
 import { z } from "zod";
@@ -247,9 +248,10 @@ function createSessionUpdateTool(port: SessionPort, plan: FrozenTurnPlan): ToolD
         const route = port
           .modelRoutes()
           .find((candidate) => candidate.provider === plan.provider && candidate.model === plan.model);
-        if (route && !route.thinkingLevels.includes(thinkingLevel))
+        const supported = route ? supportedThinkingLevels(route) : undefined;
+        if (supported && !supported.includes(thinkingLevel))
           throw new Error(
-            `${plan.provider}/${plan.model} does not support reasoning level ${thinkingLevel}. Supported: ${route.thinkingLevels.join(", ") || "none"}`,
+            `${plan.provider}/${plan.model} does not support reasoning level ${thinkingLevel}. Supported: ${supported.join(", ")}`,
           );
       }
       await port.updateSettings(

@@ -747,9 +747,10 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     const route = (await refreshedModelRoutes(runtime)).find(
       (candidate) => candidate.provider === current.provider && candidate.model === current.model,
     );
-    if (route && !route.thinkingLevels.includes(level)) {
+    const supported = route && route.thinkingLevels.length > 0 ? route.thinkingLevels : ["off"];
+    if (route && !supported.includes(level)) {
       publishInspector(
-        `${current.provider}/${current.model} does not support reasoning level ${level}. Supported: ${route.thinkingLevels.join(", ") || "off"}.`,
+        `${current.provider}/${current.model} does not support reasoning level ${level}. Supported: ${supported.join(", ")}.`,
       );
       return true;
     }
