@@ -57,10 +57,10 @@ export class OnboardingInterruptedError extends Error {
     this.name = "OnboardingInterruptedError";
   }
 }
-const CHOICE_HINT = "↑/↓ navigate · 1-9 jump · Enter select · Ctrl+C cancel";
-const TEXT_HINT = "Enter accept · Ctrl+C cancel";
-const SECRET_HINT = "Input hidden · Enter accept · Ctrl+C cancel";
-const WAITING_HINT = "Ctrl+C cancel";
+const CHOICE_HINT = "↑/↓ move · 1-9 jump · enter select · ctrl+c cancel";
+const TEXT_HINT = "enter accept · ctrl+c cancel";
+const SECRET_HINT = "Input hidden · enter accept · ctrl+c cancel";
+const WAITING_HINT = "ctrl+c cancel";
 const WAITING_DELAY_MS = 200;
 const ELAPSED_INTERVAL_MS = 1000;
 const MAX_CHOICE_ROWS = 9;

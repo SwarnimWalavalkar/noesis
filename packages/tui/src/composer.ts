@@ -76,7 +76,7 @@ export function createComposer(options: ComposerOptions) {
   ): void => {
     if (disposed) return;
     if (sending) {
-      notice("Message admission is still pending; retry attaching after it settles.");
+      notice("Still sending your last message. Attach again in a moment.");
       return;
     }
     const id = ++sequence;
@@ -92,10 +92,7 @@ export function createComposer(options: ComposerOptions) {
           for (const attachment of attachments) releaseInput(attachment);
           return;
         }
-        if (!attachments.length)
-          throw new Error(
-            "No clipboard files or image found. Use /attach <path> for files or remote terminals.",
-          );
+        if (!attachments.length) throw new Error("Nothing to paste. Use /attach <path> for files.");
         items = items.flatMap((item) =>
           item.id === id
             ? attachments.map((attachment) => ({ id: ++sequence, name: attachment.name, attachment }))
@@ -115,7 +112,7 @@ export function createComposer(options: ComposerOptions) {
   };
   const remove = (argument: string): void => {
     if (sending) {
-      notice("Wait for message admission before changing attachments.");
+      notice("Still sending your last message. Try again in a moment.");
       return;
     }
     if (argument === "all") {
@@ -145,8 +142,7 @@ export function createComposer(options: ComposerOptions) {
       if (command === "/quit") return false;
       if (command === "/attach" || command.startsWith("/attach ")) {
         const path = command.slice(7).trim();
-        if (!path)
-          notice("Use /attach <path> (one file, quotes optional), or Ctrl+V for copied files or an image.");
+        if (!path) notice("Usage: /attach <path> · ctrl+v pastes copied files or an image");
         else add(path, (signal) => options.readPath(path, signal));
         return true;
       }
@@ -164,7 +160,7 @@ export function createComposer(options: ComposerOptions) {
           const start = (page - 1) * 8;
           notice(
             [
-              `Attachments ${items.length}; page ${page}/${pages}. Use /attachments <page> or /detach <number>.`,
+              `Attachments · ${items.length} · page ${page}/${pages}`,
               ...items
                 .slice(start, start + 8)
                 .map(
@@ -184,22 +180,22 @@ export function createComposer(options: ComposerOptions) {
       if (route.kind !== "prompt") {
         if (route.name !== "steer" || items.length === 0) return false;
         editor.setText(text);
-        notice("Attachments stay in this draft. Send them with Enter without /steer, or /detach all first.");
+        notice("/steer can't carry attachments. Remove /steer and send with enter, or /detach all first.");
         return true;
       }
       if (sending || items.some((item) => !item.attachment)) {
         editor.setText(text);
         notice(
           sending
-            ? "Message admission is still pending."
-            : "Attachments are not ready. Wait, or /detach failed items before sending.",
+            ? "Still sending your last message."
+            : "Attachments aren't ready. Wait, or /detach the failed ones.",
         );
         return true;
       }
       if (items.length === 0) return false;
       editor.setText(text);
       if (!options.canSubmit()) {
-        notice("Wait for the current command before sending attachments.");
+        notice("Wait for the current command to finish.");
         return true;
       }
       const submitted = items;
@@ -219,7 +215,7 @@ export function createComposer(options: ComposerOptions) {
         .catch((cause: unknown) => {
           if (!disposed)
             notice(
-              `Not sent; draft retained. ${labelText(cause instanceof Error ? cause.message : String(cause))}`,
+              `Not sent; your draft is kept. ${labelText(cause instanceof Error ? cause.message : String(cause))}`,
             );
         })
         .finally(() => {

@@ -18,10 +18,10 @@ export function foregroundMessageNotice(
 ): string {
   const name = state.subAgents.find((agent) => agent.agentId === event.agentId)?.name ?? "A subagent";
   const what = event.kind === "completion" ? `${name} finished` : `${name} sent a message`;
-  if (event.recipient.id !== state.trailId) return `${what} · reported to the session that asked`;
-  if (state.interaction.phase !== "idle") return `${what} · the agent sees it at its next step`;
-  if (state.interaction.queuePaused) return `${what} · it reaches the agent with your next message`;
-  return `${what} · resuming the agent`;
+  if (event.recipient.id !== state.trailId) return `${what} · reported to the asking session`;
+  if (state.interaction.phase !== "idle") return `${what} · Noesis sees it next step`;
+  if (state.interaction.queuePaused) return `${what} · Noesis sees it with your next message`;
+  return `${what} · Noesis is picking it up`;
 }
 
 export interface TuiSubAgentOrchestration {

@@ -49,9 +49,7 @@ export function resolveTuiSessionRequest(
   if (requested.mode !== "continue") return requested;
   const latest = runtime.listTrailSummaries()[0];
   if (!latest)
-    throw new Error(
-      `No saved sessions were found in ${runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --continue).`,
-    );
+    throw new Error(`No saved sessions in ${runtime.home ?? "this Noesis home"}. Run noesis to start one.`);
   return { mode: "resume", trailId: latest.trailId };
 }
 
@@ -129,7 +127,7 @@ export function createTuiSessionPickerOrchestration(input: {
       if (items.length === 0)
         return Promise.reject(
           new Error(
-            `No saved sessions were found in ${input.runtime.home ?? "the configured Noesis home"}. Start a new session with noesis (without --resume).`,
+            `No saved sessions in ${input.runtime.home ?? "this Noesis home"}. Run noesis to start one.`,
           ),
         );
       active = new Promise<string | undefined>((resolve) => {
@@ -153,7 +151,7 @@ export function createTuiSessionPickerOrchestration(input: {
         const selected = picker.selectedItem();
         if (!selected) return;
         if (selected.value === input.currentTrailId?.()) {
-          notice = "The current session cannot be deleted. Resume another session first.";
+          notice = "Can't delete the current session. Resume another one first.";
           input.tui.requestRender();
           return;
         }
@@ -176,7 +174,7 @@ export function createTuiSessionPickerOrchestration(input: {
               return;
             }
             picker = createPicker();
-            notice = "Session deleted from resume and search.";
+            notice = "Session deleted.";
             input.tui.requestRender();
           },
           (cause: unknown) => {
@@ -199,10 +197,10 @@ export function createTuiSessionPickerOrchestration(input: {
           const guidance = confirmation
             ? [
                 confirmation.label,
-                "Delete from resume and search? Linked learning and audit evidence remains.",
-                deleting ? "Deleting…" : "d again to delete · Esc keep",
+                "Delete this session? Learning and audit records are kept.",
+                deleting ? "Deleting…" : "d again to delete · esc keep",
               ]
-            : ["↑/↓ navigate · Enter resume · d delete · Esc cancel", ...(notice ? [notice] : [])];
+            : ["↑/↓ move · enter resume · d delete · esc cancel", ...(notice ? [notice] : [])];
           return [
             `${styled(input.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "NOESIS")}  ${styled(input.colorEnabled, ANSI.dim, "resume a session")}`,
             ...guidance.map((line) => styled(input.colorEnabled, ANSI.dim, elideText(line, width))),
@@ -303,10 +301,7 @@ export async function resumableTrail(runtime: NoesisTuiRuntime, trailId: string)
     return await runtime.resumeTrail(trailId);
   } catch (error) {
     if (error instanceof Error && error.message === `Trail not found: ${trailId}`)
-      throw new Error(
-        `Session ${trailId} was not found in ${runtime.home ?? "the configured Noesis home"}. Run noesis --resume to choose an available session.`,
-        { cause: error },
-      );
+      throw new Error(`Session ${trailId} not found. Run noesis --resume to pick one.`, { cause: error });
     throw error;
   }
 }

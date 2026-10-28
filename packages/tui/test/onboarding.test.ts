@@ -46,12 +46,12 @@ describe("first-launch onboarding surface", () => {
     expect(terminal.output).toContain("Welcome to Noesis.");
     expect(terminal.output).toContain("Choose an AI provider");
     expect(terminal.output).toContain("Sign in with your ChatGPT account");
-    expect(terminal.output).toContain("↑/↓ navigate · 1-9 jump · Enter select · Ctrl+C cancel");
+    expect(terminal.output).toContain("↑/↓ move · 1-9 jump · enter select · ctrl+c cancel");
 
     terminal.send(DOWN);
     terminal.send(ENTER);
     await waitForOutput(terminal, "✓ Choose an AI provider · OpenRouter");
-    await waitForOutput(terminal, "Enter accept · Ctrl+C cancel");
+    await waitForOutput(terminal, "enter accept · ctrl+c cancel");
 
     terminal.send(ENTER);
 
@@ -119,7 +119,7 @@ describe("first-launch onboarding surface", () => {
     );
 
     await waitForOutput(terminal, "Enter OpenRouter API key");
-    expect(terminal.output).toContain("Input hidden · Enter accept · Ctrl+C cancel");
+    expect(terminal.output).toContain("Input hidden · enter accept · ctrl+c cancel");
     terminal.type("sk-secret-value");
     await waitForOutput(terminal, "•••");
     terminal.send(ENTER);

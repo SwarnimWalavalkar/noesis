@@ -564,10 +564,10 @@ function createFormOverlay(
             options.colorEnabled,
             ANSI.dim,
             current?.type === "multiselect"
-              ? "↑/↓ move · Space toggle · Enter continue · Ctrl+D decline · Esc cancel"
+              ? "↑/↓ move · space toggle · enter continue · ctrl+d decline · esc cancel"
               : choices.length > 0
-                ? "↑/↓ select · Enter continue · Ctrl+D decline · Esc cancel"
-                : "Enter continue · Ctrl+D decline · Esc cancel",
+                ? "↑/↓ move · enter continue · ctrl+d decline · esc cancel"
+                : "enter continue · ctrl+d decline · esc cancel",
           )}`,
           outerWidth,
         ),
@@ -607,7 +607,7 @@ function createUrlOverlay(
         ...wrapTextWithAnsi(`Domain · ${safeInteractionScalar(urlDomain(request.url))}`, width),
         ...wrapTextWithAnsi(`URL · ${safeTerminalText(request.url)}`, width),
         "",
-        "Press Enter to open this URL in your browser.",
+        "Press enter to open it in your browser.",
       ];
       return [
         styled(options.colorEnabled, ANSI.dim, `╭─ ${"─".repeat(Math.max(0, outerWidth - 4))}╮`),
@@ -617,7 +617,7 @@ function createUrlOverlay(
         ),
         ...body.slice(0, Math.max(1, options.height() - 6)).map((line) => elideText(`│ ${line}`, outerWidth)),
         elideText(
-          `│ ${styled(options.colorEnabled, ANSI.dim, "Enter accept · Ctrl+D decline · Esc cancel")}`,
+          `│ ${styled(options.colorEnabled, ANSI.dim, "enter accept · ctrl+d decline · esc cancel")}`,
           outerWidth,
         ),
         styled(options.colorEnabled, ANSI.dim, `╰─ ${"─".repeat(Math.max(0, outerWidth - 4))}╯`),

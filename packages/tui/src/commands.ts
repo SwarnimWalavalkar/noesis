@@ -55,23 +55,19 @@ export interface SlashCommandContext {
 
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 export const HELP_LINES = [
-  "/provider manages connections · /model selects a model · /reasoning selects reasoning",
-  "/provider ID · /model ID · /reasoning LEVEL are quick inline changes",
-  "provider or model changes start an empty session; the current session is preserved",
-  "the prior transcript is not replayed in the new session",
-  "/context · /capabilities",
-  "/skills · /programs · /runs · /learning",
-  "/refine [REQUEST] deliberately improves a lasting Noesis behavior",
-  "/mcp manages servers, authentication, and discovered capabilities",
-  "/skill NAME inspects · /skill:NAME [instructions] invokes command-name collisions",
+  "/provider · /model · /reasoning open pickers; add an ID or LEVEL to set one directly",
+  "changing provider or model starts a new session; the old one stays in /resume",
+  "/context · /capabilities · /skills · /programs · /runs · /learning",
+  "/refine [REQUEST] improves a lasting Noesis behavior · /mcp manages MCP servers",
+  "/skill NAME inspects a skill · /skill:NAME [instructions] runs one that shares a command's name",
   "/program MODE NAME · /run ID",
   "/resume · /fork · /compact [FOCUS] · /steer [MESSAGE] · /queue resume",
-  "enter queues behind active turns and commands · alt+↑ edits newest queued · esc esc interrupts",
+  "enter queues while busy · alt+↑ edits the newest queued · esc esc interrupts",
   "shift+enter newline · ctrl+g external editor",
-  "ctrl+v copied files or image · /attach PATH adds a file · /attachments PAGE inspects · /detach NUMBER or all removes",
-  "pasted snippets and paths remain literal editable text",
-  "ctrl+o navigates runs and agents · space expands · enter opens a run or an agent",
-  "/quit · learning, experiments, activation, and revert run ambiently",
+  "ctrl+v pastes files or an image · /attach PATH · /attachments [PAGE] · /detach NUMBER|all",
+  "pasted paths stay text; /attach attaches them",
+  "ctrl+o navigates runs and agents · space expands · enter opens",
+  "/quit · learning runs in the background after each turn",
 ] as const;
 
 const THINKING_LEVELS = Object.freeze([
@@ -99,9 +95,8 @@ async function refreshedModelRoutes(runtime: NoesisTuiRuntime): Promise<readonly
 
 const routeChangeNotice = (provider: string, model: string, thinkingLevel: AgentThinkingLevel): string =>
   [
-    `Route changed to ${provider}/${model} · reasoning ${thinkingLevel} in a fresh session.`,
-    "The previous session is preserved and can be resumed from the session picker.",
-    "No prior transcript was replayed, preserving prompt-cache isolation.",
+    `Switched to ${provider}/${model} · ${thinkingLevel} reasoning in a new session.`,
+    "The previous session is in /resume.",
   ].join(" ");
 
 const routeThinkingLevel = (
@@ -120,7 +115,7 @@ async function selectFreshRoute(
   if (current.provider === route.provider && current.model === route.model) {
     context.dispatch({
       type: "notification-shown",
-      text: `Already using ${route.provider}/${route.model} · session unchanged`,
+      text: `Already using ${route.provider}/${route.model}`,
       tone: "info",
     });
     context.requestRender();
@@ -133,7 +128,7 @@ async function selectFreshRoute(
   ) {
     context.dispatch({
       type: "notification-shown",
-      text: "Authentication cancelled · session unchanged",
+      text: "Sign-in cancelled",
       tone: "info",
     });
     context.requestRender();
@@ -154,7 +149,7 @@ async function selectFreshRoute(
   });
   context.dispatch({
     type: "notification-shown",
-    text: "New empty session · previous preserved · history not replayed",
+    text: "Starts a new session · this one stays in /resume",
     tone: "info",
   });
   context.requestRender();
@@ -172,7 +167,7 @@ async function selectProvider(
   ) {
     context.dispatch({
       type: "notification-shown",
-      text: "Authentication cancelled · session unchanged",
+      text: "Sign-in cancelled",
       tone: "info",
     });
     context.requestRender();
@@ -181,7 +176,7 @@ async function selectProvider(
   if (current.provider === provider) {
     context.dispatch({
       type: "notification-shown",
-      text: `Already using provider ${provider} · session unchanged`,
+      text: `Already using ${provider}`,
       tone: "info",
     });
     context.requestRender();
@@ -206,21 +201,21 @@ async function setCurrentReasoningLevel(
   if (current.thinkingLevel === level) {
     context.dispatch({
       type: "notification-shown",
-      text: `Already using reasoning ${level} · session unchanged`,
+      text: `Reasoning is already ${level}`,
       tone: "info",
     });
     context.requestRender();
     return;
   }
   if (!context.runtime.setTrailThinkingLevel) {
-    context.publishInspector("Reasoning changes are unavailable in this runtime.");
+    context.publishInspector("Changing reasoning isn't available here.");
     return;
   }
   await context.runtime.setTrailThinkingLevel(current.trailId, level);
   context.dispatch({ type: "reasoning-level-changed", reasoningLevel: level });
   context.dispatch({
     type: "notification-shown",
-    text: `Reasoning · ${level} · current session`,
+    text: `Reasoning set to ${level}`,
     tone: "success",
   });
   context.requestRender();
@@ -313,9 +308,9 @@ export function exclusiveSlashCommandScope(
 
 export function steerFeedback(result: TuiInteractionResult, explicit: boolean): string | undefined {
   if (result.effect === "unresolved")
-    return "Steer delivery could not be confirmed. It is held for inspection and will not retry automatically.";
+    return "Couldn't confirm the steer was delivered. It's held and won't be retried.";
   if (result.effect !== "idle") return undefined;
-  return explicit ? "No active turn is available to steer." : "No queued message is available to promote.";
+  return explicit ? "Nothing is running to steer." : "No queued message to steer with.";
 }
 
 export function isSlashCommandSubmission(text: string): boolean {
@@ -340,18 +335,18 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
 
   if (command === "/context") {
     if (context.openContextInspector) context.openContextInspector();
-    else publishInspector("Context inspection is unavailable in this runtime.");
+    else publishInspector("Context inspection isn't available here.");
     return true;
   }
   if (command === "/capabilities") {
     if (context.openLearningAudit) context.openLearningAudit(true);
-    else publishInspector("Capability inspection is unavailable in this runtime.");
+    else publishInspector("Capability inspection isn't available here.");
     return true;
   }
 
   if (command === "/mcp") {
     if (!context.openMcpManager) {
-      publishInspector("MCP management is unavailable in this runtime.");
+      publishInspector("MCP management isn't available here.");
       return true;
     }
     context.openMcpManager();
@@ -360,13 +355,13 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
 
   if (command === "/skills") {
     if (!runtime.listSkills) {
-      publishInspector("Skill inspection is unavailable in this runtime.");
+      publishInspector("Skill inspection isn't available here.");
       return true;
     }
     const skills = await runtime.listSkills();
     publishInspector(
       skills.length === 0
-        ? "No skills are installed or discoverable."
+        ? "No skills installed."
         : [
             `Skills · ${String(skills.length)}`,
             ...skills.map(
@@ -384,11 +379,11 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   if (command === "/skill" || command.startsWith("/skill ")) {
     const name = command.slice("/skill".length).trim();
     if (!name) {
-      publishInspector("Usage: /skill <name>. Use /skills to list available skills.");
+      publishInspector("Usage: /skill <name> · /skills lists them");
       return true;
     }
     if (!runtime.inspectSkill) {
-      publishInspector("Skill detail inspection is unavailable in this runtime.");
+      publishInspector("Skill details aren't available here.");
       return true;
     }
     const skill = await runtime.inspectSkill(name);
@@ -409,13 +404,13 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
 
   if (command === "/programs") {
     if (!runtime.listPrograms) {
-      publishInspector("Program inspection is unavailable in this runtime.");
+      publishInspector("Program inspection isn't available here.");
       return true;
     }
     const programs = await runtime.listPrograms();
     publishInspector(
       programs.length === 0
-        ? "No Programs have been saved yet."
+        ? "No saved Programs yet."
         : [
             `Programs · ${String(programs.length)}`,
             ...programs.map(
@@ -423,7 +418,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
                 `• ${program.name} · ${program.mode} · r${String(program.revision)}${program.mode === "workflow" ? ` · ${String(program.phaseNames.length)} phases` : ""}\n  ${program.description}\n  ${program.mode === "workflow" ? program.phaseNames.join(" → ") : program.requiredTools.join(", ") || "pure JavaScript"}\n  ${program.workingPath}${program.sourceWorkingPath ? `\n  source ${program.sourceWorkingPath}` : ""}`,
             ),
             "",
-            "Ask Noesis to run one by name, or to save useful work as a Program.",
+            "Ask Noesis to run one by name, or to save work as a Program.",
           ].join("\n"),
     );
     return true;
@@ -437,7 +432,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
       return true;
     }
     if (!runtime.inspectProgram) {
-      publishInspector("Program detail inspection is unavailable in this runtime.");
+      publishInspector("Program details aren't available here.");
       return true;
     }
     const program = await runtime.inspectProgram(mode, name);
@@ -474,13 +469,13 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
 
   if (command === "/runs") {
     if (!runtime.listExecutions) {
-      publishInspector("Run inspection is unavailable in this runtime.");
+      publishInspector("Run inspection isn't available here.");
       return true;
     }
     const runs = await runtime.listExecutions(trailId);
     publishInspector(
       runs.length === 0
-        ? "No codemode executions have run in this session."
+        ? "No runs in this session yet."
         : [
             `Runs · ${String(runs.length)}`,
             ...runs.map(
@@ -495,11 +490,11 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   if (command === "/run" || command.startsWith("/run ")) {
     const executionId = command.slice("/run".length).trim();
     if (!executionId) {
-      publishInspector("Usage: /run <execution-id>. Use /runs to list recent runs.");
+      publishInspector("Usage: /run <id> · /runs lists them");
       return true;
     }
     if (!runtime.inspectExecution) {
-      publishInspector("Run detail inspection is unavailable in this runtime.");
+      publishInspector("Run details aren't available here.");
       return true;
     }
     const run = await runtime.inspectExecution(trailId, executionId);
@@ -550,7 +545,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
       return true;
     }
     if (!runtime.inspectLearning && !runtime.listLearningActivity) {
-      publishInspector("Learning activity inspection is unavailable in this runtime.");
+      publishInspector("Learning activity isn't available here.");
       return true;
     }
     const inspection: TuiLearningInspection = runtime.inspectLearning
@@ -559,7 +554,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
         ? Object.freeze({ activity: await runtime.listLearningActivity(trailId) })
         : Object.freeze({ activity: Object.freeze([]) });
     if (inspection.activity.length === 0 && !inspection.currentWorkingAdjustment) {
-      publishInspector("No ambient learning activity has been recorded for this session yet.");
+      publishInspector("No learning activity in this session yet.");
       return true;
     }
     const pages = paginateInspectorText(
@@ -574,7 +569,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
             ]
           : []),
         ...inspection.activity.map(learningActivityLine),
-        "Noesis reflects after useful work. No change is a normal outcome.",
+        "Noesis reflects after each turn; most turns change nothing.",
       ].join("\n\n"),
     );
     for (const page of pages) publishInspector(page);
@@ -604,7 +599,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
 
   if (command === "/resume") {
     if (!context.selectSession) {
-      publishInspector("Session selection is unavailable in this runtime.");
+      publishInspector("Session switching isn't available here.");
       return true;
     }
     const selectedTrailId = await context.selectSession();
@@ -627,7 +622,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     const providers = [...new Set(routes.map((route) => route.provider))];
     publishInspector(
       providers.length === 0
-        ? `Provider · ${current.provider}\nModel catalog is unavailable in this runtime.`
+        ? `Provider · ${current.provider}\nThe model list isn't available here.`
         : [
             `Provider · ${current.provider}`,
             ...providers.map((provider) => {
@@ -636,7 +631,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
               return `• ${provider}${provider === current.provider ? " · current" : ""} · ${String(models.length)} models${defaultModel ? ` · default ${defaultModel.model}` : ""}`;
             }),
             "",
-            "Changing provider starts a new empty session. This one is preserved; its transcript is not replayed.",
+            "Switching provider starts a new session; this one stays in /resume.",
           ].join("\n"),
     );
     return true;
@@ -646,7 +641,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     const provider = command.slice("/provider ".length).trim();
     const known = (runtime.listModelRoutes?.() ?? []).find((route) => route.provider === provider);
     if (!known) {
-      publishInspector(`Unknown provider: ${provider}. Use /provider to list available providers.`);
+      publishInspector(`Unknown provider: ${provider} · /provider lists them`);
       return true;
     }
     await selectProvider(runtime.getTrail(trailId), provider, known.providerName ?? provider, context);
@@ -676,7 +671,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
                 `• ${route.model}${route.model === current.model ? " · current" : ""}${route.default ? " · default" : ""}\n  ${route.name} · reasoning ${route.thinkingLevels.join(", ") || "off"}`,
             ),
             "",
-            "Changing model starts a new empty session. This one is preserved; its transcript is not replayed.",
+            "Switching model starts a new session; this one stays in /resume.",
           ].join("\n"),
     );
     return true;
@@ -693,7 +688,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
       !knownRoutes.some((route) => route.model === model) &&
       !knownRoutes.some((route) => route.allowsCustomModelIds)
     ) {
-      publishInspector(`Unknown ${current.provider} model: ${model}. Use /model to list available models.`);
+      publishInspector(`Unknown ${current.provider} model: ${model} · /model lists them`);
       return true;
     }
     const route = knownRoutes.find((candidate) => candidate.model === model) ?? {
@@ -726,7 +721,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
         `Reasoning · ${current.thinkingLevel}`,
         ...levels.map((level) => `• ${level}${level === current.thinkingLevel ? " · current" : ""}`),
         "",
-        "Reasoning changes in this session; provider and model stay fixed.",
+        "Changes reasoning for this session only.",
       ].join("\n"),
     );
     return true;
@@ -735,7 +730,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
   if (command.startsWith("/reasoning ")) {
     const level = command.slice("/reasoning ".length).trim();
     if (!isThinkingLevel(level)) {
-      publishInspector(`Unknown reasoning level: ${level}. Use /reasoning to list available levels.`);
+      publishInspector(`Unknown reasoning level: ${level} · /reasoning lists them`);
       return true;
     }
     const current = runtime.getTrail(trailId);

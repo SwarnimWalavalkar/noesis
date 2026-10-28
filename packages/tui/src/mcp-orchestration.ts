@@ -55,7 +55,7 @@ export function createTuiMcpOrchestration(options: {
       }
       const { listMcpServers, inspectMcpServer, mutateMcp } = options.runtime;
       if (!listMcpServers || !inspectMcpServer || !mutateMcp) {
-        options.reportUnavailable("MCP management is unavailable in this runtime.");
+        options.reportUnavailable("MCP management isn't available here.");
         options.tui.requestRender();
         return;
       }

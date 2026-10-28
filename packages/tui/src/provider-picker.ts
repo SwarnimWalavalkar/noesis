@@ -164,7 +164,7 @@ export function createTuiProviderPickerOrchestration(options: {
           return;
         }
         if (!options.runtime.disconnectProvider) {
-          notice = "Provider disconnection is unavailable in this runtime.";
+          notice = "Disconnecting providers isn't available here.";
           options.tui.requestRender();
           return;
         }
@@ -185,7 +185,7 @@ export function createTuiProviderPickerOrchestration(options: {
             confirmationProvider = undefined;
             const name = items.find((item) => item.value === providerId)?.name ?? providerId;
             notice = status.configured
-              ? `Stored credentials removed; ${name} remains connected through the environment.`
+              ? `Removed saved credentials; ${name} is still connected through the environment.`
               : `${name} disconnected.`;
             rebuild();
             options.tui.requestRender();
@@ -210,9 +210,9 @@ export function createTuiProviderPickerOrchestration(options: {
           const confirmation = confirmationProvider
             ? [
                 `Disconnect ${items.find((item) => item.value === confirmationProvider)?.name ?? confirmationProvider}?`,
-                disconnecting ? "Disconnecting…" : "d again to disconnect · Esc keep",
+                disconnecting ? "Disconnecting…" : "d again to disconnect · esc keep",
               ]
-            : ["↑/↓ navigate · Enter use provider · d disconnect · Esc cancel"];
+            : ["↑/↓ move · enter use provider · d disconnect · esc cancel"];
           return [
             `${styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, "NOESIS")}  ${styled(options.colorEnabled, ANSI.dim, "manage providers")}`,
             ...confirmation.map((line) => styled(options.colorEnabled, ANSI.dim, elideText(line, width))),

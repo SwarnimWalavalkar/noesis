@@ -787,16 +787,16 @@ describe("Noesis transcript rendering", () => {
       interaction: { phase: "idle", queuePaused: false, ...overrides },
     });
     expect(foregroundMessageNotice(event("trail_current", "completion"), state({}))).toBe(
-      "atlas finished · resuming the agent",
+      "atlas finished · Noesis is picking it up",
     );
     expect(foregroundMessageNotice(event("trail_current", "message"), state({ phase: "running" }))).toBe(
-      "atlas sent a message · the agent sees it at its next step",
+      "atlas sent a message · Noesis sees it next step",
     );
     expect(foregroundMessageNotice(event("trail_current", "completion"), state({ queuePaused: true }))).toBe(
-      "atlas finished · it reaches the agent with your next message",
+      "atlas finished · Noesis sees it with your next message",
     );
     expect(foregroundMessageNotice(event("trail_other", "completion"), state({}))).toBe(
-      "atlas finished · reported to the session that asked",
+      "atlas finished · reported to the asking session",
     );
   });
 

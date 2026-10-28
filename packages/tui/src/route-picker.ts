@@ -282,8 +282,8 @@ export function createTuiRoutePickerOverlay(options: {
           options.colorEnabled,
           ANSI.dim,
           screen.kind === "models"
-            ? "Type to search · ↑/↓ navigate · Enter choose model · Esc cancel"
-            : `↑/↓ navigate · Enter select · Esc ${screen.previous ? "back" : "cancel"}`,
+            ? "type to search · ↑/↓ move · enter choose · esc cancel"
+            : `↑/↓ move · enter select · esc ${screen.previous ? "back" : "cancel"}`,
         ),
         bounded,
         options.colorEnabled,
@@ -297,8 +297,8 @@ export function createTuiRoutePickerOverlay(options: {
           screen.kind === "reasoning" &&
             screen.route.provider === options.intent.currentProvider &&
             screen.route.model === options.intent.currentModel
-            ? "Reasoning updates current session · provider and model unchanged"
-            : "New empty session · previous preserved · history not replayed",
+            ? "Changes reasoning for this session only"
+            : "Starts a new session · this one stays in /resume",
         ),
         bounded,
         options.colorEnabled,

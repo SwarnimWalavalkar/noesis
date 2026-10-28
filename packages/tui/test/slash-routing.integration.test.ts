@@ -84,11 +84,11 @@ const localCommands = [
   { input: "/program", feedback: "Usage: /program <script|workflow> <name>" },
   { input: "/program script", feedback: "Usage: /program <script|workflow> <name>" },
   { input: "/program invalid example", feedback: "Usage: /program <script|workflow> <name>" },
-  { input: "/run", feedback: "Usage: /run <execution-id>" },
+  { input: "/run", feedback: "Usage: /run <id>" },
   { input: "/queue invalid", feedback: "Use /queue resume." },
-  { input: "/skills", feedback: "Skill inspection is unavailable" },
-  { input: "/programs", feedback: "Program inspection is unavailable" },
-  { input: "/runs", feedback: "Run inspection is unavailable" },
+  { input: "/skills", feedback: "Skill inspection isn't available" },
+  { input: "/programs", feedback: "Program inspection isn't available" },
+  { input: "/runs", feedback: "Run inspection isn't available" },
 ];
 
 describe("TUI slash routing through a credential-free Pi provider", () => {
@@ -187,7 +187,7 @@ describe("TUI slash routing through a credential-free Pi provider", () => {
       app.terminal.type("/skill missing-routing-fixture\r");
       await inspectionStarted.promise;
       for (const input of inputs) app.terminal.type(`${input}\r`);
-      await app.feedback("/run", "Usage: /run <execution-id>");
+      await app.feedback("/run", "Usage: /run <id>");
       await vi.waitFor(async () => {
         const snapshot = await app.base.inspectInteraction(app.sessionId());
         expect(snapshot.phase).toBe("running");
@@ -296,8 +296,8 @@ describe("TUI slash routing through a credential-free Pi provider", () => {
         await started.promise;
         await app.feedback("/skill", "Usage: /skill <name>");
         await app.feedback("/program", "Usage: /program <script|workflow> <name>");
-        await app.feedback("/run", "Usage: /run <execution-id>");
-        await app.feedback("/queue resume", "A command is active.");
+        await app.feedback("/run", "Usage: /run <id>");
+        await app.feedback("/queue resume", "Another command is running.");
         for (const input of inputs) app.terminal.type(`${input}\r`);
         await vi.waitFor(async () => {
           const snapshot = await app.base.inspectInteraction(sourceId);

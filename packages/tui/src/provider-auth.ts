@@ -38,9 +38,9 @@ export interface TuiProviderAuthOrchestration {
   readonly dispose: () => void;
 }
 
-const SECRET_HINT = "Input hidden · Enter continue · Esc cancel";
-const TEXT_HINT = "Enter continue · Esc cancel";
-const SELECT_HINT = "↑/↓ navigate · Enter select · Esc cancel";
+const SECRET_HINT = "Input hidden · enter continue · esc cancel";
+const TEXT_HINT = "enter continue · esc cancel";
+const SELECT_HINT = "↑/↓ move · enter select · esc cancel";
 
 const padded = (text: string, width: number): string => {
   const bounded = elideText(text, Math.max(0, width));
@@ -90,7 +90,7 @@ function createAuthOverlay(options: {
   const secrets = new Set<string>();
   let focused = false;
   let question: string | undefined;
-  let hint = "Preparing authentication · Esc cancel";
+  let hint = "Preparing authentication · esc cancel";
   let body: AuthPromptBody | undefined;
   let rejectPrompt: ((cause: Error) => void) | undefined;
 
@@ -99,7 +99,7 @@ function createAuthOverlay(options: {
     body = undefined;
     rejectPrompt = undefined;
     question = undefined;
-    hint = "Finishing authentication · Esc cancel";
+    hint = "Finishing authentication · esc cancel";
     options.requestRender();
   };
 

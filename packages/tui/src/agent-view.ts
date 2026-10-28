@@ -168,7 +168,7 @@ const formatTokens = (tokens: number): string =>
 export function agentViewHint(view: TuiAgentViewState): string {
   return view.actionCursor
     ? "↑/↓ move · space expand · enter open · esc stop selecting"
-    : `↑/↓ select · pgup/pgdn scroll · ←/→ agents · s prompt · esc ${view.parents.length > 0 ? "back" : "close"}`;
+    : `↑/↓ move · pgup/pgdn scroll · ←/→ agents · s prompt · esc ${view.parents.length > 0 ? "back" : "close"}`;
 }
 
 const padTo = (line: string, width: number): string =>

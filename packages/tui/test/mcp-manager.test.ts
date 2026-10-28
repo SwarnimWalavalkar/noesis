@@ -282,7 +282,7 @@ describe("MCP manager overlay", () => {
     harness.component.handleInput?.(ENTER);
     await vi.waitFor(() => expect(harness.output()).toContain("MCP · github"));
     harness.component.handleInput?.("a");
-    await vi.waitFor(() => expect(harness.output()).toContain("Esc cancel operation"));
+    await vi.waitFor(() => expect(harness.output()).toContain("esc cancel operation"));
     harness.component.handleInput?.(ESCAPE);
     await vi.waitFor(() => expect(authenticationSignal?.aborted).toBe(true));
     await vi.waitFor(() => expect(harness.output()).toContain("MCP operation cancelled"));
@@ -471,7 +471,7 @@ describe("MCP manager overlay", () => {
     );
     await vi.waitFor(() => expect(harness.output()).toContain("logout complete"));
     harness.component.handleInput?.("x");
-    expect(harness.output()).toContain("cannot be undone");
+    expect(harness.output()).toContain("can't be undone");
     expect(harness.mutations.some((intent) => intent.type === "remove")).toBe(false);
     harness.component.handleInput?.("y");
     await vi.waitFor(() =>

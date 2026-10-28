@@ -213,7 +213,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     intent: Parameters<NonNullable<NoesisTuiRuntime["manageCapability"]>>[0],
   ): Promise<void> => {
     if (!options.runtime.manageCapability) {
-      notice = "Capability management is unavailable in this runtime.";
+      notice = "Capability management isn't available here.";
       render();
       return;
     }
@@ -520,12 +520,13 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
   const mutationHint = (text: string): string =>
     styled(options.colorEnabled, `${ANSI.bold}${ANSI.yellow}`, `✎ ${text}`);
 
+  // The close key sits beside the primary keys so a narrow overlay truncates only secondary ones.
   const listHint = (): string => {
     const failed = failedCount() > 0 ? " · x failed" : "";
     return navHint(
       wideLayout
-        ? `↑/↓ · Enter open · Tab details · a all · f group · s session${failed} · r refresh · Esc`
-        : `↑/↓ · Enter open · a all · f group · s session${failed} · r refresh · Esc`,
+        ? `↑/↓ move · enter open · esc close · tab details · a all · f group · s session${failed} · r refresh · pgup/pgdn scroll`
+        : `↑/↓ move · enter open · esc close · a all · f group · s session${failed} · r refresh · pgup/pgdn scroll`,
     );
   };
 
@@ -542,15 +543,15 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
     const stops = record ? interactableStops(record) : [];
     const navigation =
       detailFocus === "evidence"
-        ? `↑/↓ · Enter ${evidenceExpanded ? "hides" : "expands"} · Tab next · Space raw ·`
+        ? `↑/↓ pgup/pgdn · enter ${evidenceExpanded ? "hides" : "expands"} · tab next · space raw ·`
         : detailFocus === "inputs"
-          ? `↑/↓ · Enter ${inputsExpanded ? "hides" : "expands"} · Tab next · Space raw ·`
+          ? `↑/↓ pgup/pgdn · enter ${inputsExpanded ? "hides" : "expands"} · tab next · space raw ·`
           : detailFocus === "related"
-            ? "↑/↓ · Enter open · Tab next · Space raw ·"
+            ? "↑/↓ pgup/pgdn · enter open · tab next · space raw ·"
             : stops.length > 0
-              ? "↑/↓ · Tab next · Space raw ·"
-              : "↑/↓ · Space raw ·";
-    return `${navHint(navigation)}${managed} ${navHint("Esc")}`;
+              ? "↑/↓ pgup/pgdn · tab next · space raw ·"
+              : "↑/↓ pgup/pgdn · space raw ·";
+    return `${navHint(navigation)}${managed} ${navHint("esc")}`;
   };
 
   const component: LearningAuditOverlay = {
@@ -766,7 +767,7 @@ export function createLearningAuditOverlay(options: CreateLearningAuditOverlayOp
         screen.kind === "list"
           ? listHint()
           : screen.kind === "change"
-            ? `${mutationHint("Enter submit")}${navHint(" · Esc back")}`
+            ? `${mutationHint("enter submit")}${navHint(" · esc back")}`
             : detailHint(detailRecord());
       return [
         overlayRule(outerWidth, options.colorEnabled, "╭", "╮"),

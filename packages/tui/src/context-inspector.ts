@@ -183,9 +183,9 @@ export function renderContextDetails(snapshot: AgentContextInspection, width: nu
           `Cache writes      ${number(cache.writeTokens)} tokens`,
           `Uncached input    ${number(cache.inputTokens - cache.readTokens - cache.writeTokens)} tokens`,
           `Total input       ${number(cache.inputTokens)} tokens`,
-          "Cache hit rate is cache reads divided by total input tokens. Cache writes and output tokens are not hits.",
+          "Hit rate = cache reads ÷ total input.",
         ]
-      : ["Cache — · No usable input-token accounting for this request yet."]),
+      : ["Cache — · no token counts yet"]),
     "",
     snapshot.note,
     "",
@@ -227,8 +227,7 @@ export function createContextInspector(options: {
       const refresh = async (): Promise<void> => {
         const sequence = ++refreshSequence;
         try {
-          if (!options.runtime.inspectContext)
-            throw new Error("Context inspection is unavailable in this runtime.");
+          if (!options.runtime.inspectContext) throw new Error("Context inspection isn't available here.");
           const loaded = await options.runtime.inspectContext(sessionId);
           if (token !== generation || sequence !== refreshSequence) return;
           snapshot = loaded;
@@ -333,9 +332,9 @@ export function createContextInspector(options: {
             row(
               detail || budget
                 ? detail && selected?.label === "Tools"
-                  ? `↑↓ scroll · PgUp/PgDn · s ${schemas ? "hide" : "show"} schemas · Esc back`
-                  : "↑↓ scroll · PgUp/PgDn · Esc back"
-                : "↑↓ select · Enter inspect · ? details · r refresh · Esc",
+                  ? `↑/↓ pgup/pgdn scroll · s ${schemas ? "hide" : "show"} schemas · esc back`
+                  : "↑/↓ pgup/pgdn scroll · esc back"
+                : "↑/↓ move · enter inspect · ? details · r refresh · esc",
             ),
             "╰" + "─".repeat(width - 2) + "╯",
           ];

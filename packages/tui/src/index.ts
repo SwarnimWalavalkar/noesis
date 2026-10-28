@@ -604,7 +604,7 @@ export async function startNoesisTui(
     const routed = exclusiveCommands?.routeSubmission(text) ?? "idle";
     if (routed !== "idle") {
       if (routed === "blocked") {
-        notify("A command is active. Wait for it to finish before submitting another command.");
+        notify("Another command is running. Try again when it finishes.");
       }
       return;
     }
@@ -651,7 +651,7 @@ export async function startNoesisTui(
       }
       if (normalizedInput === "/queue resume") {
         const result = await interact({ type: "resume-queue" });
-        if (result.effect === "idle") notify("The queue is already idle.");
+        if (result.effect === "idle") notify("The queue isn't paused.");
         tui.requestRender();
         return;
       }
@@ -661,7 +661,7 @@ export async function startNoesisTui(
         return;
       }
       if (view.state.interaction.phase !== "idle" && route.kind === "exclusive") {
-        notify("That command changes the session. Wait for the turn to finish or press Esc to interrupt it.");
+        notify("Finish or stop the turn (esc) before changing sessions.");
         return;
       }
       let handled = false;
@@ -725,7 +725,7 @@ export async function startNoesisTui(
         return;
       }
       if (route.kind !== "prompt") {
-        publishInspector("That command is unavailable in this runtime.");
+        publishInspector("That command isn't available here.");
         return;
       }
       await submitPrompt({ type: "submit", text });

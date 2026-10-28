@@ -382,7 +382,7 @@ def main() -> int:
                         action = "model-reasoning-selected"
                     elif (
                         action == "model-reasoning-selected"
-                        and b"New empty session" in output
+                        and b"Starts a new session" in output
                         and "● IDLE".encode() in output
                     ):
                         os.write(master, b"/quit\n")
