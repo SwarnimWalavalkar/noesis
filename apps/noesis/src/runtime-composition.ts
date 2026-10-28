@@ -5642,7 +5642,8 @@ export async function createApplicationRuntimeComposition(
     if (liveConfig.context.autoCompact) await serializeCompaction(trail, "automatic", historyTokenBudget);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
-    const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
+    // The session's own reasoning level, set when it started from the live configuration or by /reasoning.
+    const thinkingLevel = runOptions?.thinkingLevel ?? running.thinkingLevel;
     const subAgentDefaults = frozenSubAgentDefaults(running.provider, running.model, thinkingLevel);
     try {
       const allContextMessages = await contextVisibleHistoryMessages(workspace, trailId);

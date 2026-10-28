@@ -50,15 +50,13 @@ test("Pi codemode inspects the running session route, context, compaction, and p
     createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
   });
   try {
-    const trail = await runtime.startTrail({ title: "Inspect me" });
+    // Turns run at the session's own reasoning level without the caller passing it again.
+    const trail = await runtime.startTrail({ title: "Inspect me", thinkingLevel: "off" });
     await runtime.debug.runTurn(trail.trailId, largeInput);
     await runtime.compact(trail.trailId);
     const turn = await runtime.debug.runTurn(
       trail.trailId,
       "Which model are you on and how full is your context?",
-      {
-        thinkingLevel: "off",
-      },
     );
     expect(turn.output).toBe("Inspected.");
 
