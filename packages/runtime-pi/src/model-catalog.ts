@@ -54,6 +54,18 @@ function mergeHeaders(
   return merged;
 }
 
+// OpenCode Go rejects requests without a stable session id, and Zen serves from
+// the same gateway. Both use the id for routing and prompt caching.
+const OPENCODE_SESSION_PROVIDER_IDS: ReadonlySet<string> = new Set(["opencode", "opencode-go"]);
+
+function sessionRoutingHeaders(
+  model: Model<Api>,
+  sessionId: string | undefined,
+): ProviderHeaders | undefined {
+  if (sessionId === undefined || !OPENCODE_SESSION_PROVIDER_IDS.has(model.provider)) return undefined;
+  return { "x-opencode-session": sessionId };
+}
+
 /**
  * Keeps the supported-provider projection as the execution boundary while
  * importing Pi's request-time models.json header resolution from ModelRuntime.
@@ -108,7 +120,8 @@ export function createConfiguredModelsProjection(projected: Models, source: Mode
       .add({
         transformHeaders: async (current: ProviderHeaders) => {
           const headers = await configuredHeaders(model, options?.apiKey, options?.env);
-          let merged = mergeHeaders(current, headers) ?? {};
+          let merged = mergeHeaders(current, sessionRoutingHeaders(model, options?.sessionId)) ?? {};
+          merged = mergeHeaders(merged, headers) ?? {};
           merged = mergeHeaders(merged, options?.headers) ?? {};
           return options?.transformHeaders ? await options.transformHeaders(merged) : merged;
         },
@@ -137,7 +150,8 @@ export function createConfiguredModelsProjection(projected: Models, source: Mode
       ...options,
       transformHeaders: async (current) => {
         const headers = await configuredHeaders(model, options?.apiKey, options?.env);
-        let merged = mergeHeaders(current, headers) ?? {};
+        let merged = mergeHeaders(current, sessionRoutingHeaders(model, options?.sessionId)) ?? {};
+        merged = mergeHeaders(merged, headers) ?? {};
         merged = mergeHeaders(merged, options?.headers) ?? {};
         return options?.transformHeaders ? await options.transformHeaders(merged) : merged;
       },

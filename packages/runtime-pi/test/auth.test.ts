@@ -424,6 +424,49 @@ describe("Pi authentication", () => {
     });
   });
 
+  test("sends the Pi session id as the OpenCode session header for Zen and Go only", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-opencode-session-header-"));
+    vi.stubEnv("OPENCODE_API_KEY", "zen-secret");
+    vi.stubEnv("OPENCODE_GO_API_KEY", "go-secret");
+    vi.stubEnv("OPENROUTER_API_KEY", "openrouter-secret");
+    const services = await createPiModelServices(home);
+    const requestHeaders = new Map<string, ProviderHeaders | undefined>();
+    for (const providerId of ["opencode", "opencode-go", "openrouter"]) {
+      const provider = services.catalog.getProvider(providerId);
+      if (!provider) throw new Error(`Expected projected Pi provider ${providerId}`);
+      services.catalog.registerNativeProvider(
+        Object.freeze({
+          ...provider,
+          streamSimple: (
+            requestModel: Model<Api>,
+            _context: Context,
+            options?: ModelsSimpleStreamOptions,
+          ) => {
+            requestHeaders.set(providerId, options?.headers);
+            return scriptedHttpStream(requestModel, options, 200);
+          },
+        }),
+      );
+    }
+
+    for (const providerId of ["opencode", "opencode-go", "openrouter"]) {
+      const model = services.models.getModels(providerId)[0];
+      if (!model) throw new Error(`Expected bundled Pi model metadata for ${providerId}`);
+      await services.models.completeSimple(model, { messages: [] }, { sessionId: "session-1:main" });
+    }
+    const zenModel = services.models.getModels("opencode")[0];
+    if (!zenModel) throw new Error("Expected bundled OpenCode Zen model metadata");
+    await services.models.completeSimple(
+      zenModel,
+      { messages: [] },
+      { sessionId: "session-1:main", headers: { "X-OpenCode-Session": "explicit" } },
+    );
+
+    expect(requestHeaders.get("opencode-go")).toMatchObject({ "x-opencode-session": "session-1:main" });
+    expect(requestHeaders.get("opencode")).toEqual({ "X-OpenCode-Session": "explicit" });
+    expect(Object.keys(requestHeaders.get("openrouter") ?? {})).not.toContain("x-opencode-session");
+  });
+
   test("composes OpenCode Go identity and auth without replacing Pi provider behavior", async () => {
     const base = fauxProvider({ provider: "opencode-go", api: "opencode-go-test" }).provider;
     const refreshModels: NonNullable<Provider["refreshModels"]> = vi.fn(async () => undefined);
