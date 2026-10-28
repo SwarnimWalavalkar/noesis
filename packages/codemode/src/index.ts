@@ -555,35 +555,35 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
                   ? describeForModel(options.broker.describe(message.name))
                   : invocationValue(
                       recordCompleted(
-                      await options.broker.invoke(
-                        message.name,
-                        message.input,
-                        createConditionalObject({
-                          executionId,
-                          parentExecutionId: executionId,
-                          logicalExecutionId,
-                          callId,
-                          sessionId: request.sessionId,
-                        } as const)
-                          .addOptional(request.turnId ? { turnId: request.turnId } : undefined)
-                          .add({
-                            causallyPriorCallIds: message.causallyPriorCallIds ?? Object.freeze([]),
-                            signal: controller.signal,
-                            emitUpdate: (update: JsonValue) => {
-                              if (recordProgress(update))
-                                notify({
-                                  type: "progress",
-                                  executionId,
-                                  value: update,
-                                  callId,
-                                  name,
-                                  callIndex,
-                                });
-                            },
+                        await options.broker.invoke(
+                          message.name,
+                          message.input,
+                          createConditionalObject({
+                            executionId,
+                            parentExecutionId: executionId,
+                            logicalExecutionId,
+                            callId,
+                            sessionId: request.sessionId,
                           } as const)
-                          .finish(),
-                      ),
-                      name,
+                            .addOptional(request.turnId ? { turnId: request.turnId } : undefined)
+                            .add({
+                              causallyPriorCallIds: message.causallyPriorCallIds ?? Object.freeze([]),
+                              signal: controller.signal,
+                              emitUpdate: (update: JsonValue) => {
+                                if (recordProgress(update))
+                                  notify({
+                                    type: "progress",
+                                    executionId,
+                                    value: update,
+                                    callId,
+                                    name,
+                                    callIndex,
+                                  });
+                              },
+                            } as const)
+                            .finish(),
+                        ),
+                        name,
                       ),
                     ),
             );
