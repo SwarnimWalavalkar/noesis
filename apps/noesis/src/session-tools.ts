@@ -210,16 +210,18 @@ function createSessionInspectionTool(port: SessionPort, plan: FrozenTurnPlan): T
   });
 }
 
+const SessionTitleText = z
+  .string()
+  .trim()
+  .min(1)
+  .max(MAX_TITLE_CHARACTERS)
+  .regex(/^\P{Cc}*$/u, "Title must not contain control characters");
+/** A session title, from session.update or the session titler. */
+export const SessionTitleSchema = z.strictObject({ title: SessionTitleText });
 const SessionUpdateInputSchema = z
   .strictObject({
     thinkingLevel: ThinkingLevelSchema.optional(),
-    title: z
-      .string()
-      .trim()
-      .min(1)
-      .max(MAX_TITLE_CHARACTERS)
-      .regex(/^\P{Cc}*$/u, "Title must not contain control characters")
-      .optional(),
+    title: SessionTitleText.optional(),
   })
   .refine((input) => input.thinkingLevel !== undefined || input.title !== undefined, {
     message: "Set thinkingLevel, title, or both",
@@ -238,7 +240,7 @@ function createSessionUpdateTool(port: SessionPort, plan: FrozenTurnPlan): ToolD
     name: "session.update",
     label: "Update this session",
     description:
-      "Change the current session's reasoning level or title. The reasoning level must be one the session's model supports and applies from the next turn; this turn keeps its level. The title is what /resume shows. The session's model and provider cannot change here: the user switches them with /model or /provider, which starts a new session. Use config.update to change defaults for future sessions.",
+      "Change the current session's reasoning level or title. The reasoning level must be one the session's model supports and applies from the next turn; this turn keeps its level. Setting a title replaces the one Noesis generated from the first message, and it is what /resume shows. The session's model and provider cannot change here: the user switches them with /model or /provider, which starts a new session. Use config.update to change defaults for future sessions.",
     inputSchema: SessionUpdateInputSchema,
     outputSchema: SessionUpdateOutputSchema,
     effect: () => ({ effect: "write", resource: `session:${plan.sessionId}`, estimatedCost: 0 }),

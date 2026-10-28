@@ -18,12 +18,16 @@ export const ContextConfigSchema = z.strictObject({
   autoCompact: z.boolean().optional(),
 });
 export type ContextConfig = Readonly<z.infer<typeof ContextConfigSchema>>;
+/** The model that names a session after its first message. Unset provider and model use the session's own. */
+export const TitlesConfigSchema = AgentConfigSchema.extend({ enabled: z.boolean().optional() });
+export type TitlesConfig = Readonly<z.infer<typeof TitlesConfigSchema>>;
 export const NoesisConfigSchema = z.strictObject({
   schemaVersion: z.literal(NOESIS_CONFIG_SCHEMA_VERSION),
   agent: AgentConfigSchema,
   /** Default route for retained subagents. Unspecified fields inherit the foreground agent route. */
   agents: AgentConfigSchema.optional(),
   context: ContextConfigSchema.optional(),
+  titles: TitlesConfigSchema.optional(),
 });
 /** Earlier builds accepted these sections but never applied them. Files containing them still load. */
 const StoredNoesisConfigSchema = NoesisConfigSchema.extend({
@@ -53,12 +57,27 @@ export const NoesisConfigPatchSchema = z.strictObject({
       autoCompact: z.boolean().nullable().optional(),
     })
     .optional(),
+  titles: z
+    .strictObject({
+      enabled: z.boolean().nullable().optional(),
+      provider: z.string().min(1).nullable().optional(),
+      model: z.string().min(1).nullable().optional(),
+      thinkingLevel: ThinkingLevelSchema.nullable().optional(),
+    })
+    .optional(),
 });
 export type NoesisConfigPatch = Readonly<z.infer<typeof NoesisConfigPatchSchema>>;
 export type NoesisConfig = Readonly<z.infer<typeof NoesisConfigSchema>>;
 export interface ResolvedAgentConfig {
   readonly provider: string;
   readonly model: string;
+  readonly thinkingLevel: ThinkingLevel;
+}
+/** The session titler. An absent provider or model means the session's own. */
+export interface ResolvedTitlesConfig {
+  readonly enabled: boolean;
+  readonly provider?: string;
+  readonly model?: string;
   readonly thinkingLevel: ThinkingLevel;
 }
 export type ConfigSource = "cli" | "environment" | "config" | "default";
@@ -72,6 +91,7 @@ export interface ResolvedNoesisConfig {
   /** Whether each effective subagent default was explicit or inherited from the foreground route. */
   readonly agentsSources: Readonly<Record<keyof ResolvedAgentConfig, AgentDefaultSource>>;
   readonly context: Required<ContextConfig>;
+  readonly titles: ResolvedTitlesConfig;
   readonly sources: Readonly<Record<keyof ResolvedAgentConfig, ConfigSource>>;
 }
 export interface ConfigOverrides {
@@ -107,6 +127,11 @@ export const BUILT_IN_CONTEXT_DEFAULTS: Required<ContextConfig> = {
   tokenBudget: 160000,
   autoCompact: true,
 };
+/** Titles need no reasoning, so the titler runs without it unless configured. */
+export const BUILT_IN_TITLES_DEFAULTS = {
+  enabled: true,
+  thinkingLevel: "off",
+} as const satisfies Pick<ResolvedTitlesConfig, "enabled" | "thinkingLevel">;
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
   agent: { ...BUILT_IN_AGENT_DEFAULTS },
@@ -226,6 +251,7 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
   const file = loaded.value.config?.agent ?? {};
   const configuredAgents = loaded.value.config?.agents ?? {};
   const context = loaded.value.config?.context ?? {};
+  const titles = loaded.value.config?.titles ?? {};
   const [provider, providerSource] = pick(
     path,
     "provider",
@@ -262,6 +288,13 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
       tokenBudget: context.tokenBudget ?? BUILT_IN_CONTEXT_DEFAULTS.tokenBudget,
       autoCompact: context.autoCompact ?? BUILT_IN_CONTEXT_DEFAULTS.autoCompact,
     },
+    titles: createConditionalObject({
+      enabled: titles.enabled ?? BUILT_IN_TITLES_DEFAULTS.enabled,
+      thinkingLevel: titles.thinkingLevel ?? BUILT_IN_TITLES_DEFAULTS.thinkingLevel,
+    } as const)
+      .addOptional(titles.provider !== undefined ? { provider: titles.provider } : undefined)
+      .addOptional(titles.model !== undefined ? { model: titles.model } : undefined)
+      .finish(),
     sources: {
       provider: providerSource,
       model: modelSource,
@@ -412,11 +445,14 @@ export async function updateNoesisConfig(home: string, patch: unknown): Promise<
   }
   const changes = parsed.data;
   if (
-    [changes.agent, changes.agents, changes.context].every(
+    [changes.agent, changes.agents, changes.context, changes.titles].every(
       (section) => section === undefined || Object.values(section).every((value) => value === undefined),
     )
   )
-    throw new NoesisConfigError(path, "config update requires at least one agent, agents, or context field");
+    throw new NoesisConfigError(
+      path,
+      "config update requires at least one agent, agents, context, or titles field",
+    );
   return await withConfigWriter(home, async () => {
     const loaded = await readNoesisConfig(home);
     if (!loaded.ok) throw loaded.error;
@@ -434,6 +470,12 @@ export async function updateNoesisConfig(home: string, patch: unknown): Promise<
       tokenBudget: patched(current.context?.tokenBudget, changes.context?.tokenBudget),
       autoCompact: patched(current.context?.autoCompact, changes.context?.autoCompact),
     });
+    const titles = nonEmpty({
+      enabled: patched(current.titles?.enabled, changes.titles?.enabled),
+      provider: patched(current.titles?.provider, changes.titles?.provider),
+      model: patched(current.titles?.model, changes.titles?.model),
+      thinkingLevel: patched(current.titles?.thinkingLevel, changes.titles?.thinkingLevel),
+    });
     // JSON rendering drops fields left undefined by the patch.
     const decoded = decodeConfig(
       path,
@@ -447,6 +489,7 @@ export async function updateNoesisConfig(home: string, patch: unknown): Promise<
       } as const)
         .addOptional(agents ? { agents } : undefined)
         .addOptional(context ? { context } : undefined)
+        .addOptional(titles ? { titles } : undefined)
         .finish(),
     );
     if (!decoded.ok) throw decoded.error;

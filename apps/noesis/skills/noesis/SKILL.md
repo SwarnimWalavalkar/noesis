@@ -15,6 +15,7 @@ When the user asks what can be configured, answer from this table and from `conf
 | This session's reasoning level and title           | `session.inspect`, `session.update`                            | See [Change this session](#change-this-session).                                                                                                                                      |
 | Subagent model route                               | `config.update` (`agents`)                                     | Applies from the next turn. `null` inherits the foreground session route.                                                                                                             |
 | Context budget and automatic compaction            | `config.update` (`context`)                                    | Applies from the next turn.                                                                                                                                                           |
+| Automatic session titles                           | `config.update` (`titles`)                                     | Applies to the next new session. `null` provider or model uses the session's own; reasoning defaults to `off`.                                                                        |
 | Model provider sign-in                             | `providers.list`, `providers.authenticate`, `providers.logout` | Sign-in runs the `/provider` flow in the TUI.                                                                                                                                         |
 | MCP servers                                        | `mcp.*`                                                        | See [Manage MCP servers](#manage-mcp-servers).                                                                                                                                        |
 | Lasting behavior, preferences, and abilities       | `capabilities.inspect`, `capabilities.refine`                  | See [Deliberate refinement](#deliberate-refinement).                                                                                                                                  |
@@ -40,7 +41,7 @@ The full transcript before this turn is the codemode `context` object, not part 
 `session.update({ thinkingLevel?, title? })` changes the running session:
 
 - `thinkingLevel` must be one the session's model supports; `providers.list({ provider })` lists them. Settings are frozen when a turn starts, so the new level applies from the next turn. Tell the user that.
-- `title` is the session's stored name. Sessions start with a generic one such as `Noesis session`. `history.*` searches match past sessions by title, and `/resume` shows the title when a session has no message preview yet. Set a short descriptive title when the user asks.
+- `title` is the session's name. Unless `titles.enabled` is `false`, a separate model names each new session from its first message, in the background while the first turn runs. `/resume` lists sessions by title, and `history.*` searches match it. A title you set replaces the generated one and is never overwritten. Rename the session when the user asks.
 
 Two session changes stay with the user. Explain why and name the command instead of trying a workaround:
 
@@ -51,7 +52,7 @@ Two session changes stay with the user. Explain why and name the command instead
 
 `noesis.describe(name)` starts with `signature.input` and `signature.output`, compact types for each tool's fields. Read them before guessing a field name. The shapes you need most:
 
-- `config.update` input: `{ agent?, agents?, context? }`, where `agent` and `agents` take `{ provider?, model?, thinkingLevel? }` and `context` takes `{ tokenBudget?, autoCompact? }`. Reasoning is `thinkingLevel`.
+- `config.update` input: `{ agent?, agents?, context?, titles? }`, where `agent` and `agents` take `{ provider?, model?, thinkingLevel? }`, `context` takes `{ tokenBudget?, autoCompact? }`, and `titles` takes `{ enabled?, provider?, model?, thinkingLevel? }`. Reasoning is `thinkingLevel`.
 - `config.update` result: `previous`, `effective`, `overridden`, `providers`, and `appliesWhen`.
 - `providers.list({ provider })` models: `{ model, name, default, thinkingLevels }`.
 

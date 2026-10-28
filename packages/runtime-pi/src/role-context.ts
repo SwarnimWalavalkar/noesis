@@ -10,6 +10,7 @@ const DEFAULT_EVIDENCE_REFS = 64;
 const isolatedRoleMessageNames = {
   capability_router: ["turn", "prior_conversation"],
   session_compactor: ["compaction_input"],
+  session_titler: ["first_message"],
   history_reranker: ["candidates"],
   signal_interpreter: ["turn", "related_history"],
   reflector: [

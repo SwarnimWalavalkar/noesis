@@ -27,6 +27,7 @@ export type AgentRole =
   | "foreground"
   | "capability_router"
   | "session_compactor"
+  | "session_titler"
   | "history_reranker"
   | "signal_interpreter"
   | "reflector"

@@ -192,6 +192,33 @@ describe("Noesis config", () => {
     expect(resolved.context.tokenBudget).toBe(160_000);
   });
 
+  test("resolves and patches the session titler separately from the agents", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-config-titles-"));
+    await initializeNoesisConfig(home);
+    expect((await resolveNoesisConfig({ home, env: {} })).titles).toEqual({
+      enabled: true,
+      thinkingLevel: "off",
+    });
+
+    await updateNoesisConfig(home, {
+      titles: { provider: "small-provider", model: "small-model", thinkingLevel: "low" },
+    });
+    expect((await resolveNoesisConfig({ home, env: {} })).titles).toEqual({
+      enabled: true,
+      provider: "small-provider",
+      model: "small-model",
+      thinkingLevel: "low",
+    });
+
+    await updateNoesisConfig(home, { titles: { enabled: false, provider: null, model: null } });
+    const resolved = await resolveNoesisConfig({ home, env: {} });
+    expect(resolved.titles).toEqual({ enabled: false, thinkingLevel: "low" });
+    expect(JSON.parse(await readFile(noesisConfigPath(home), "utf8")).titles).toEqual({
+      enabled: false,
+      thinkingLevel: "low",
+    });
+  });
+
   test("rejects empty or invalid updates without writing", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-config-invalid-update-"));
     await initializeNoesisConfig(home);

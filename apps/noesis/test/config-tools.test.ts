@@ -95,3 +95,24 @@ test("a model that lists no reasoning levels supports only off", () => {
   expect(supportedThinkingLevels({ thinkingLevels: [] })).toEqual(["off"]);
   expect(supportedThinkingLevels({ thinkingLevels: ["low", "high"] })).toEqual(["low", "high"]);
 });
+
+test("title model fields fall back to the session route and reasoning to off", async () => {
+  const before = await configured();
+  expect(routesAfter(before, { context: { autoCompact: false } }, session, FILE).titles).toEqual({
+    provider: "session-provider",
+    model: "session-model",
+    thinkingLevel: "off",
+  });
+  const changed = routesAfter(
+    before,
+    { titles: { provider: "small-provider", model: "small-model", thinkingLevel: "low" } },
+    session,
+    FILE,
+  );
+  expect(changed.titlesBefore).toEqual({
+    provider: "session-provider",
+    model: "session-model",
+    thinkingLevel: "off",
+  });
+  expect(changed.titles).toEqual({ provider: "small-provider", model: "small-model", thinkingLevel: "low" });
+});

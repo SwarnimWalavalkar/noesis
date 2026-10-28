@@ -17,6 +17,10 @@ Let the foreground agent explain and change Noesis's own configuration through c
 
 The agent cannot switch the session's model or provider, because a session is pinned to one route and `/model` or `/provider` starts a new one, which would strand the running turn. It cannot compact, because the running turn's context is already frozen. The `noesis` skill tells the agent to explain this and name the user's command.
 
+## Session titles
+
+A `session_titler` background role names each new session from its first message. It starts when the first turn starts, runs beside it, and writes the title through the same serialized session-settings write as `session.update`. The `titles` config section turns it off or gives it its own provider, model, and reasoning level; an unset provider or model uses the session's own, and reasoning defaults to `off`. The session record marks a title as `titled` once it is generated or set by `session.update`. A generated title never replaces a marked one, and `/resume` lists a marked session by its title instead of its latest message. Titling is best effort: a failure keeps the default title, and shutdown aborts a titler still running. Forked sessions keep their inherited title.
+
 ## Live application
 
 The runtime keeps one live resolved configuration. After `config.update`, it rereads the file while preserving command-line and environment overrides.

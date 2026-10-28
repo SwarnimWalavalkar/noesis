@@ -1,5 +1,6 @@
 import {
   BUILT_IN_AGENT_DEFAULTS,
+  BUILT_IN_TITLES_DEFAULTS,
   type AgentConfig,
   NoesisConfigPatchSchema,
   ThinkingLevelSchema,
@@ -27,6 +28,8 @@ export interface ConfigurationPort {
 const FOREGROUND_ROUTE_TIMING =
   "Applies when Noesis next starts a session without an explicit route, normally the next launch. Switch the current session with /provider, /model, or /reasoning.";
 const NEXT_TURN = "Applies from the next turn.";
+const NEXT_SESSION_TITLE =
+  "Applies to the next session's first message; existing titles stay. session.update renames the current session.";
 
 /** Static guidance returned by config.inspect so the agent can explain each setting. */
 const SETTINGS = Object.freeze([
@@ -75,6 +78,27 @@ const SETTINGS = Object.freeze([
       "Whether Noesis compacts older history automatically before an over-budget turn. Default true.",
     appliesWhen: NEXT_TURN,
   },
+  {
+    key: "titles.enabled",
+    description:
+      "Whether Noesis names each new session from its first message with a separate model call. Default true.",
+    appliesWhen: NEXT_SESSION_TITLE,
+  },
+  {
+    key: "titles.provider",
+    description: "Provider for the title model. null uses the session's own provider.",
+    appliesWhen: NEXT_SESSION_TITLE,
+  },
+  {
+    key: "titles.model",
+    description: "Model that writes session titles. null uses the session's own model.",
+    appliesWhen: NEXT_SESSION_TITLE,
+  },
+  {
+    key: "titles.thinkingLevel",
+    description: "Reasoning level for the title model. Default off.",
+    appliesWhen: NEXT_SESSION_TITLE,
+  },
 ]);
 
 const AGENT_KEYS = ["provider", "model", "thinkingLevel"] as const;
@@ -90,6 +114,12 @@ const effective = (config: ResolvedNoesisConfig) => ({
   context: {
     tokenBudget: config.context.tokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET,
     autoCompact: config.context.autoCompact ?? true,
+  },
+  titles: {
+    enabled: config.titles.enabled,
+    provider: config.titles.provider ?? null,
+    model: config.titles.model ?? null,
+    thinkingLevel: config.titles.thinkingLevel,
   },
 });
 
@@ -110,7 +140,8 @@ const sameRoute = (left: Route, right: Route): boolean => AGENT_KEYS.every((key)
  * The routes before and after a patch. `stored` is the foreground route config.json will hold, starting from
  * the file's current `agent` section, with unset or cleared fields falling back to built-in defaults. `agent` is the foreground route that actually runs, where a
  * command-line or environment override still wins. Subagent fields that inherit, or are cleared, take the
- * current session's route, because that is what a subagent spawned from this session runs.
+ * current session's route, because that is what a subagent spawned from this session runs. The title model
+ * likewise falls back to the session's provider and model, which is what titling a session like this one uses.
  */
 export const routesAfter = (
   before: ResolvedNoesisConfig,
@@ -153,7 +184,21 @@ export const routesAfter = (
     model: patched(patch.agents?.model, agentsBefore.model, session.model),
     thinkingLevel: patched(patch.agents?.thinkingLevel, agentsBefore.thinkingLevel, session.thinkingLevel),
   };
-  return { stored, agent, agents, agentsBefore };
+  const titlesBefore: Route = {
+    provider: before.titles.provider ?? session.provider,
+    model: before.titles.model ?? session.model,
+    thinkingLevel: before.titles.thinkingLevel,
+  };
+  const titles: Route = {
+    provider: patched(patch.titles?.provider, titlesBefore.provider, session.provider),
+    model: patched(patch.titles?.model, titlesBefore.model, session.model),
+    thinkingLevel: patched(
+      patch.titles?.thinkingLevel,
+      titlesBefore.thinkingLevel,
+      BUILT_IN_TITLES_DEFAULTS.thinkingLevel,
+    ),
+  };
+  return { stored, agent, agents, agentsBefore, titles, titlesBefore };
 };
 
 const providerTarget = z.strictObject({ provider: z.string().min(1) });
@@ -167,6 +212,13 @@ const EffectiveSchema = z.strictObject({
   agent: RouteSchema,
   agents: RouteSchema,
   context: z.strictObject({ tokenBudget: z.number(), autoCompact: z.boolean() }),
+  /** A null provider or model uses the session's own. */
+  titles: z.strictObject({
+    enabled: z.boolean(),
+    provider: z.string().nullable(),
+    model: z.string().nullable(),
+    thinkingLevel: ThinkingLevelSchema,
+  }),
 });
 const ConfigSourceSchema = z.enum(["cli", "environment", "config", "default"]);
 const AgentDefaultSourceSchema = z.enum(["configured", "foreground"]);
@@ -178,7 +230,12 @@ const AuthenticationSchema = z
     expired: z.boolean().nullable(),
   })
   .nullable();
-const AppliesWhenSchema = z.strictObject({ agent: z.string(), agents: z.string(), context: z.string() });
+const AppliesWhenSchema = z.strictObject({
+  agent: z.string(),
+  agents: z.string(),
+  context: z.string(),
+  titles: z.string(),
+});
 
 const ConfigInspectOutputSchema = z.strictObject({
   home: z.string(),
@@ -268,7 +325,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
 
   /** Rejects routes the model catalog does not offer. Skipped when no catalog is available. */
   const validateRoute = async (
-    section: "agent" | "agents",
+    section: "agent" | "agents" | "titles",
     { provider, model, thinkingLevel }: Route,
     signal: AbortSignal,
   ): Promise<void> => {
@@ -327,7 +384,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
       name: "config.update",
       label: "Update Noesis configuration",
       description:
-        "Change Noesis's configuration with one partial patch of agent, agents, and context fields. null clears a field so its default applies; for agents it inherits the foreground route. Provider and model IDs are checked against providers.list. Returns the previous and new effective values, fields still overridden by command-line or environment settings, and provider sign-in status for routes that need it.",
+        "Change Noesis's configuration with one partial patch of agent, agents, context, and titles fields. null clears a field so its default applies; for agents it inherits the foreground route, and for the title provider and model it uses the session's own. Provider and model IDs are checked against providers.list. Returns the previous and new effective values, fields still overridden by command-line or environment settings, and provider sign-in status for routes that need it.",
       inputSchema: NoesisConfigPatchSchema,
       outputSchema: ConfigUpdateOutputSchema,
       effect: () => ({ effect: "write", resource: "config:noesis", estimatedCost: 0 }),
@@ -341,6 +398,8 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
           await validateRoute("agent", routes.agent, context.signal);
         if (!sameRoute(routes.agents, routes.agentsBefore))
           await validateRoute("agents", routes.agents, context.signal);
+        if (!sameRoute(routes.titles, routes.titlesBefore))
+          await validateRoute("titles", routes.titles, context.signal);
         context.signal.throwIfAborted();
         const after = await port.update(patch);
         const overridden = AGENT_KEYS.filter(
@@ -353,6 +412,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
             [
               patch.agent?.provider !== undefined ? after.agent.provider : undefined,
               patch.agents?.provider !== undefined ? after.agents.provider : undefined,
+              typeof patch.titles?.provider === "string" ? patch.titles.provider : undefined,
             ].filter((provider): provider is string => provider !== undefined),
           ),
         ];
@@ -371,6 +431,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
             agent: FOREGROUND_ROUTE_TIMING,
             agents: NEXT_TURN,
             context: NEXT_TURN,
+            titles: NEXT_SESSION_TITLE,
           },
         };
       },

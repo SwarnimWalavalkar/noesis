@@ -73,7 +73,10 @@ export function createSessionPickerItems(summaries: readonly TrailSummary[]): re
   return [...summaries].sort(compareTrailRecency).map((summary) => {
     const timestamp = `${summary.updatedAt.slice(0, 10)} ${summary.updatedAt.slice(11, 16)}Z`;
     const model = `${summary.provider}/${summary.model}`;
-    const preview = singleLine(summary.preview || summary.title || "Untitled session");
+    // A generated or chosen title names the session better than its latest message.
+    const preview = singleLine(
+      (summary.titled ? summary.title : undefined) || summary.preview || summary.title || "Untitled session",
+    );
     return {
       value: summary.trailId,
       label: `${shortTrailId(summary.trailId)}  ${timestamp}  ${summary.status}  ${model}  ${summary.turnCount}t/${summary.messageCount}m`,

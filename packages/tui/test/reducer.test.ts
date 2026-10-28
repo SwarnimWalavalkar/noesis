@@ -203,6 +203,31 @@ describe("Noesis TUI reducer", () => {
     expect(item?.description).toBe("[31mred title");
   });
 
+  test("session picker lists a titled session by its title and others by their latest message", () => {
+    const summary = {
+      title: "Plan the garden beds",
+      status: "idle",
+      provider: "fake",
+      model: "model-1",
+      runtime: "fake",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:01:00.000Z",
+      turnCount: 1,
+      messageCount: 2,
+      preview: "Here is a layout for the beds.",
+    } as const;
+    const [titled, untitled] = createSessionPickerItems([
+      { ...summary, trailId: "trail_44444444-4444-4444-4444-444444444444", titled: true },
+      {
+        ...summary,
+        trailId: "trail_55555555-5555-5555-5555-555555555555",
+        updatedAt: "2026-01-01T00:00:30.000Z",
+      },
+    ]);
+    expect(titled?.description).toBe("Plan the garden beds");
+    expect(untitled?.description).toBe("Here is a layout for the beds.");
+  });
+
   test("builds deterministic picker rows in most-recently-active order", () => {
     const items = createSessionPickerItems([
       {

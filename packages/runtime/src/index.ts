@@ -90,6 +90,8 @@ export interface TrailState {
   readonly context?: ContextSnapshot;
   readonly capabilityVersions: Readonly<Record<string, number>>;
   readonly turns: readonly { readonly input: string; readonly output: string }[];
+  /** Set once the title was generated or chosen, rather than left at its default. */
+  readonly titled?: boolean;
 }
 
 export interface TrailSummary {
@@ -105,6 +107,7 @@ export interface TrailSummary {
   readonly turnCount: number;
   readonly messageCount: number;
   readonly preview: string;
+  readonly titled?: boolean;
 }
 
 export interface TrailRecency {
