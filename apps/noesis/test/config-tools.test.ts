@@ -10,12 +10,14 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-const configured = async (cli: { readonly provider?: string } = {}) => {
+const FILE = { provider: "stored-provider", model: "stored-model", thinkingLevel: "low" } as const;
+
+const configured = async (cli: { readonly provider?: string; readonly model?: string } = {}) => {
   const home = await mkdtemp(join(tmpdir(), "noesis-config-tools-"));
   roots.push(home);
   await initializeNoesisConfig(home, {
     schemaVersion: 1,
-    agent: { provider: "stored-provider", model: "stored-model", thinkingLevel: "low" },
+    agent: FILE,
     agents: { provider: "sub-provider", model: "sub-model" },
   });
   return await resolveNoesisConfig({ home, env: {}, cli });
@@ -29,6 +31,7 @@ test("cleared foreground fields resolve to the built-in default unless an overri
     before,
     { agent: { provider: null, model: null, thinkingLevel: "high" } },
     session,
+    FILE,
   );
   expect(agent).toEqual({
     provider: "cli-provider",
@@ -39,7 +42,7 @@ test("cleared foreground fields resolve to the built-in default unless an overri
 
 test("clearing only the provider keeps the stored model, so the changed route is validated", async () => {
   const before = await configured();
-  const { agent } = routesAfter(before, { agent: { provider: null } }, session);
+  const { agent } = routesAfter(before, { agent: { provider: null } }, session, FILE);
   expect(agent).toEqual({
     provider: BUILT_IN_AGENT_DEFAULTS.provider,
     model: "stored-model",
@@ -50,7 +53,7 @@ test("clearing only the provider keeps the stored model, so the changed route is
 
 test("inherited and cleared subagent fields follow the current session route", async () => {
   const before = await configured();
-  const reasoningOnly = routesAfter(before, { agents: { thinkingLevel: "minimal" } }, session);
+  const reasoningOnly = routesAfter(before, { agents: { thinkingLevel: "minimal" } }, session, FILE);
   expect(reasoningOnly.agentsBefore).toEqual({
     provider: "sub-provider",
     model: "sub-model",
@@ -62,7 +65,28 @@ test("inherited and cleared subagent fields follow the current session route", a
     thinkingLevel: "minimal",
   });
   expect(
-    routesAfter(before, { agent: { model: "new-model" }, agents: { provider: null, model: null } }, session)
-      .agents,
+    routesAfter(
+      before,
+      { agent: { model: "new-model" }, agents: { provider: null, model: null } },
+      session,
+      FILE,
+    ).agents,
   ).toEqual(session);
+});
+
+test("command-line overrides keep winning, so subagents inherit the overridden session route", async () => {
+  const before = await configured({ provider: "openai-codex", model: "codex-model" });
+  const running = { provider: "openai-codex", model: "codex-model", thinkingLevel: "low" } as const;
+  const routes = routesAfter(
+    before,
+    {
+      agent: { provider: "anthropic", model: "claude" },
+      agents: { provider: null, model: "claude" },
+    },
+    running,
+    FILE,
+  );
+  expect(routes.stored).toEqual({ provider: "anthropic", model: "claude", thinkingLevel: "low" });
+  expect(routes.agent).toEqual(running);
+  expect(routes.agents).toEqual({ provider: "openai-codex", model: "claude", thinkingLevel: "low" });
 });

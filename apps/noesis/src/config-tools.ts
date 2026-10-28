@@ -1,5 +1,6 @@
 import {
   BUILT_IN_AGENT_DEFAULTS,
+  type AgentConfig,
   NoesisConfigPatchSchema,
   ThinkingLevelSchema,
   readNoesisConfig,
@@ -101,30 +102,40 @@ const patched = <T>(next: T | null | undefined, kept: T, cleared: T): T =>
 const sameRoute = (left: Route, right: Route): boolean => AGENT_KEYS.every((key) => left[key] === right[key]);
 
 /**
- * The routes before and after a patch, as they will actually run. A cleared foreground field falls back to
- * its built-in default unless a command-line or environment override still wins. Subagent fields that
- * inherit, or are cleared, take the current session's route, because that is what a subagent spawned from
- * this session runs.
+ * The routes before and after a patch. `stored` is the foreground route config.json will hold, starting from
+ * the file's current `agent` section, with unset or cleared fields falling back to built-in defaults. `agent` is the foreground route that actually runs, where a
+ * command-line or environment override still wins. Subagent fields that inherit, or are cleared, take the
+ * current session's route, because that is what a subagent spawned from this session runs.
  */
-export const routesAfter = (before: ResolvedNoesisConfig, patch: NoesisConfigPatch, session: Route) => {
+export const routesAfter = (
+  before: ResolvedNoesisConfig,
+  patch: NoesisConfigPatch,
+  session: Route,
+  file: AgentConfig,
+) => {
   const overridden = (key: (typeof AGENT_KEYS)[number]) =>
     before.sources[key] === "cli" || before.sources[key] === "environment";
-  const agent: Route = {
+  const stored: Route = {
     provider: patched(
       patch.agent?.provider,
-      before.agent.provider,
-      overridden("provider") ? before.agent.provider : BUILT_IN_AGENT_DEFAULTS.provider,
+      file.provider ?? BUILT_IN_AGENT_DEFAULTS.provider,
+      BUILT_IN_AGENT_DEFAULTS.provider,
     ),
     model: patched(
       patch.agent?.model,
-      before.agent.model,
-      overridden("model") ? before.agent.model : BUILT_IN_AGENT_DEFAULTS.model,
+      file.model ?? BUILT_IN_AGENT_DEFAULTS.model,
+      BUILT_IN_AGENT_DEFAULTS.model,
     ),
     thinkingLevel: patched(
       patch.agent?.thinkingLevel,
-      before.agent.thinkingLevel,
-      overridden("thinkingLevel") ? before.agent.thinkingLevel : BUILT_IN_AGENT_DEFAULTS.thinkingLevel,
+      file.thinkingLevel ?? BUILT_IN_AGENT_DEFAULTS.thinkingLevel,
+      BUILT_IN_AGENT_DEFAULTS.thinkingLevel,
     ),
+  };
+  const agent: Route = {
+    provider: overridden("provider") ? before.agent.provider : stored.provider,
+    model: overridden("model") ? before.agent.model : stored.model,
+    thinkingLevel: overridden("thinkingLevel") ? before.agent.thinkingLevel : stored.thinkingLevel,
   };
   const inherits = (key: (typeof AGENT_KEYS)[number]) => before.agentsSources[key] === "foreground";
   const agentsBefore: Route = {
@@ -137,7 +148,7 @@ export const routesAfter = (before: ResolvedNoesisConfig, patch: NoesisConfigPat
     model: patched(patch.agents?.model, agentsBefore.model, session.model),
     thinkingLevel: patched(patch.agents?.thinkingLevel, agentsBefore.thinkingLevel, session.thinkingLevel),
   };
-  return { agent, agents, agentsBefore };
+  return { stored, agent, agents, agentsBefore };
 };
 
 const providerTarget = z.strictObject({ provider: z.string().min(1) });
@@ -317,7 +328,9 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
       execute: async (patch, context) => {
         const before = port.current();
         // Validate every route the patch changes, including fields it clears; an unchanged route already runs.
-        const routes = routesAfter(before, patch, session);
+        const stored = await readNoesisConfig(before.home);
+        if (!stored.ok) throw stored.error;
+        const routes = routesAfter(before, patch, session, stored.value.config?.agent ?? {});
         if (!sameRoute(routes.agent, before.agent))
           await validateRoute("agent", routes.agent, context.signal);
         if (!sameRoute(routes.agents, routes.agentsBefore))
