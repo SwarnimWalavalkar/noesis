@@ -277,9 +277,9 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
       throw new Error(
         `${section}.model ${model} is not offered by ${provider}; inspect providers.list({ provider: ${JSON.stringify(provider)} })`,
       );
-    if (route && route.thinkingLevels.length > 0 && !route.thinkingLevels.includes(thinkingLevel))
+    if (route && !route.thinkingLevels.includes(thinkingLevel))
       throw new Error(
-        `${provider}/${model} does not support reasoning level ${thinkingLevel}. Supported: ${route.thinkingLevels.join(", ")}`,
+        `${provider}/${model} does not support reasoning level ${thinkingLevel}. Supported: ${route.thinkingLevels.join(", ") || "none"}`,
       );
   };
 

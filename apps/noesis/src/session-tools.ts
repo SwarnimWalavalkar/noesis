@@ -212,7 +212,13 @@ function createSessionInspectionTool(port: SessionPort, plan: FrozenTurnPlan): T
 const SessionUpdateInputSchema = z
   .strictObject({
     thinkingLevel: ThinkingLevelSchema.optional(),
-    title: z.string().trim().min(1).max(MAX_TITLE_CHARACTERS).optional(),
+    title: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_TITLE_CHARACTERS)
+      .regex(/^\P{Cc}*$/u, "Title must not contain control characters")
+      .optional(),
   })
   .refine((input) => input.thinkingLevel !== undefined || input.title !== undefined, {
     message: "Set thinkingLevel, title, or both",
@@ -241,9 +247,9 @@ function createSessionUpdateTool(port: SessionPort, plan: FrozenTurnPlan): ToolD
         const route = port
           .modelRoutes()
           .find((candidate) => candidate.provider === plan.provider && candidate.model === plan.model);
-        if (route && route.thinkingLevels.length > 0 && !route.thinkingLevels.includes(thinkingLevel))
+        if (route && !route.thinkingLevels.includes(thinkingLevel))
           throw new Error(
-            `${plan.provider}/${plan.model} does not support reasoning level ${thinkingLevel}. Supported: ${route.thinkingLevels.join(", ")}`,
+            `${plan.provider}/${plan.model} does not support reasoning level ${thinkingLevel}. Supported: ${route.thinkingLevels.join(", ") || "none"}`,
           );
       }
       await port.updateSettings(

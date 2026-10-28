@@ -118,13 +118,19 @@ test("Pi codemode changes the session's reasoning level and title, effective fro
     } catch (error) {
       unsupported = String(error?.message ?? error);
     }
+    let controlTitle = null;
+    try {
+      await tools.session.update({ title: "\\u001b[31mred" });
+    } catch (error) {
+      controlTitle = String(error?.message ?? error);
+    }
     // Concurrent updates must not overwrite each other.
     const updated = await Promise.all([
       tools.session.update({ title: "Session control" }),
       tools.session.update({ thinkingLevel: "off" }),
     ]);
     const inspected = await tools.session.inspect({});
-    return { unsupported, updated, route: inspected.route, title: inspected.session.title };
+    return { unsupported, controlTitle, updated, route: inspected.route, title: inspected.session.title };
   `;
   const controlled = createControlledPiModels({
     respond: (input) => {
@@ -159,6 +165,7 @@ test("Pi codemode changes the session's reasoning level and title, effective fro
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
     const program = calls.find((call) => call.toolName === "execute");
     expect(JSON.stringify(program?.response)).toContain("does not support reasoning level low");
+    expect(JSON.stringify(program?.response)).toContain("Title must not contain control characters");
     const updates = calls.filter((call) => call.toolName === "session.update" && call.status === "completed");
     expect(updates).toHaveLength(2);
     expect(updates[0]?.response).toMatchObject({

@@ -5677,7 +5677,10 @@ export async function createApplicationRuntimeComposition(
     );
     if (liveConfig.context.autoCompact) await serializeCompaction(trail, "automatic", historyTokenBudget);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
+    // Built from the latest session in the write queue, so a /reasoning change made during compaction holds.
+    const running = await serializedTrailWrite(trailId, () =>
+      Object.freeze({ ...getTrail(trailId), status: "running" as const }),
+    );
     // The session's own reasoning level, set when it started from the live configuration or by /reasoning.
     const thinkingLevel = runOptions?.thinkingLevel ?? running.thinkingLevel;
     const subAgentDefaults = frozenSubAgentDefaults(running.provider, running.model, thinkingLevel);

@@ -67,7 +67,7 @@ const shortTrailId = (trailId: string): string => {
   return `${trailId.slice(0, separator + 1)}${trailId.slice(separator + 1, separator + 9)}`;
 };
 
-const singleLine = (text: string): string => text.replace(/\s+/g, " ").trim();
+const singleLine = (text: string): string => safeTerminalText(text).replace(/\s+/g, " ").trim();
 
 export function createSessionPickerItems(summaries: readonly TrailSummary[]): readonly SessionPickerItem[] {
   return [...summaries].sort(compareTrailRecency).map((summary) => {
