@@ -339,40 +339,43 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     },
   );
 
-  test("direct resume restores one exact session and picker cancellation exits cleanly", async ({
-    runPtyExit,
-  }) => {
-    const direct = await runPtyExit("quit-lf", async (home) => {
-      const runtime = await createTestRuntime(home);
-      const selected = await runtime.startTrail({ title: "direct" });
-      await runtime.debug.runTurn(selected.trailId, "direct real PTY history");
-      const other = await runtime.startTrail({ title: "other direct" });
-      await runtime.debug.runTurn(other.trailId, "other direct PTY history");
-      await runtime.shutdown();
-      return ["--resume", selected.trailId];
-    });
-    expect(direct.output).toContain("direct real PTY history");
-    expect(direct.output).not.toContain("other direct PTY history");
-    expect(direct.result).toEqual({ code: 0, signal: null });
-
-    const cancelled = await runPtyExit(
-      "picker-cancel",
-      async (home) => {
+  test(
+    "direct resume restores one exact session and picker cancellation exits cleanly",
+    async ({ runPtyExit }) => {
+      const direct = await runPtyExit("quit-lf", async (home) => {
         const runtime = await createTestRuntime(home);
-        const trail = await runtime.startTrail({ title: "cancel me" });
-        await retainTrail(runtime, trail.trailId, "cancelled picker history");
+        const selected = await runtime.startTrail({ title: "direct" });
+        await runtime.debug.runTurn(selected.trailId, "direct real PTY history");
+        const other = await runtime.startTrail({ title: "other direct" });
+        await runtime.debug.runTurn(other.trailId, "other direct PTY history");
         await runtime.shutdown();
-        return ["--resume"];
-      },
-      { columns: 70, rows: 22 },
-    );
-    expect(cancelled.output).toContain("NOESIS  resume a session");
-    expect(cancelled.output).toContain("↑/↓ move · enter resume · d delete · esc cancel");
-    expect(cancelled.result).toEqual({ code: 0, signal: null });
-    const reopened = await createTestRuntime(cancelled.home);
-    expect(reopened.listTrails()).toMatchObject([{ title: "cancel me", status: "idle" }]);
-    await reopened.shutdown();
-  }, 12_000);
+        return ["--resume", selected.trailId];
+      });
+      expect(direct.output).toContain("direct real PTY history");
+      expect(direct.output).not.toContain("other direct PTY history");
+      expect(direct.result).toEqual({ code: 0, signal: null });
+
+      const cancelled = await runPtyExit(
+        "picker-cancel",
+        async (home) => {
+          const runtime = await createTestRuntime(home);
+          const trail = await runtime.startTrail({ title: "cancel me" });
+          await retainTrail(runtime, trail.trailId, "cancelled picker history");
+          await runtime.shutdown();
+          return ["--resume"];
+        },
+        { columns: 70, rows: 22 },
+      );
+      expect(cancelled.output).toContain("NOESIS  resume a session");
+      expect(cancelled.output).toContain("↑/↓ move · enter resume · d delete · esc cancel");
+      expect(cancelled.result).toEqual({ code: 0, signal: null });
+      const reopened = await createTestRuntime(cancelled.home);
+      expect(reopened.listTrails()).toMatchObject([{ title: "cancel me", status: "idle" }]);
+      await reopened.shutdown();
+      // Two sequential PTY sessions.
+    },
+    2 * PTY_TEST_TIMEOUT_MS,
+  );
 
   test(
     "captures real streaming semantics in a normal 90x28 shell",
