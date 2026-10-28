@@ -103,3 +103,93 @@ test("Pi codemode inspects the running session route, context, compaction, and p
     await runtime.shutdown();
   }
 }, 30000);
+
+test("Pi codemode changes the session's reasoning level and title, effective from the next turn", async () => {
+  const home = await mkdtemp(join(tmpdir(), "noesis-session-update-"));
+  roots.push(home);
+  await initializeNoesisConfig(home, {
+    schemaVersion: 1,
+    agent: { provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL, thinkingLevel: "high" },
+  });
+  const source = `
+    let unsupported = null;
+    try {
+      await tools.session.update({ thinkingLevel: "low" });
+    } catch (error) {
+      unsupported = String(error?.message ?? error);
+    }
+    let controlTitle = null;
+    try {
+      await tools.session.update({ title: "\\u001b[31mred" });
+    } catch (error) {
+      controlTitle = String(error?.message ?? error);
+    }
+    // Concurrent updates must not overwrite each other.
+    const updated = await Promise.all([
+      tools.session.update({ title: "Session control" }),
+      tools.session.update({ thinkingLevel: "off" }),
+    ]);
+    const inspected = await tools.session.inspect({});
+    return { unsupported, controlTitle, updated, route: inspected.route, title: inspected.session.title };
+  `;
+  const controlled = createControlledPiModels({
+    respond: (input) => {
+      if (input.systemPrompt.startsWith("Noesis protected role:"))
+        return '{"observation":{"kind":"other","reason":"No learning."},"decision":"no_change","reason":"No change."}';
+      if (input.lastUserText.includes("Again")) return "Done.";
+      if (!input.context.messages.some((message) => message.role === "toolResult"))
+        return controlledToolCallResponse("execute", { source }, "update-session");
+      return "Updated.";
+    },
+  });
+  const runtime = await createApplicationRuntimeComposition({
+    config: await resolveNoesisConfig({ home, env: {} }),
+    listModelRoutes: () => [
+      {
+        provider: CONTROLLED_PI_PROVIDER,
+        providerName: "Controlled",
+        model: CONTROLLED_PI_MODEL,
+        name: CONTROLLED_PI_MODEL,
+        thinkingLevels: ["off", "high"],
+        default: true,
+        allowsCustomModelIds: false,
+      },
+    ],
+    createAgent: (_, codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
+    createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
+  });
+  try {
+    const trail = await runtime.startTrail({ title: "controlled/model" });
+    const first = await runtime.debug.runTurn(trail.trailId, "Use off reasoning and name this session.");
+    expect(first.frozenTurnPlan?.thinkingLevel).toBe("high");
+    const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
+    const program = calls.find((call) => call.toolName === "execute");
+    expect(JSON.stringify(program?.response)).toContain("does not support reasoning level low");
+    expect(JSON.stringify(program?.response)).toContain("Title must not contain control characters");
+    const updates = calls.filter((call) => call.toolName === "session.update" && call.status === "completed");
+    expect(updates).toHaveLength(2);
+    expect(updates[0]?.response).toMatchObject({
+      output: {
+        sessionId: trail.trailId,
+        previous: { title: "controlled/model", thinkingLevel: "high" },
+        appliesWhen:
+          "The reasoning level applies from the next turn; this turn keeps high. The title applies now.",
+      },
+    });
+    expect(calls.find((call) => call.toolName === "session.inspect")?.response).toMatchObject({
+      output: {
+        session: { title: "Session control" },
+        route: { thinkingLevel: "high", nextTurnThinkingLevel: "off" },
+      },
+    });
+    // Settlement keeps the changes made during the turn.
+    expect(runtime.getTrail(trail.trailId)).toMatchObject({ title: "Session control", thinkingLevel: "off" });
+    expect((await runtime.debug.workspace.operational.sessions.get(trail.trailId))?.title).toBe(
+      "Session control",
+    );
+    const second = await runtime.debug.runTurn(trail.trailId, "Again.");
+    expect(second.frozenTurnPlan?.thinkingLevel).toBe("off");
+  } finally {
+    await runtime.shutdown();
+  }
+}, 30000);

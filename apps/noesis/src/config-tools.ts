@@ -99,6 +99,11 @@ type Route = ResolvedNoesisConfig["agent"];
 const patched = <T>(next: T | null | undefined, kept: T, cleared: T): T =>
   next === undefined ? kept : next === null ? cleared : next;
 
+/** A model that lists no reasoning levels supports only `off`, as the route picker shows. */
+export const supportedThinkingLevels = (
+  route: Pick<TuiModelRoute, "thinkingLevels">,
+): readonly Route["thinkingLevel"][] => (route.thinkingLevels.length > 0 ? route.thinkingLevels : ["off"]);
+
 const sameRoute = (left: Route, right: Route): boolean => AGENT_KEYS.every((key) => left[key] === right[key]);
 
 /**
@@ -277,9 +282,10 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
       throw new Error(
         `${section}.model ${model} is not offered by ${provider}; inspect providers.list({ provider: ${JSON.stringify(provider)} })`,
       );
-    if (route && route.thinkingLevels.length > 0 && !route.thinkingLevels.includes(thinkingLevel))
+    const supported = route ? supportedThinkingLevels(route) : undefined;
+    if (supported && !supported.includes(thinkingLevel))
       throw new Error(
-        `${provider}/${model} does not support reasoning level ${thinkingLevel}. Supported: ${route.thinkingLevels.join(", ")}`,
+        `${provider}/${model} does not support reasoning level ${thinkingLevel}. Supported: ${supported.join(", ")}`,
       );
   };
 
@@ -391,7 +397,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
               model: route.model,
               name: route.name,
               default: route.default,
-              thinkingLevels: [...route.thinkingLevels],
+              thinkingLevels: [...supportedThinkingLevels(route)],
             })),
           };
         }

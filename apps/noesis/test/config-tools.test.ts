@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BUILT_IN_AGENT_DEFAULTS, initializeNoesisConfig, resolveNoesisConfig } from "@noesis/config";
 import { afterEach, expect, test } from "vitest";
-import { routesAfter } from "../src/config-tools.ts";
+import { routesAfter, supportedThinkingLevels } from "../src/config-tools.ts";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -89,4 +89,9 @@ test("command-line overrides keep winning, so subagents inherit the overridden s
   expect(routes.stored).toEqual({ provider: "anthropic", model: "claude", thinkingLevel: "low" });
   expect(routes.agent).toEqual(running);
   expect(routes.agents).toEqual({ provider: "openai-codex", model: "claude", thinkingLevel: "low" });
+});
+
+test("a model that lists no reasoning levels supports only off", () => {
+  expect(supportedThinkingLevels({ thinkingLevels: [] })).toEqual(["off"]);
+  expect(supportedThinkingLevels({ thinkingLevels: ["low", "high"] })).toEqual(["low", "high"]);
 });

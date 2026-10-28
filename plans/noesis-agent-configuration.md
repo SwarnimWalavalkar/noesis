@@ -11,6 +11,12 @@ Let the foreground agent explain and change Noesis's own configuration through c
 - `session.inspect` reports the running session: identity, the pinned model route compared with the default, context window use from the same read model as `/context`, compaction checkpoint history, and the turn's permission snapshot. It is bound to the turn's frozen plan. Cumulative token usage is not reported because foreground turns do not persist it.
 - All new tools are foreground-only. Subagents do not receive them.
 
+## Session control
+
+`session.update` changes the running session's reasoning level and title. The session record is the only authority for its reasoning level: the TUI no longer sends its own copy with each turn, turns read the session's level when they start, and the TUI refreshes its status from the session after each turn settles. Turn settlement keeps title and reasoning changes made while the turn ran instead of writing back the turn's starting copy.
+
+The agent cannot switch the session's model or provider, because a session is pinned to one route and `/model` or `/provider` starts a new one, which would strand the running turn. It cannot compact, because the running turn's context is already frozen. The `noesis` skill tells the agent to explain this and name the user's command.
+
 ## Live application
 
 The runtime keeps one live resolved configuration. After `config.update`, it rereads the file while preserving command-line and environment overrides.

@@ -174,7 +174,7 @@ import {
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
 import { createConfigurationTools, type ConfigurationPort } from "./config-tools.ts";
-import { createSessionInspectionTool, type SessionInspectionPort } from "./session-tools.ts";
+import { createSessionTools, type SessionPort } from "./session-tools.ts";
 import { createMcpManagementTools } from "./mcp-management-tools.ts";
 import { createCapabilityTools } from "./capability-tools.ts";
 import { loadLearningAuditSnapshot } from "./learning-audit-read-model.ts";
@@ -1638,8 +1638,16 @@ export async function createApplicationRuntimeComposition(
   const workspace = await createWorkspaceStore(options.config.home, {
     recoverInterruptedOperations: options.recoverInterruptedOperations ?? true,
   });
-  const sessionInspectionPort: SessionInspectionPort = Object.freeze({
+  const sessionPort: SessionPort = Object.freeze({
     session: async (sessionId: string) => await workspace.operational.sessions.get(sessionId),
+    settings: (sessionId: string) => sessionSettings(sessionId),
+    updateSettings: async (
+      sessionId: string,
+      change: { readonly title?: string; readonly thinkingLevel?: FrozenTurnPlan["thinkingLevel"] },
+    ) => {
+      await updateSessionSettings(sessionId, change);
+    },
+    modelRoutes: () => options.listModelRoutes?.() ?? [],
     completedTurns: (sessionId: string) => getTrail(sessionId).turns.length,
     config: () => liveConfig,
     inspectContext: async (sessionId: string) => await inspectContext(sessionId),
@@ -3617,7 +3625,7 @@ export async function createApplicationRuntimeComposition(
               model: plan.model,
               thinkingLevel: plan.thinkingLevel,
             }),
-            createSessionInspectionTool(sessionInspectionPort, plan),
+            ...createSessionTools(sessionPort, plan),
           ]
         : []),
       ...(!plan.subAgentActor && options.mcp
@@ -5246,13 +5254,41 @@ export async function createApplicationRuntimeComposition(
       }),
     );
   };
+  /** Settings the user or agent may change while a turn runs; settlement keeps them instead of the turn's copy. */
+  const sessionSettings = (trailId: string) => {
+    const latest = getTrail(trailId);
+    return { title: latest.title, thinkingLevel: latest.thinkingLevel };
+  };
+  /**
+   * Writes one session at a time. persistTrail updates the in-memory session only after its database write,
+   * so concurrent writers would otherwise each build from the same stale copy. Each write is built from the
+   * latest state when its turn in the queue comes.
+   */
+  const trailWrites = new Map<string, Promise<unknown>>();
+  const serializedTrailWrite = async (trailId: string, build: () => TrailState): Promise<TrailState> => {
+    const write = (trailWrites.get(trailId) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(async () => await persistTrail(build()));
+    trailWrites.set(trailId, write);
+    try {
+      return await write;
+    } finally {
+      if (trailWrites.get(trailId) === write) trailWrites.delete(trailId);
+    }
+  };
+  /** Applies a title and reasoning change together in one write. */
+  const updateSessionSettings = async (
+    trailId: string,
+    change: { readonly title?: string; readonly thinkingLevel?: FrozenTurnPlan["thinkingLevel"] },
+  ): Promise<TrailState> =>
+    await serializedTrailWrite(trailId, () => Object.freeze({ ...getTrail(trailId), ...change }));
   const setTrailThinkingLevel: NonNullable<NoesisTuiRuntime["setTrailThinkingLevel"]> = async (
     trailId,
     thinkingLevel,
   ) => {
     const trail = getTrail(trailId);
     options.resolveModelContext?.(trail.provider, trail.model);
-    return await persistTrail(Object.freeze({ ...trail, thinkingLevel }));
+    return await updateSessionSettings(trailId, { thinkingLevel });
   };
   const resumeTrail: NoesisRuntime["resumeTrail"] = async (trailId) => {
     const trail = getTrail(trailId);
@@ -5641,7 +5677,10 @@ export async function createApplicationRuntimeComposition(
     );
     if (liveConfig.context.autoCompact) await serializeCompaction(trail, "automatic", historyTokenBudget);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
+    // Built from the latest session in the write queue, so a /reasoning change made during compaction holds.
+    const running = await serializedTrailWrite(trailId, () =>
+      Object.freeze({ ...getTrail(trailId), status: "running" as const }),
+    );
     // The session's own reasoning level, set when it started from the live configuration or by /reasoning.
     const thinkingLevel = runOptions?.thinkingLevel ?? running.thinkingLevel;
     const subAgentDefaults = frozenSubAgentDefaults(running.provider, running.model, thinkingLevel);
@@ -6072,10 +6111,11 @@ export async function createApplicationRuntimeComposition(
         if (settledTurn.reflectionJobId)
           await waitForReflectionBarrier(coordinator, settledTurn.reflectionJobId);
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        await persistTrail(
+        await serializedTrailWrite(trailId, () =>
           Object.freeze(
             createConditionalObject({
               ...running,
+              ...sessionSettings(trailId),
               status: result.outcome === "aborted" ? ("aborted" as const) : ("idle" as const),
               capabilityVersions: usedCapabilities,
             } as const)
@@ -6102,7 +6142,9 @@ export async function createApplicationRuntimeComposition(
       }
     } catch (error) {
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      await persistTrail(Object.freeze({ ...running, status: "failed" as const }));
+      await serializedTrailWrite(trailId, () =>
+        Object.freeze({ ...running, ...sessionSettings(trailId), status: "failed" as const }),
+      );
       throw error;
     } finally {
       if (reminderReadyTurns.get(trailId) === turnId) reminderReadyTurns.delete(trailId);

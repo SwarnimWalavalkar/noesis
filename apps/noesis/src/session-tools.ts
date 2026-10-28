@@ -1,11 +1,26 @@
 import type { AgentContextInspection, FrozenTurnPlan } from "@noesis/agent-types";
 import { ThinkingLevelSchema, type ResolvedNoesisConfig } from "@noesis/config";
+import { createConditionalObject } from "@noesis/domain";
 import { defineTool, type ToolDefinition } from "@noesis/tools";
+import { supportedThinkingLevels } from "./config-tools.ts";
+import type { TuiModelRoute } from "@noesis/tui";
 import type { ContextCheckpointRecord, SessionRecord } from "@noesis/workspace";
 import { z } from "zod";
 
-export interface SessionInspectionPort {
+export interface SessionPort {
   readonly session: (sessionId: string) => Promise<SessionRecord | undefined>;
+  /** Settings the user or agent may change on a running session. */
+  readonly settings: (sessionId: string) => {
+    readonly title: string;
+    readonly thinkingLevel: FrozenTurnPlan["thinkingLevel"];
+  };
+  /** Applies the given settings together in one write. */
+  readonly updateSettings: (
+    sessionId: string,
+    change: { readonly title?: string; readonly thinkingLevel?: FrozenTurnPlan["thinkingLevel"] },
+  ) => Promise<void>;
+  /** The model catalog, for checking which reasoning levels the session's model supports. */
+  readonly modelRoutes: () => readonly Pick<TuiModelRoute, "provider" | "model" | "thinkingLevels">[];
   readonly completedTurns: (sessionId: string) => number;
   /** The live configuration, for the default route and context settings. */
   readonly config: () => ResolvedNoesisConfig;
@@ -16,6 +31,7 @@ export interface SessionInspectionPort {
 }
 
 const ROUTE_KEYS = ["provider", "model", "thinkingLevel"] as const;
+const MAX_TITLE_CHARACTERS = 120;
 
 const routeFields = { provider: z.string(), model: z.string(), thinkingLevel: ThinkingLevelSchema };
 const RouteSchema = z.strictObject(routeFields);
@@ -28,7 +44,7 @@ const UsageSchema = z.strictObject({
 const SessionInspectOutputSchema = z.strictObject({
   session: z.strictObject({
     sessionId: z.string(),
-    title: z.string().nullable(),
+    title: z.string(),
     project: z.strictObject({ projectId: z.string(), root: z.string() }).nullable(),
     createdAt: z.string().nullable(),
     completedTurns: z.number(),
@@ -38,6 +54,8 @@ const SessionInspectOutputSchema = z.strictObject({
     ...routeFields,
     default: RouteSchema,
     differsFromDefault: z.array(z.enum(ROUTE_KEYS)),
+    /** Differs from thinkingLevel after /reasoning or session.update during this turn. */
+    nextTurnThinkingLevel: ThinkingLevelSchema,
     note: z.string(),
     subAgentDefaults: z.strictObject({ ...routeFields, requestTokenBudget: z.number() }).nullable(),
   }),
@@ -115,10 +133,11 @@ function summarizeContextWindow(inspection: AgentContextInspection) {
 }
 
 /** Read-only facts about the running session, bound to the frozen plan of the current turn. */
-export function createSessionInspectionTool(
-  port: SessionInspectionPort,
-  plan: FrozenTurnPlan,
-): ToolDefinition {
+export function createSessionTools(port: SessionPort, plan: FrozenTurnPlan): readonly ToolDefinition[] {
+  return Object.freeze([createSessionInspectionTool(port, plan), createSessionUpdateTool(port, plan)]);
+}
+
+function createSessionInspectionTool(port: SessionPort, plan: FrozenTurnPlan): ToolDefinition {
   return defineTool({
     name: "session.inspect",
     label: "Inspect this session",
@@ -144,7 +163,7 @@ export function createSessionInspectionTool(
       return {
         session: {
           sessionId: plan.sessionId,
-          title: session?.title ?? null,
+          title: port.settings(plan.sessionId).title,
           project: plan.project ? { projectId: plan.project.projectId, root: plan.project.root } : null,
           createdAt: session?.createdAt ?? null,
           completedTurns: port.completedTurns(plan.sessionId),
@@ -154,7 +173,8 @@ export function createSessionInspectionTool(
           ...route,
           default: defaults,
           differsFromDefault,
-          note: "The session route is pinned. /provider, /model, and /reasoning change it; config.update changes only the default for new sessions.",
+          nextTurnThinkingLevel: port.settings(plan.sessionId).thinkingLevel,
+          note: "The provider and model are pinned for the session; only the user can switch them, with /provider or /model, which starts a new session. session.update or /reasoning changes the reasoning level from the next turn. config.update changes only the defaults for new sessions.",
           subAgentDefaults: plan.subAgentDefaults ? { ...plan.subAgentDefaults } : null,
         },
         context: {
@@ -185,6 +205,68 @@ export function createSessionInspectionTool(
           resourcePatterns: [...plan.permissionSnapshot.resourcePatterns],
           credentialRefs: [...plan.permissionSnapshot.credentialRefs],
         },
+      };
+    },
+  });
+}
+
+const SessionUpdateInputSchema = z
+  .strictObject({
+    thinkingLevel: ThinkingLevelSchema.optional(),
+    title: z
+      .string()
+      .trim()
+      .min(1)
+      .max(MAX_TITLE_CHARACTERS)
+      .regex(/^\P{Cc}*$/u, "Title must not contain control characters")
+      .optional(),
+  })
+  .refine((input) => input.thinkingLevel !== undefined || input.title !== undefined, {
+    message: "Set thinkingLevel, title, or both",
+  });
+const SessionSettingsSchema = z.strictObject({ title: z.string(), thinkingLevel: ThinkingLevelSchema });
+const SessionUpdateOutputSchema = z.strictObject({
+  sessionId: z.string(),
+  previous: SessionSettingsSchema,
+  current: SessionSettingsSchema,
+  appliesWhen: z.string(),
+});
+
+/** Changes the running session's own settings. Model and provider stay pinned; compaction stays with the user. */
+function createSessionUpdateTool(port: SessionPort, plan: FrozenTurnPlan): ToolDefinition {
+  return defineTool({
+    name: "session.update",
+    label: "Update this session",
+    description:
+      "Change the current session's reasoning level or title. The reasoning level must be one the session's model supports and applies from the next turn; this turn keeps its level. The title is what /resume shows. The session's model and provider cannot change here: the user switches them with /model or /provider, which starts a new session. Use config.update to change defaults for future sessions.",
+    inputSchema: SessionUpdateInputSchema,
+    outputSchema: SessionUpdateOutputSchema,
+    effect: () => ({ effect: "write", resource: `session:${plan.sessionId}`, estimatedCost: 0 }),
+    execute: async ({ thinkingLevel, title }) => {
+      const previous = port.settings(plan.sessionId);
+      if (thinkingLevel !== undefined) {
+        const route = port
+          .modelRoutes()
+          .find((candidate) => candidate.provider === plan.provider && candidate.model === plan.model);
+        const supported = route ? supportedThinkingLevels(route) : undefined;
+        if (supported && !supported.includes(thinkingLevel))
+          throw new Error(
+            `${plan.provider}/${plan.model} does not support reasoning level ${thinkingLevel}. Supported: ${supported.join(", ")}`,
+          );
+      }
+      await port.updateSettings(
+        plan.sessionId,
+        createConditionalObject({})
+          .addOptional(thinkingLevel !== undefined ? { thinkingLevel } : undefined)
+          .addOptional(title !== undefined ? { title } : undefined)
+          .finish(),
+      );
+      const current = port.settings(plan.sessionId);
+      return {
+        sessionId: plan.sessionId,
+        previous: { title: previous.title, thinkingLevel: previous.thinkingLevel },
+        current: { title: current.title, thinkingLevel: current.thinkingLevel },
+        appliesWhen: `The reasoning level applies from the next turn; this turn keeps ${plan.thinkingLevel}. The title applies now.`,
       };
     },
   });

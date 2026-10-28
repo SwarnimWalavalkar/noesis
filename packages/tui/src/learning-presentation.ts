@@ -130,7 +130,11 @@ export async function settledTurnPresentation(
     Promise.resolve(runtime.getTrail(request.trailId)),
     learningActivity,
   ]);
-  const actions: NoesisTuiAction[] = [{ type: "transcript-hydrated", trailId: request.trailId, transcript }];
+  const actions: NoesisTuiAction[] = [
+    { type: "transcript-hydrated", trailId: request.trailId, transcript },
+    // The agent may have changed the session's title or reasoning level during the turn.
+    { type: "session-settings-synced", title: trail.title, reasoningLevel: trail.thinkingLevel },
+  ];
   if (request.outcome === "completed" && trail.context)
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     actions.push(

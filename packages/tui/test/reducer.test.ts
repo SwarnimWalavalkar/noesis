@@ -184,6 +184,25 @@ describe("Noesis TUI reducer", () => {
     expect(reduceTui(advanced, { type: "failed", error: "failed" }).animationFrame).toBe(0);
   });
 
+  test("strips terminal control sequences from a session title shown in the picker", () => {
+    const [item] = createSessionPickerItems([
+      {
+        trailId: "trail_33333333-3333-3333-3333-333333333333",
+        title: "\u001b[31mred\u0007 title",
+        status: "idle",
+        provider: "fake",
+        model: "model-1",
+        runtime: "fake",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:01:00.000Z",
+        turnCount: 0,
+        messageCount: 0,
+        preview: "",
+      },
+    ]);
+    expect(item?.description).toBe("[31mred title");
+  });
+
   test("builds deterministic picker rows in most-recently-active order", () => {
     const items = createSessionPickerItems([
       {
