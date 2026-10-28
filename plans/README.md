@@ -6,6 +6,7 @@ For current behavior, start with [the product documentation](../docs/README.md),
 
 ## Active implementation plans
 
+- [Agent-managed configuration](noesis-agent-configuration.md) — active; `config.*` and `providers.*` tools, the shared TUI elicitation bridge, and retired config sections.
 - [Subagent strip and child transcript views](noesis-subagent-views.md) — active; collapsible running-agent strip, inline agent cards, and read-only child views rendered by the main transcript.
 - [Subagent reminders, wake-ups, and value joins](noesis-subagent-reminders-and-joins.md) — active; completion notices, system-reminder delivery, idle wake-ups, and value-only `agents.wait`.
 - [Composer attachments](noesis-composer-attachments.md) — active; large-file attachment implementation and final-head CI/bot review in PR #44.

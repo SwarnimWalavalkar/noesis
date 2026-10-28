@@ -90,8 +90,8 @@ describe("execute progressive disclosure", () => {
     expect(executeDescription(servers, changedCatalog)).toBe(baseline);
     expect(baseline).toContain('tools.skills.load({ name: "execute" })');
     expect(baseline).toContain("Schema-derived shell.run result");
-    expect(baseline).toContain("fullOutputPath?:string");
-    expect(baseline).toContain("fullOutputComplete:boolean");
+    expect(baseline).toContain("fullOutputPath?: string");
+    expect(baseline).toContain("fullOutputComplete: boolean");
     expect(Buffer.byteLength(baseline, "utf8")).toBeLessThanOrEqual(1024);
     expect(baseline).not.toContain("docs<&");
     expect(baseline).toContain("Load the `execute` skill");

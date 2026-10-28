@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { type JsonValue } from "@noesis/domain";
 import { resolveNoesisConfig } from "@noesis/config";
 import { createPiAgentRuntime, createPiAgentRoleRunner } from "@noesis/runtime-pi";
-import { createTuiMcpInteractionBridge, type TuiMcpFormElicitationResult } from "@noesis/tui";
+import { createTuiInteractionBridge, type TuiFormElicitationResult } from "@noesis/tui";
 import { afterEach, expect, test } from "vitest";
 import { createApplicationMcpIntegration } from "../src/mcp-integration.ts";
 import { createApplicationRuntimeComposition } from "../src/runtime-composition.ts";
@@ -30,6 +30,9 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 const signal = () => new AbortController().signal;
+const unexpectedProviderAuthentication = (): never => {
+  throw new Error("Unexpected provider sign-in");
+};
 const sampling = {
   sample: async () => {
     throw new Error("Unexpected sampling");
@@ -40,7 +43,7 @@ async function setup(trusted = true, openUrl: (url: string) => Promise<void> = a
   roots.push(root);
   const home = join(root, "home");
   await mkdir(home);
-  const interactions = createTuiMcpInteractionBridge();
+  const interactions = createTuiInteractionBridge();
   const integration = createApplicationMcpIntegration({
     home,
     projectDirectory: root,
@@ -56,6 +59,7 @@ test("Pi codemode configures, awaits private credentials, and calls a new MCP to
   const { home, root, interactions, integration } = await setup();
   let forms = 0;
   interactions.attach({
+    presentProviderAuthentication: unexpectedProviderAuthentication,
     presentForm: (request) => {
       forms += 1;
       expect(request.fields).toEqual([
@@ -162,6 +166,7 @@ test("cancelled credential collection cannot report readiness or persist values"
   const { integration, interactions } = await setup();
   integration.setLifecycleAuthorizer(async ({ execute }) => execute());
   interactions.attach({
+    presentProviderAuthentication: unexpectedProviderAuthentication,
     presentForm: () => ({ result: Promise.resolve({ action: "cancel" }), cancel: () => undefined }),
     presentUrl: () => {
       throw new Error("Unexpected URL");
@@ -240,12 +245,13 @@ test("same-turn adapter rejects stale identities and invalid native MCP input", 
 test("editing a server while its credential form is open rejects the old credentials", async () => {
   const { integration, interactions } = await setup();
   integration.setLifecycleAuthorizer(async ({ execute }) => execute());
-  let resolveForm: ((result: TuiMcpFormElicitationResult) => void) | undefined;
+  let resolveForm: ((result: TuiFormElicitationResult) => void) | undefined;
   let opened: (() => void) | undefined;
   const formOpened = new Promise<void>((resolve) => {
     opened = resolve;
   });
   interactions.attach({
+    presentProviderAuthentication: unexpectedProviderAuthentication,
     presentForm: () => {
       opened?.();
       return {
@@ -430,7 +436,7 @@ function reopenedIntegration(home: string, root: string) {
     home,
     projectDirectory: root,
     sampling,
-    interactions: createTuiMcpInteractionBridge(),
+    interactions: createTuiInteractionBridge(),
     openUrl: async () => {
       throw new Error("Restart must not request authentication");
     },
@@ -444,10 +450,11 @@ test("stdio credentials survive restart, remain scoped, and are forgotten on log
   const { home, root, integration, interactions } = await setup();
   integration.setLifecycleAuthorizer(async ({ execute }) => execute());
   interactions.attach({
+    presentProviderAuthentication: unexpectedProviderAuthentication,
     presentForm: (request) => ({
       result: Promise.resolve({
         action: "accept",
-        values: { NOESIS_PERSISTED_SECRET: `${request.serverName}-secret` },
+        values: { NOESIS_PERSISTED_SECRET: `${request.source}-secret` },
       }),
       cancel: () => undefined,
     }),
@@ -543,6 +550,7 @@ test("saved HTTP-header credentials reconnect after restart and never follow a c
   const { home, root, integration, interactions } = await setup();
   integration.setLifecycleAuthorizer(async ({ execute }) => execute());
   interactions.attach({
+    presentProviderAuthentication: unexpectedProviderAuthentication,
     presentForm: () => ({
       result: Promise.resolve({
         action: "accept",

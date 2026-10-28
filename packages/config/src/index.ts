@@ -13,49 +13,48 @@ export const AgentConfigSchema = z.strictObject({
   thinkingLevel: ThinkingLevelSchema.optional(),
 });
 export type AgentConfig = Readonly<z.infer<typeof AgentConfigSchema>>;
-type MutableAgentConfig = {
-  -readonly [Key in keyof AgentConfig]: AgentConfig[Key];
-};
-export const LearningNotificationSchema = z.enum(["off", "quiet", "detailed"]);
-export type LearningNotification = z.infer<typeof LearningNotificationSchema>;
-export const LearningConfigSchema = z.strictObject({
-  enabled: z.boolean().optional(),
-  notifications: LearningNotificationSchema.optional(),
-  backgroundBudget: z.number().int().nonnegative().optional(),
-});
-export type LearningConfig = Readonly<z.infer<typeof LearningConfigSchema>>;
 export const ContextConfigSchema = z.strictObject({
   tokenBudget: z.number().int().positive().max(1000000).optional(),
   autoCompact: z.boolean().optional(),
 });
 export type ContextConfig = Readonly<z.infer<typeof ContextConfigSchema>>;
-export const AutonomyRiskLevelSchema = z.enum(["off", "low", "medium", "high"]);
-export type AutonomyRiskLevel = z.infer<typeof AutonomyRiskLevelSchema>;
-export const AutonomyApprovalSchema = z.enum(["authority_expansion", "all_changes"]);
-export type AutonomyApproval = z.infer<typeof AutonomyApprovalSchema>;
-export const AutonomyConfigSchema = z.strictObject({
-  riskLevel: AutonomyRiskLevelSchema.optional(),
-  approval: AutonomyApprovalSchema.optional(),
-  pins: z.literal("respect").optional(),
-  vetoes: z.literal("respect").optional(),
-});
-export type AutonomyConfig = Readonly<z.infer<typeof AutonomyConfigSchema>>;
-export const ExperimentDefaultsSchema = z.strictObject({
-  maxCases: z.number().int().positive().optional(),
-  maxAttemptsPerArm: z.number().int().positive().optional(),
-  maxCost: z.number().nonnegative().optional(),
-});
-export type ExperimentDefaults = Readonly<z.infer<typeof ExperimentDefaultsSchema>>;
 export const NoesisConfigSchema = z.strictObject({
   schemaVersion: z.literal(NOESIS_CONFIG_SCHEMA_VERSION),
   agent: AgentConfigSchema,
   /** Default route for retained subagents. Unspecified fields inherit the foreground agent route. */
   agents: AgentConfigSchema.optional(),
-  learning: LearningConfigSchema.optional(),
   context: ContextConfigSchema.optional(),
-  autonomy: AutonomyConfigSchema.optional(),
-  experiments: ExperimentDefaultsSchema.optional(),
 });
+/** Earlier builds accepted these sections but never applied them. Files containing them still load. */
+const StoredNoesisConfigSchema = NoesisConfigSchema.extend({
+  learning: z.unknown().optional(),
+  autonomy: z.unknown().optional(),
+  experiments: z.unknown().optional(),
+}).transform(({ learning: _learning, autonomy: _autonomy, experiments: _experiments, ...config }) => config);
+/** A partial configuration change. `null` removes a field so its default or inherited value applies. */
+export const NoesisConfigPatchSchema = z.strictObject({
+  agent: z
+    .strictObject({
+      provider: z.string().min(1).nullable().optional(),
+      model: z.string().min(1).nullable().optional(),
+      thinkingLevel: ThinkingLevelSchema.nullable().optional(),
+    })
+    .optional(),
+  agents: z
+    .strictObject({
+      provider: z.string().min(1).nullable().optional(),
+      model: z.string().min(1).nullable().optional(),
+      thinkingLevel: ThinkingLevelSchema.nullable().optional(),
+    })
+    .optional(),
+  context: z
+    .strictObject({
+      tokenBudget: z.number().int().positive().max(1000000).nullable().optional(),
+      autoCompact: z.boolean().nullable().optional(),
+    })
+    .optional(),
+});
+export type NoesisConfigPatch = Readonly<z.infer<typeof NoesisConfigPatchSchema>>;
 export type NoesisConfig = Readonly<z.infer<typeof NoesisConfigSchema>>;
 export interface ResolvedAgentConfig {
   readonly provider: string;
@@ -72,22 +71,13 @@ export interface ResolvedNoesisConfig {
   readonly agents: ResolvedAgentConfig;
   /** Whether each effective subagent default was explicit or inherited from the foreground route. */
   readonly agentsSources: Readonly<Record<keyof ResolvedAgentConfig, AgentDefaultSource>>;
-  readonly learning: Required<LearningConfig>;
   readonly context: Required<ContextConfig>;
-  readonly autonomy: Required<AutonomyConfig>;
-  readonly experiments: Required<ExperimentDefaults>;
   readonly sources: Readonly<Record<keyof ResolvedAgentConfig, ConfigSource>>;
 }
 export interface ConfigOverrides {
   readonly provider?: string;
   readonly model?: string;
   readonly thinkingLevel?: string;
-}
-export interface UserControlConfigPatch {
-  readonly learning?: LearningConfig;
-  readonly context?: ContextConfig;
-  readonly autonomy?: AutonomyConfig;
-  readonly experiments?: ExperimentDefaults;
 }
 export interface ResolveConfigInput {
   readonly home: string;
@@ -113,34 +103,21 @@ export const BUILT_IN_AGENT_DEFAULTS: ResolvedAgentConfig = {
   model: "gpt-5.6-sol",
   thinkingLevel: "high",
 };
-export const BUILT_IN_LEARNING_DEFAULTS: Required<LearningConfig> = {
-  enabled: true,
-  notifications: "quiet",
-  backgroundBudget: 1,
-};
 export const BUILT_IN_CONTEXT_DEFAULTS: Required<ContextConfig> = {
   tokenBudget: 160000,
   autoCompact: true,
 };
-export const BUILT_IN_AUTONOMY_DEFAULTS: Required<AutonomyConfig> = {
-  riskLevel: "low",
-  approval: "authority_expansion",
-  pins: "respect",
-  vetoes: "respect",
-};
-export const BUILT_IN_EXPERIMENT_DEFAULTS: Required<ExperimentDefaults> = {
-  maxCases: 8,
-  maxAttemptsPerArm: 1,
-  maxCost: 0,
-};
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
   agent: { ...BUILT_IN_AGENT_DEFAULTS },
-  learning: { ...BUILT_IN_LEARNING_DEFAULTS },
   context: { ...BUILT_IN_CONTEXT_DEFAULTS },
-  autonomy: { ...BUILT_IN_AUTONOMY_DEFAULTS },
-  experiments: { ...BUILT_IN_EXPERIMENT_DEFAULTS },
 };
+/** Environment variables that override the configured foreground route. */
+export const AGENT_ENVIRONMENT_VARIABLES = {
+  provider: "NOESIS_PROVIDER",
+  model: "NOESIS_MODEL",
+  thinkingLevel: "NOESIS_THINKING_LEVEL",
+} as const satisfies Readonly<Record<keyof ResolvedAgentConfig, string>>;
 export const noesisConfigPath = (home: string): string => join(home, "config.json");
 const delay = (milliseconds: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -167,7 +144,7 @@ function decodeConfig(path: string, value: unknown): Result<NoesisConfig, Noesis
       ),
     );
   }
-  const parsed = NoesisConfigSchema.safeParse(value);
+  const parsed = StoredNoesisConfigSchema.safeParse(value);
   if (!parsed.success) {
     const first = parsed.error.issues[0];
     const pointer = first ? issuePath(first) : "";
@@ -248,19 +225,23 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
   const env = input.env ?? process.env;
   const file = loaded.value.config?.agent ?? {};
   const configuredAgents = loaded.value.config?.agents ?? {};
-  const learning = loaded.value.config?.learning ?? {};
   const context = loaded.value.config?.context ?? {};
-  const autonomy = loaded.value.config?.autonomy ?? {};
-  const experiments = loaded.value.config?.experiments ?? {};
-  const [provider, providerSource] = pick(path, "provider", cli, env, file, "NOESIS_PROVIDER");
-  const [model, modelSource] = pick(path, "model", cli, env, file, "NOESIS_MODEL");
+  const [provider, providerSource] = pick(
+    path,
+    "provider",
+    cli,
+    env,
+    file,
+    AGENT_ENVIRONMENT_VARIABLES.provider,
+  );
+  const [model, modelSource] = pick(path, "model", cli, env, file, AGENT_ENVIRONMENT_VARIABLES.model);
   const [thinkingLevel, thinkingLevelSource] = pick(
     path,
     "thinkingLevel",
     cli,
     env,
     file,
-    "NOESIS_THINKING_LEVEL",
+    AGENT_ENVIRONMENT_VARIABLES.thinkingLevel,
   );
   return {
     schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
@@ -277,25 +258,9 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
       model: configuredAgents.model === undefined ? "foreground" : "configured",
       thinkingLevel: configuredAgents.thinkingLevel === undefined ? "foreground" : "configured",
     },
-    learning: {
-      enabled: learning.enabled ?? BUILT_IN_LEARNING_DEFAULTS.enabled,
-      notifications: learning.notifications ?? BUILT_IN_LEARNING_DEFAULTS.notifications,
-      backgroundBudget: learning.backgroundBudget ?? BUILT_IN_LEARNING_DEFAULTS.backgroundBudget,
-    },
     context: {
       tokenBudget: context.tokenBudget ?? BUILT_IN_CONTEXT_DEFAULTS.tokenBudget,
       autoCompact: context.autoCompact ?? BUILT_IN_CONTEXT_DEFAULTS.autoCompact,
-    },
-    autonomy: {
-      riskLevel: autonomy.riskLevel ?? BUILT_IN_AUTONOMY_DEFAULTS.riskLevel,
-      approval: autonomy.approval ?? BUILT_IN_AUTONOMY_DEFAULTS.approval,
-      pins: autonomy.pins ?? BUILT_IN_AUTONOMY_DEFAULTS.pins,
-      vetoes: autonomy.vetoes ?? BUILT_IN_AUTONOMY_DEFAULTS.vetoes,
-    },
-    experiments: {
-      maxCases: experiments.maxCases ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxCases,
-      maxAttemptsPerArm: experiments.maxAttemptsPerArm ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxAttemptsPerArm,
-      maxCost: experiments.maxCost ?? BUILT_IN_EXPERIMENT_DEFAULTS.maxCost,
     },
     sources: {
       provider: providerSource,
@@ -413,57 +378,77 @@ export async function initializeNoesisConfig(
   });
   return path;
 }
-export async function updateNoesisConfig(home: string, patch: ConfigOverrides): Promise<NoesisConfig> {
-  if (Object.values(patch).every((value) => value === undefined))
-    throw new NoesisConfigError(noesisConfigPath(home), "config set requires at least one agent option");
-  return await withConfigWriter(home, async () => {
-    const loaded = await readNoesisConfig(home);
-    if (!loaded.ok) throw loaded.error;
-    const path = noesisConfigPath(home);
-    const current = loaded.value.config ?? DEFAULT_NOESIS_CONFIG;
-    const nextAgent: MutableAgentConfig = { ...current.agent };
-    if (patch.provider !== undefined)
-      nextAgent.provider = validateAgentValue(path, "provider", patch.provider);
-    if (patch.model !== undefined) nextAgent.model = validateAgentValue(path, "model", patch.model);
-    if (patch.thinkingLevel !== undefined)
-      nextAgent.thinkingLevel = validateAgentValue(path, "thinkingLevel", patch.thinkingLevel);
-    const next: NoesisConfig = { ...current, schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION, agent: nextAgent };
-    await persistConfig(home, next);
-    return next;
-  });
+const AGENT_CONFIG_KEYS = ["provider", "model", "thinkingLevel"] as const;
+/**
+ * Rereads config.json for a running process. Command-line and environment overrides that applied
+ * at startup keep their values and sources.
+ */
+export async function reloadNoesisConfig(previous: ResolvedNoesisConfig): Promise<ResolvedNoesisConfig> {
+  const cli: Record<string, string> = {};
+  const env: Record<string, string> = {};
+  for (const key of AGENT_CONFIG_KEYS) {
+    if (previous.sources[key] === "cli") cli[key] = previous.agent[key];
+    else if (previous.sources[key] === "environment")
+      env[AGENT_ENVIRONMENT_VARIABLES[key]] = previous.agent[key];
+  }
+  return await resolveNoesisConfig({ home: previous.home, cli, env });
 }
-export async function updateUserControlConfig(
-  home: string,
-  patch: UserControlConfigPatch,
-): Promise<NoesisConfig> {
-  if (
-    patch.learning === undefined &&
-    patch.context === undefined &&
-    patch.autonomy === undefined &&
-    patch.experiments === undefined
-  ) {
+/** `undefined` keeps the current value; `null` removes it. */
+const patched = <V>(current: V | undefined, change: V | null | undefined): V | undefined =>
+  change === undefined ? current : (change ?? undefined);
+const nonEmpty = <T extends object>(section: T): T | undefined =>
+  Object.values(section).some((value) => value !== undefined) ? section : undefined;
+/** Applies one validated patch to config.json under the writer lock and returns the stored config. */
+export async function updateNoesisConfig(home: string, patch: unknown): Promise<NoesisConfig> {
+  const parsed = NoesisConfigPatchSchema.safeParse(patch);
+  const path = noesisConfigPath(home);
+  if (!parsed.success) {
+    const first = parsed.error.issues[0];
+    const pointer = first ? issuePath(first) : "";
     throw new NoesisConfigError(
-      noesisConfigPath(home),
-      "user control update requires context, learning, autonomy, or experiment preferences",
+      path,
+      `invalid config update${pointer ? ` at ${pointer}` : ""}: ${first?.message ?? "value does not match the schema"}`,
     );
   }
+  const changes = parsed.data;
+  if (
+    [changes.agent, changes.agents, changes.context].every(
+      (section) => section === undefined || Object.values(section).every((value) => value === undefined),
+    )
+  )
+    throw new NoesisConfigError(path, "config update requires at least one agent, agents, or context field");
   return await withConfigWriter(home, async () => {
     const loaded = await readNoesisConfig(home);
     if (!loaded.ok) throw loaded.error;
-    const path = noesisConfigPath(home);
-    const current = loaded.value.config ?? DEFAULT_NOESIS_CONFIG;
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const candidate: NoesisConfig = createConditionalObject({
-      ...current,
-    } as const)
-      .addOptional(patch.learning ? { learning: { ...current.learning, ...patch.learning } } : undefined)
-      .addOptional(patch.context ? { context: { ...current.context, ...patch.context } } : undefined)
-      .addOptional(patch.autonomy ? { autonomy: { ...current.autonomy, ...patch.autonomy } } : undefined)
-      .addOptional(
-        patch.experiments ? { experiments: { ...current.experiments, ...patch.experiments } } : undefined,
-      )
-      .finish();
-    const decoded = decodeConfig(path, candidate);
+    // A missing file stays minimal so unchanged fields keep following built-in defaults.
+    const current: NoesisConfig = loaded.value.config ?? {
+      schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
+      agent: {},
+    };
+    const agents = nonEmpty({
+      provider: patched(current.agents?.provider, changes.agents?.provider),
+      model: patched(current.agents?.model, changes.agents?.model),
+      thinkingLevel: patched(current.agents?.thinkingLevel, changes.agents?.thinkingLevel),
+    });
+    const context = nonEmpty({
+      tokenBudget: patched(current.context?.tokenBudget, changes.context?.tokenBudget),
+      autoCompact: patched(current.context?.autoCompact, changes.context?.autoCompact),
+    });
+    // JSON rendering drops fields left undefined by the patch.
+    const decoded = decodeConfig(
+      path,
+      createConditionalObject({
+        schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
+        agent: {
+          provider: patched(current.agent.provider, changes.agent?.provider),
+          model: patched(current.agent.model, changes.agent?.model),
+          thinkingLevel: patched(current.agent.thinkingLevel, changes.agent?.thinkingLevel),
+        },
+      } as const)
+        .addOptional(agents ? { agents } : undefined)
+        .addOptional(context ? { context } : undefined)
+        .finish(),
+    );
     if (!decoded.ok) throw decoded.error;
     await persistConfig(home, decoded.value);
     return decoded.value;

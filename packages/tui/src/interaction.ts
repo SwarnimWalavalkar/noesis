@@ -6,11 +6,12 @@ import {
   type TUI,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { createConditionalObject } from "@noesis/domain";
 import {
-  validateMcpMultiselectField,
-  validateMcpNumberField,
-  validateMcpTextField,
-} from "./mcp-elicitation-validation.ts";
+  validateMultiselectField,
+  validateNumberField,
+  validateTextField,
+} from "./elicitation-validation.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
 
 const safeInteractionScalar = (text: string): string =>
@@ -24,9 +25,9 @@ const urlDomain = (url: string): string => {
   }
 };
 
-export type TuiMcpElicitationValue = string | number | boolean | readonly string[];
+export type TuiElicitationValue = string | number | boolean | readonly string[];
 
-export type TuiMcpFormField =
+export type TuiFormField =
   | {
       readonly type: "text" | "secret";
       readonly name: string;
@@ -77,214 +78,216 @@ export type TuiMcpFormField =
       readonly maxItems?: number;
     };
 
-export interface TuiMcpFormElicitationRequest {
-  readonly serverName: string;
+/** `source` names who is asking, such as an MCP server or Noesis itself. */
+export interface TuiFormElicitationRequest {
+  readonly source: string;
   readonly title: string;
   readonly message: string;
-  readonly fields: readonly TuiMcpFormField[];
+  readonly fields: readonly TuiFormField[];
 }
 
-export interface TuiMcpUrlElicitationRequest {
-  readonly serverName: string;
+export interface TuiUrlElicitationRequest {
+  readonly source: string;
   readonly elicitationId: string;
   readonly title: string;
   readonly message: string;
   readonly url: string;
 }
 
-export type TuiMcpFormElicitationResult =
+/** Runs the same provider sign-in flow as `/provider`. Entered values stay inside that flow. */
+export interface TuiProviderAuthenticationRequest {
+  readonly providerId: string;
+  readonly providerName: string;
+  readonly reason: string;
+}
+
+export type TuiFormElicitationResult =
   | {
       readonly action: "accept";
-      readonly values: Readonly<Record<string, TuiMcpElicitationValue>>;
+      readonly values: Readonly<Record<string, TuiElicitationValue>>;
     }
   | { readonly action: "decline" | "cancel" };
 
-export type TuiMcpUrlElicitationResult = {
+export type TuiUrlElicitationResult = {
   readonly action: "accept" | "decline" | "cancel";
 };
 
-interface PresentedInteraction<T> {
+export type TuiProviderAuthenticationResult =
+  | { readonly action: "accept" | "cancel" }
+  | { readonly action: "error"; readonly message: string };
+
+export interface PresentedInteraction<T> {
   readonly result: Promise<T>;
   readonly cancel: () => void;
 }
 
-export interface TuiMcpInteractionPresenter {
+export interface TuiInteractionPresenter {
   readonly presentForm: (
-    request: TuiMcpFormElicitationRequest,
-  ) => PresentedInteraction<TuiMcpFormElicitationResult>;
-  readonly presentUrl: (
-    request: TuiMcpUrlElicitationRequest,
-  ) => PresentedInteraction<TuiMcpUrlElicitationResult>;
+    request: TuiFormElicitationRequest,
+  ) => PresentedInteraction<TuiFormElicitationResult>;
+  readonly presentUrl: (request: TuiUrlElicitationRequest) => PresentedInteraction<TuiUrlElicitationResult>;
+  readonly presentProviderAuthentication: (
+    request: TuiProviderAuthenticationRequest,
+  ) => PresentedInteraction<TuiProviderAuthenticationResult>;
 }
 
-export interface TuiMcpInteractionBridge {
+/**
+ * Runtime code asks the user to complete sensitive or interactive steps through this bridge.
+ * Requests wait in order until the TUI attaches and settle as cancelled on abort or shutdown.
+ */
+export interface TuiInteractionBridge {
   readonly handlers: {
     readonly elicitForm: (
-      request: TuiMcpFormElicitationRequest,
+      request: TuiFormElicitationRequest,
       signal?: AbortSignal,
-    ) => Promise<TuiMcpFormElicitationResult>;
+    ) => Promise<TuiFormElicitationResult>;
     readonly elicitUrl: (
-      request: TuiMcpUrlElicitationRequest,
+      request: TuiUrlElicitationRequest,
       signal?: AbortSignal,
-    ) => Promise<TuiMcpUrlElicitationResult>;
+    ) => Promise<TuiUrlElicitationResult>;
+    readonly authenticateProvider: (
+      request: TuiProviderAuthenticationRequest,
+      signal?: AbortSignal,
+    ) => Promise<TuiProviderAuthenticationResult>;
   };
-  /** Settles the exact URL request named by an MCP elicitation completion notification. */
-  readonly completeUrl: (serverName: string, elicitationId: string) => boolean;
+  /** Settles the exact URL request named by a completion notification from its source. */
+  readonly completeUrl: (source: string, elicitationId: string) => boolean;
   /** Attaches the mounted TUI. The returned detach function cancels all unresolved requests. */
-  readonly attach: (presenter: TuiMcpInteractionPresenter) => () => void;
+  readonly attach: (presenter: TuiInteractionPresenter) => () => void;
   /** Permanently closes the bridge and settles every current or future request as cancelled. */
   readonly shutdown: () => void;
   readonly pendingCount: () => number;
 }
 
-type PendingInteraction =
-  | {
-      readonly kind: "form";
-      readonly request: TuiMcpFormElicitationRequest;
-      readonly resolve: (result: TuiMcpFormElicitationResult) => void;
-    }
-  | {
-      readonly kind: "url";
-      readonly request: TuiMcpUrlElicitationRequest;
-      readonly resolve: (result: TuiMcpUrlElicitationResult) => void;
-    };
+interface PendingInteraction {
+  readonly present: (presenter: TuiInteractionPresenter) => {
+    readonly done: Promise<void>;
+    readonly cancel: () => void;
+  };
+  readonly settleCancelled: () => void;
+  readonly urlCompletion?: {
+    readonly source: string;
+    readonly elicitationId: string;
+    readonly accept: () => void;
+  };
+}
 
-export function createTuiMcpInteractionBridge(): TuiMcpInteractionBridge {
-  let presenter: TuiMcpInteractionPresenter | undefined;
+export function createTuiInteractionBridge(): TuiInteractionBridge {
+  let presenter: TuiInteractionPresenter | undefined;
   let active: { readonly pending: PendingInteraction; readonly cancel: () => void } | undefined;
   let closed = false;
   const queue: PendingInteraction[] = [];
-  const abortCleanups = new Map<PendingInteraction, () => void>();
-
-  const removeAbortListener = (pending: PendingInteraction): void => {
-    abortCleanups.get(pending)?.();
-    abortCleanups.delete(pending);
-  };
-
-  const cancelled = (pending: PendingInteraction): void => {
-    removeAbortListener(pending);
-    if (pending.kind === "form") pending.resolve({ action: "cancel" });
-    else pending.resolve({ action: "cancel" });
-  };
-
-  const cancelPending = (pending: PendingInteraction): boolean => {
-    if (active?.pending === pending) {
-      const current = active;
-      active = undefined;
-      current.cancel();
-      cancelled(pending);
-      drain();
-      return true;
-    }
-    const index = queue.indexOf(pending);
-    if (index < 0) return false;
-    queue.splice(index, 1);
-    cancelled(pending);
-    return true;
-  };
 
   const drain = (): void => {
     if (closed || active || !presenter) return;
     const pending = queue.shift();
     if (!pending) return;
-    if (pending.kind === "form") {
-      const presented = presenter.presentForm(pending.request);
-      active = { pending, cancel: presented.cancel };
-      void presented.result.then(
-        (result) => {
-          if (active?.pending !== pending) return;
-          active = undefined;
-          removeAbortListener(pending);
-          pending.resolve(result);
-          drain();
-        },
-        () => {
-          if (active?.pending !== pending) return;
-          active = undefined;
-          cancelled(pending);
-          drain();
-        },
-      );
+    const presented = pending.present(presenter);
+    const current = { pending, cancel: presented.cancel };
+    active = current;
+    void presented.done.then(() => {
+      if (active !== current) return;
+      active = undefined;
+      drain();
+    });
+  };
+
+  const cancelPending = (pending: PendingInteraction): void => {
+    if (active?.pending === pending) {
+      const current = active;
+      active = undefined;
+      current.cancel();
+      pending.settleCancelled();
+      drain();
       return;
     }
-    const presented = presenter.presentUrl(pending.request);
-    active = { pending, cancel: presented.cancel };
-    void presented.result.then(
-      (result) => {
-        if (active?.pending !== pending) return;
-        active = undefined;
-        removeAbortListener(pending);
-        pending.resolve(result);
-        drain();
-      },
-      () => {
-        if (active?.pending !== pending) return;
-        active = undefined;
-        cancelled(pending);
-        drain();
-      },
-    );
+    const index = queue.indexOf(pending);
+    if (index < 0) return;
+    queue.splice(index, 1);
+    pending.settleCancelled();
   };
 
   const cancelAll = (): void => {
     const current = active;
     active = undefined;
     current?.cancel();
-    if (current) cancelled(current.pending);
-    for (const pending of queue.splice(0)) cancelled(pending);
+    current?.pending.settleCancelled();
+    for (const pending of queue.splice(0)) pending.settleCancelled();
   };
 
   const enqueue = <T>(
-    pending: (resolve: (result: T) => void) => PendingInteraction,
-    fallback: T,
+    present: (presenter: TuiInteractionPresenter) => PresentedInteraction<T>,
+    cancelled: T,
     signal?: AbortSignal,
+    url?: { readonly source: string; readonly elicitationId: string; readonly accepted: T },
   ): Promise<T> => {
-    if (closed || signal?.aborted) return Promise.resolve(fallback);
+    if (closed || signal?.aborted) return Promise.resolve(cancelled);
     return new Promise<T>((resolve) => {
-      const queued = pending(resolve);
-      queue.push(queued);
-      if (signal) {
-        const abort = (): void => {
-          cancelPending(queued);
-        };
-        signal.addEventListener("abort", abort, { once: true });
-        abortCleanups.set(queued, () => signal.removeEventListener("abort", abort));
-        if (signal.aborted) {
-          cancelPending(queued);
-          return;
-        }
-      }
+      let settled = false;
+      const abort = (): void => cancelPending(pending);
+      const finish = (result: T): void => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener("abort", abort);
+        resolve(result);
+      };
+      const pending: PendingInteraction = createConditionalObject({
+        present: (current: TuiInteractionPresenter) => {
+          const presented = present(current);
+          return {
+            done: presented.result.then(finish, () => finish(cancelled)),
+            cancel: presented.cancel,
+          };
+        },
+        settleCancelled: () => finish(cancelled),
+      } as const)
+        .addOptional(
+          url
+            ? {
+                urlCompletion: {
+                  source: url.source,
+                  elicitationId: url.elicitationId,
+                  accept: () => finish(url.accepted),
+                },
+              }
+            : undefined,
+        )
+        .finish();
+      queue.push(pending);
+      signal?.addEventListener("abort", abort, { once: true });
       drain();
     });
   };
 
   return Object.freeze({
     handlers: Object.freeze({
-      elicitForm: (request: TuiMcpFormElicitationRequest, signal?: AbortSignal) =>
-        enqueue<TuiMcpFormElicitationResult>(
-          (resolve) => ({ kind: "form", request, resolve }),
-          {
-            action: "cancel",
-          },
+      elicitForm: (request: TuiFormElicitationRequest, signal?: AbortSignal) =>
+        enqueue<TuiFormElicitationResult>(
+          (current) => current.presentForm(request),
+          { action: "cancel" },
           signal,
         ),
-      elicitUrl: (request: TuiMcpUrlElicitationRequest, signal?: AbortSignal) =>
-        enqueue<TuiMcpUrlElicitationResult>(
-          (resolve) => ({ kind: "url", request, resolve }),
-          {
-            action: "cancel",
-          },
+      elicitUrl: (request: TuiUrlElicitationRequest, signal?: AbortSignal) =>
+        enqueue<TuiUrlElicitationResult>(
+          (current) => current.presentUrl(request),
+          { action: "cancel" },
+          signal,
+          { source: request.source, elicitationId: request.elicitationId, accepted: { action: "accept" } },
+        ),
+      authenticateProvider: (request: TuiProviderAuthenticationRequest, signal?: AbortSignal) =>
+        enqueue<TuiProviderAuthenticationResult>(
+          (current) => current.presentProviderAuthentication(request),
+          { action: "cancel" },
           signal,
         ),
     }),
-    completeUrl(serverName: string, elicitationId: string) {
+    completeUrl(source: string, elicitationId: string) {
       const pending = [active?.pending, ...queue].find(
-        (candidate): candidate is Extract<PendingInteraction, { readonly kind: "url" }> =>
-          candidate?.kind === "url" &&
-          candidate.request.serverName === serverName &&
-          candidate.request.elicitationId === elicitationId,
+        (candidate) =>
+          candidate?.urlCompletion?.source === source &&
+          candidate.urlCompletion.elicitationId === elicitationId,
       );
-      if (!pending) return false;
+      if (!pending?.urlCompletion) return false;
       if (active?.pending === pending) {
         const current = active;
         active = undefined;
@@ -293,12 +296,11 @@ export function createTuiMcpInteractionBridge(): TuiMcpInteractionBridge {
         const index = queue.indexOf(pending);
         if (index >= 0) queue.splice(index, 1);
       }
-      removeAbortListener(pending);
-      pending.resolve({ action: "accept" });
+      pending.urlCompletion.accept();
       drain();
       return true;
     },
-    attach(nextPresenter: TuiMcpInteractionPresenter) {
+    attach(nextPresenter: TuiInteractionPresenter) {
       if (closed) return () => undefined;
       if (presenter && presenter !== nextPresenter) cancelAll();
       presenter = nextPresenter;
@@ -327,15 +329,15 @@ interface ElicitationOverlay extends Component {
 }
 
 function createFormOverlay(
-  request: TuiMcpFormElicitationRequest,
+  request: TuiFormElicitationRequest,
   options: {
     readonly colorEnabled: boolean;
     readonly height: () => number;
     readonly requestRender: () => void;
-    readonly settle: (result: TuiMcpFormElicitationResult) => void;
+    readonly settle: (result: TuiFormElicitationResult) => void;
   },
 ): ElicitationOverlay {
-  const values: Record<string, TuiMcpElicitationValue> = {};
+  const values: Record<string, TuiElicitationValue> = {};
   let fieldIndex = 0;
   let choiceIndex = 0;
   let multiSelected = new Set<string>();
@@ -343,7 +345,7 @@ function createFormOverlay(
   let error: string | undefined;
   let settled = false;
 
-  const field = (): TuiMcpFormField | undefined => request.fields[fieldIndex];
+  const field = (): TuiFormField | undefined => request.fields[fieldIndex];
   const resetFieldSelection = (): void => {
     const current = field();
     choiceIndex =
@@ -381,7 +383,7 @@ function createFormOverlay(
     input = next;
   };
 
-  const finish = (result: TuiMcpFormElicitationResult): void => {
+  const finish = (result: TuiFormElicitationResult): void => {
     if (settled) return;
     settled = true;
     options.settle(result);
@@ -430,7 +432,7 @@ function createFormOverlay(
       return;
     }
     if (current.type === "multiselect") {
-      const validationError = validateMcpMultiselectField(current, multiSelected.size);
+      const validationError = validateMultiselectField(current, multiSelected.size);
       if (validationError) {
         error = validationError;
         options.requestRender();
@@ -459,7 +461,7 @@ function createFormOverlay(
         options.requestRender();
         return;
       }
-      const validationError = validateMcpNumberField(current, number);
+      const validationError = validateNumberField(current, number);
       if (validationError) {
         error = validationError;
         options.requestRender();
@@ -467,7 +469,7 @@ function createFormOverlay(
       }
       values[current.name] = number;
     } else if (value || current.required) {
-      const validationError = validateMcpTextField(current, value);
+      const validationError = validateTextField(current, value);
       if (validationError) {
         error = validationError;
         options.requestRender();
@@ -510,7 +512,7 @@ function createFormOverlay(
     render(outerWidth) {
       const width = Math.max(16, outerWidth - 4);
       const current = field();
-      const title = `${safeInteractionScalar(request.serverName)} · ${safeInteractionScalar(request.title)}`;
+      const title = `${safeInteractionScalar(request.source)} · ${safeInteractionScalar(request.title)}`;
       const message = wrapTextWithAnsi(safeTerminalText(request.message), width);
       const description = current?.description
         ? wrapTextWithAnsi(safeTerminalText(current.description), width)
@@ -578,15 +580,15 @@ function createFormOverlay(
 }
 
 function createUrlOverlay(
-  request: TuiMcpUrlElicitationRequest,
+  request: TuiUrlElicitationRequest,
   options: {
     readonly colorEnabled: boolean;
     readonly height: () => number;
-    readonly settle: (result: TuiMcpUrlElicitationResult) => void;
+    readonly settle: (result: TuiUrlElicitationResult) => void;
   },
 ): ElicitationOverlay {
   let settled = false;
-  const finish = (result: TuiMcpUrlElicitationResult): void => {
+  const finish = (result: TuiUrlElicitationResult): void => {
     if (settled) return;
     settled = true;
     options.settle(result);
@@ -612,7 +614,7 @@ function createUrlOverlay(
       return [
         styled(options.colorEnabled, ANSI.dim, `╭─ ${"─".repeat(Math.max(0, outerWidth - 4))}╮`),
         elideText(
-          `│ ${styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, `${safeInteractionScalar(request.serverName)} · ${safeInteractionScalar(request.title)}`)}`,
+          `│ ${styled(options.colorEnabled, `${ANSI.bold}${ANSI.cyan}`, `${safeInteractionScalar(request.source)} · ${safeInteractionScalar(request.title)}`)}`,
           outerWidth,
         ),
         ...body.slice(0, Math.max(1, options.height() - 6)).map((line) => elideText(`│ ${line}`, outerWidth)),
@@ -626,13 +628,15 @@ function createUrlOverlay(
   };
 }
 
-export function createTuiMcpInteractionPresenter(options: {
+export function createTuiInteractionPresenter(options: {
   readonly tui: TUI;
   readonly colorEnabled: boolean;
   readonly height: () => number;
   readonly openUrl?: (url: string) => Promise<void>;
   readonly onActiveChange?: (active: boolean) => void;
-}): TuiMcpInteractionPresenter {
+  /** Presents provider sign-in through the `/provider` authentication overlay. */
+  readonly authenticateProvider?: TuiInteractionPresenter["presentProviderAuthentication"];
+}): TuiInteractionPresenter {
   const present = <T>(
     create: (settle: (result: T) => void) => ElicitationOverlay,
     beforeShow?: () => void,
@@ -668,8 +672,8 @@ export function createTuiMcpInteractionPresenter(options: {
   };
 
   return Object.freeze({
-    presentForm: (request: TuiMcpFormElicitationRequest) =>
-      present<TuiMcpFormElicitationResult>((settle) =>
+    presentForm: (request: TuiFormElicitationRequest) =>
+      present<TuiFormElicitationResult>((settle) =>
         createFormOverlay(request, {
           colorEnabled: options.colorEnabled,
           height: options.height,
@@ -677,8 +681,8 @@ export function createTuiMcpInteractionPresenter(options: {
           settle,
         }),
       ),
-    presentUrl: (request: TuiMcpUrlElicitationRequest) =>
-      present<TuiMcpUrlElicitationResult>((settle) =>
+    presentUrl: (request: TuiUrlElicitationRequest) =>
+      present<TuiUrlElicitationResult>((settle) =>
         createUrlOverlay(request, {
           colorEnabled: options.colorEnabled,
           height: options.height,
@@ -689,5 +693,10 @@ export function createTuiMcpInteractionPresenter(options: {
           },
         }),
       ),
+    presentProviderAuthentication: (request: TuiProviderAuthenticationRequest) =>
+      options.authenticateProvider?.(request) ?? {
+        result: Promise.resolve({ action: "error", message: "Provider sign-in isn't available here." }),
+        cancel: () => undefined,
+      },
   });
 }

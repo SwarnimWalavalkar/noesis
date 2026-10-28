@@ -9,7 +9,7 @@ export const NOESIS_BUILT_IN_SKILL: PiBuiltInSkill = Object.freeze({
   name: "noesis",
   aliases: Object.freeze(["refine"]),
   description:
-    "Inspect and deliberately refine Noesis's lasting Capabilities, skills, and harness. Use for self-improvement, learned behavior, feedback, scope, activation, or restoration.",
+    "Inspect and change Noesis itself. Use for its configuration (models, reasoning, subagent routes, context budget, compaction), provider sign-in, MCP servers, built-in skills, and deliberate refinement of lasting Capabilities, learned behavior, feedback, scope, activation, or restoration.",
   filePath: fileURLToPath(new URL("../skills/noesis/SKILL.md", import.meta.url)),
   disableModelInvocation: false,
 });

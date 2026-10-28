@@ -70,7 +70,7 @@ Open `/context` and select the session notebook section to preview it. You can a
 
 If an earlier detail is missing, ask in the conversation, e.g. "Search this session for the original migration error and quote the relevant output." Noesis can search current-session evidence with citations. Advanced users can find the tool and scope details in [codemode and session history](codemode.md#retrieve-older-session-details).
 
-To disable automatic compaction, set `context.autoCompact` to `false` in `~/.noesis/config.json` and restart Noesis. Existing notebooks remain in use and manual `/compact` remains available. An over-budget turn stops with guidance instead of silently dropping history.
+To disable automatic compaction, ask Noesis to turn it off, which applies from the next turn. You can also set `context.autoCompact` to `false` in `~/.noesis/config.json` and restart Noesis. Existing notebooks remain in use and manual `/compact` remains available. An over-budget turn stops with guidance instead of silently dropping history.
 
 ## What compaction preserves
 

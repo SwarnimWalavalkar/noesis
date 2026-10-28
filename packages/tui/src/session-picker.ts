@@ -13,7 +13,7 @@ import {
   type TrailSummary,
 } from "@noesis/runtime";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
-import type { TuiMcpInteractionBridge } from "./mcp-interaction.ts";
+import type { TuiInteractionBridge } from "./interaction.ts";
 import type { NoesisTuiRuntime } from "./runtime-port.ts";
 
 export interface TuiStartOptions {
@@ -30,8 +30,8 @@ export interface TuiStartOptions {
   readonly onShutdown?: () => Promise<void>;
   /** Overrides $VISUAL/$EDITOR for Ctrl+G composer editing. */
   readonly externalEditorCommand?: string;
-  /** Bridge created before runtime composition so MCP server requests can wait for the mounted TUI. */
-  readonly mcpInteractionBridge?: TuiMcpInteractionBridge;
+  /** Bridge created before runtime composition so runtime elicitation can wait for the mounted TUI. */
+  readonly interactionBridge?: TuiInteractionBridge;
   /** Opens URL elicitation in the system browser; the overlay always keeps the URL copyable. */
   readonly openUrl?: (url: string) => Promise<void>;
   readonly session?:

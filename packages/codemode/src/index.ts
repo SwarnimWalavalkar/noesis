@@ -4,10 +4,11 @@ import {
   createId,
   type JsonValue,
   JsonValueSchema,
+  schemaSignature,
   sha256,
   toJsonValue,
 } from "@noesis/domain";
-import type { ToolBroker, ToolInvocationResult } from "@noesis/tools";
+import { type FrozenToolDescriptor, type ToolBroker, type ToolInvocationResult } from "@noesis/tools";
 import { z } from "zod";
 const DEFAULT_MAX_OUTPUT_BYTES = 256 * 1024;
 const DEFAULT_MAX_PROGRESS_BYTES = 256 * 1024;
@@ -242,6 +243,33 @@ function sdkActionInput(
   if (message.kind === "describe") return Object.freeze({ name: message.name });
   return message.input;
 }
+/** Leads with compact input and output types so the model can read field names before the full JSON Schemas. */
+function describeForModel(descriptor: FrozenToolDescriptor | undefined) {
+  if (!descriptor) return null;
+  const { name, description, ...contract } = descriptor;
+  return Object.freeze({
+    name,
+    description,
+    signature: Object.freeze({
+      input: schemaSignature(descriptor.inputSchema),
+      output: schemaSignature(descriptor.outputSchema),
+    }),
+    ...contract,
+  });
+}
+const MAX_REPORTED_COMPLETED_TOOLS = 20;
+/** Names tools that already succeeded so the model does not mistake a failed program for a failed effect. */
+function withCompletedTools(error: Error, completed: ReadonlySet<string>): Error {
+  if (completed.size === 0) return error;
+  const names = [...completed];
+  const more =
+    names.length > MAX_REPORTED_COMPLETED_TOOLS
+      ? ` and ${String(names.length - MAX_REPORTED_COMPLETED_TOOLS)} more`
+      : "";
+  // Keep the original error and its stack; only the message gains the completed-call context.
+  error.message = `${error.message}\n\nThese tools succeeded before the program failed, so their effects already happened: ${names.slice(0, MAX_REPORTED_COMPLETED_TOOLS).join(", ")}${more}. Check current state before repeating any of them.`;
+  return error;
+}
 function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
   return Array.isArray(value);
 }
@@ -364,6 +392,15 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
     let logsTruncated = false;
     let progressBytes = 0;
     let calls = 0;
+    /**
+     * Distinct Broker tools that returned successfully, so a later program failure can report effects that
+     * already happened. Bounded by the frozen catalog size.
+     */
+    const completedTools = new Set<string>();
+    const recordCompleted = (result: ToolInvocationResult, name: string): ToolInvocationResult => {
+      if (result.ok) completedTools.add(name);
+      return result;
+    };
     let ready = false;
     let terminal = false;
     let settlingResult = false;
@@ -411,7 +448,7 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
             executionId,
             error: error.message,
           });
-          reject(error);
+          reject(withCompletedTools(error, completedTools));
         };
         const finishSuccess = async (
           value: JsonValue,
@@ -515,35 +552,38 @@ export function createCodeModeRuntime(options: CreateCodeModeRuntimeOptions): Co
               message.kind === "search"
                 ? options.broker.search(message.query, message.limit)
                 : message.kind === "describe"
-                  ? (options.broker.describe(message.name) ?? null)
+                  ? describeForModel(options.broker.describe(message.name))
                   : invocationValue(
-                      await options.broker.invoke(
-                        message.name,
-                        message.input,
-                        createConditionalObject({
-                          executionId,
-                          parentExecutionId: executionId,
-                          logicalExecutionId,
-                          callId,
-                          sessionId: request.sessionId,
-                        } as const)
-                          .addOptional(request.turnId ? { turnId: request.turnId } : undefined)
-                          .add({
-                            causallyPriorCallIds: message.causallyPriorCallIds ?? Object.freeze([]),
-                            signal: controller.signal,
-                            emitUpdate: (update: JsonValue) => {
-                              if (recordProgress(update))
-                                notify({
-                                  type: "progress",
-                                  executionId,
-                                  value: update,
-                                  callId,
-                                  name,
-                                  callIndex,
-                                });
-                            },
+                      recordCompleted(
+                        await options.broker.invoke(
+                          message.name,
+                          message.input,
+                          createConditionalObject({
+                            executionId,
+                            parentExecutionId: executionId,
+                            logicalExecutionId,
+                            callId,
+                            sessionId: request.sessionId,
                           } as const)
-                          .finish(),
+                            .addOptional(request.turnId ? { turnId: request.turnId } : undefined)
+                            .add({
+                              causallyPriorCallIds: message.causallyPriorCallIds ?? Object.freeze([]),
+                              signal: controller.signal,
+                              emitUpdate: (update: JsonValue) => {
+                                if (recordProgress(update))
+                                  notify({
+                                    type: "progress",
+                                    executionId,
+                                    value: update,
+                                    callId,
+                                    name,
+                                    callIndex,
+                                  });
+                              },
+                            } as const)
+                            .finish(),
+                        ),
+                        name,
                       ),
                     ),
             );

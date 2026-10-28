@@ -82,7 +82,7 @@ describe("tool broker", () => {
     await expect(broker.invoke("test.echo", { value: 1 }, invocationContext())).resolves.toMatchObject({
       ok: false,
       code: "invalid_input",
-      message: expect.stringContaining('noesis.describe("test.echo")'),
+      message: expect.stringContaining("Expected input: { value: string }"),
     });
   });
   it("recovers unknown tool names with frozen-catalog suggestions and discovery guidance", async () => {

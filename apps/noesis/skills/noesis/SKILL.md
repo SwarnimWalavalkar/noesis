@@ -1,9 +1,77 @@
 ---
 name: noesis
-description: Inspect and deliberately refine Noesis's lasting Capabilities, skills, and harness. Use for self-improvement, learned behavior, feedback, scope, activation, restoration, or managing and authenticating MCP servers.
+description: Inspect and change Noesis itself. Use for its configuration (models, reasoning, subagent routes, context budget, compaction), provider sign-in, MCP servers, built-in skills, and deliberate refinement of lasting Capabilities, learned behavior, feedback, scope, activation, or restoration.
 ---
 
 # Working on Noesis itself
+
+## What Noesis can change about itself
+
+When the user asks what can be configured, answer from this table and from `config.inspect`. When they ask for a change, make it with the listed tool, then report what changed and when it takes effect.
+
+| Surface                                            | Tools                                                          | Notes                                                                                                                                                                                 |
+| -------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Foreground model, provider, and reasoning defaults | `config.inspect`, `config.update` (`agent`)                    | Used when Noesis next starts a session, normally the next launch. The user switches the current session with `/provider`, `/model`, or `/reasoning`.                                  |
+| Subagent model route                               | `config.update` (`agents`)                                     | Applies from the next turn. `null` inherits the foreground session route.                                                                                                             |
+| Context budget and automatic compaction            | `config.update` (`context`)                                    | Applies from the next turn.                                                                                                                                                           |
+| Model provider sign-in                             | `providers.list`, `providers.authenticate`, `providers.logout` | Sign-in runs the `/provider` flow in the TUI.                                                                                                                                         |
+| MCP servers                                        | `mcp.*`                                                        | See [Manage MCP servers](#manage-mcp-servers).                                                                                                                                        |
+| Lasting behavior, preferences, and abilities       | `capabilities.inspect`, `capabilities.refine`                  | See [Deliberate refinement](#deliberate-refinement).                                                                                                                                  |
+| Reusable scripts and workflows                     | `programs.*`                                                   | Load the `execute` skill.                                                                                                                                                             |
+| Built-in skill text                                | file read and write                                            | Edit `<home>/skills/builtin/<name>/SKILL.md`, using `home` from `config.inspect`. Later turns load the edit. Upgrades back up an edited file before installing a new bundled version. |
+
+Only the user enters credentials, through the sign-in flows above. Workspace trust (`--trust-workspace`) and audit and recovery controls are not agent-editable.
+
+## Inspect this session
+
+Call `session.inspect` for questions about the running session, such as which model it uses, how full the context is, or whether it was compacted. It returns:
+
+- `session`: ID, title, project, start time, and completed turns.
+- `route`: the provider, model, and reasoning level this turn runs on, the configured default, which fields differ from it, and this turn's subagent defaults. The session route is pinned; `/provider`, `/model`, and `/reasoning` change it, and `config.update` changes only the default.
+- `context`: the context window, request budget, output reserve, estimated tokens used, and the same per-component breakdown as `/context`. It describes the last model request, so it reflects this turn's input but not your reply.
+- `compaction`: each compaction checkpoint with when it was made, how many messages it covered, its size, and the model that wrote it. The notes themselves are already in your prompt.
+- `permissions`: the effects and resources this turn may use.
+
+The full transcript before this turn is the codemode `context` object, not part of this result. Past sessions are under `history.*`.
+
+## Configure Noesis
+
+`noesis.describe(name)` starts with `signature.input` and `signature.output`, compact types for each tool's fields. Read them before guessing a field name. The shapes you need most:
+
+- `config.update` input: `{ agent?, agents?, context? }`, where `agent` and `agents` take `{ provider?, model?, thinkingLevel? }` and `context` takes `{ tokenBudget?, autoCompact? }`. Reasoning is `thinkingLevel`.
+- `config.update` result: `previous`, `effective`, `overridden`, `providers`, and `appliesWhen`.
+- `providers.list({ provider })` models: `{ model, name, default, thinkingLevels }`.
+
+1. Call `config.inspect` before changing anything. It returns the stored file, effective values, where each foreground value came from, and what each setting does. `effective.agent` is only the default for new sessions; the current session's model comes from `session.inspect`.
+2. For a provider or model change, call `providers.list` for valid provider IDs, then `providers.list({ provider })` for its models and supported reasoning levels.
+3. Call `config.update` once with only the fields to change. `null` clears a field so its default applies. The update result already has the previous and new values, so do not inspect again to confirm it. If `overridden` is not empty, a command-line flag or environment variable still wins for that field; tell the user.
+4. If a changed provider's `authentication.configured` is false, offer to call `providers.authenticate({ provider })`. It opens a sign-in overlay and waits. OAuth opens the browser; API keys use a masked form. Never ask the user to paste a credential into chat. A cancelled or failed sign-in fails the call; report it and do not retry unless the user asks.
+5. Tell the user when the change takes effect, using `appliesWhen` from the result.
+
+If a program fails after a write, its error lists the tools that already succeeded. Do not repeat a listed `config.update`; return the values you need from a new read instead.
+
+Make the defaults match the current session:
+
+```js
+const { route } = await tools.session.inspect({});
+const result = await tools.config.update({
+  agent: { provider: route.provider, model: route.model, thinkingLevel: route.thinkingLevel },
+});
+return { previous: result.previous.agent, now: result.effective.agent, overridden: result.overridden };
+```
+
+Route subagents to a provider's default model:
+
+```js
+const routes = await tools.providers.list({ provider: "anthropic" });
+const result = await tools.config.update({
+  agents: { provider: "anthropic", model: routes.models.find((entry) => entry.default).model },
+});
+const signedIn = result.providers.every((entry) => entry.authentication?.configured !== false)
+  ? null
+  : await tools.providers.authenticate({ provider: "anthropic" });
+return { previous: result.previous.agents, now: result.effective.agents, signedIn };
+```
 
 ## Choose the smallest lasting form
 

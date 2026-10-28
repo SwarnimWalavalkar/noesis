@@ -1,10 +1,11 @@
 import type { NoesisAgentRuntime } from "@noesis/agent-types";
 import { describe, expect, test, vi } from "vitest";
 import {
-  createTuiMcpInteractionBridge,
+  createTuiInteractionBridge,
+  type NoesisTuiRuntime,
   startNoesisTui,
-  type TuiMcpFormElicitationResult,
-  type TuiMcpInteractionPresenter,
+  type TuiFormElicitationResult,
+  type TuiInteractionPresenter,
 } from "../src/index.ts";
 import { createInMemoryTestRuntime } from "./support/in-memory-runtime.ts";
 import { createTestTerminal } from "./support/test-terminal.ts";
@@ -14,18 +15,21 @@ const DOWN = "\u001b[B";
 const ESCAPE = "\u001b";
 const DECLINE = "\u0004";
 const INTERRUPT = "\u0003";
+const unexpectedProviderAuthentication = (): never => {
+  throw new Error("Unexpected provider sign-in");
+};
 
-describe("MCP TUI interaction bridge", () => {
+describe("TUI elicitation bridge", () => {
   test("queues server elicitation before the TUI attaches and presents requests in order", async () => {
-    const bridge = createTuiMcpInteractionBridge();
+    const bridge = createTuiInteractionBridge();
     const first = bridge.handlers.elicitForm({
-      serverName: "research",
+      source: "research",
       title: "Choose a source",
       message: "The server needs one preference.",
       fields: [{ type: "text", name: "topic", label: "Topic", required: true }],
     });
     const second = bridge.handlers.elicitUrl({
-      serverName: "research",
+      source: "research",
       elicitationId: "research-auth",
       title: "Authorize",
       message: "Continue authentication.",
@@ -33,9 +37,10 @@ describe("MCP TUI interaction bridge", () => {
     });
     expect(bridge.pendingCount()).toBe(2);
 
-    let settleForm: ((result: TuiMcpFormElicitationResult) => void) | undefined;
+    let settleForm: ((result: TuiFormElicitationResult) => void) | undefined;
     let formCancelled = 0;
-    const presenter: TuiMcpInteractionPresenter = {
+    const presenter: TuiInteractionPresenter = {
+      presentProviderAuthentication: unexpectedProviderAuthentication,
       presentForm: () => ({
         result: new Promise((resolve) => {
           settleForm = resolve;
@@ -61,9 +66,10 @@ describe("MCP TUI interaction bridge", () => {
   });
 
   test("shutdown cancels active, queued, and future server requests", async () => {
-    const bridge = createTuiMcpInteractionBridge();
+    const bridge = createTuiInteractionBridge();
     let cancelled = 0;
     bridge.attach({
+      presentProviderAuthentication: unexpectedProviderAuthentication,
       presentForm: () => ({
         result: new Promise(() => undefined),
         cancel: () => {
@@ -78,13 +84,13 @@ describe("MCP TUI interaction bridge", () => {
       }),
     });
     const active = bridge.handlers.elicitForm({
-      serverName: "one",
+      source: "one",
       title: "Input",
       message: "Input needed",
       fields: [],
     });
     const queued = bridge.handlers.elicitUrl({
-      serverName: "two",
+      source: "two",
       elicitationId: "two-auth",
       title: "Authorize",
       message: "Authorization needed",
@@ -97,7 +103,7 @@ describe("MCP TUI interaction bridge", () => {
     await expect(queued).resolves.toEqual({ action: "cancel" });
     await expect(
       bridge.handlers.elicitForm({
-        serverName: "three",
+        source: "three",
         title: "Input",
         message: "Input needed",
         fields: [],
@@ -108,11 +114,12 @@ describe("MCP TUI interaction bridge", () => {
   });
 
   test("aborts only the exact queued or active request", async () => {
-    const bridge = createTuiMcpInteractionBridge();
-    let settleActive: ((result: TuiMcpFormElicitationResult) => void) | undefined;
+    const bridge = createTuiInteractionBridge();
+    let settleActive: ((result: TuiFormElicitationResult) => void) | undefined;
     let activeCancelled = 0;
     let presentedUrls = 0;
     bridge.attach({
+      presentProviderAuthentication: unexpectedProviderAuthentication,
       presentForm: () => ({
         result: new Promise((resolve) => {
           settleActive = resolve;
@@ -129,12 +136,12 @@ describe("MCP TUI interaction bridge", () => {
     const activeController = new AbortController();
     const queuedController = new AbortController();
     const active = bridge.handlers.elicitForm(
-      { serverName: "one", title: "Input", message: "Input needed", fields: [] },
+      { source: "one", title: "Input", message: "Input needed", fields: [] },
       activeController.signal,
     );
     const queued = bridge.handlers.elicitUrl(
       {
-        serverName: "two",
+        source: "two",
         elicitationId: "two-auth",
         title: "Authorize",
         message: "Authorization needed",
@@ -157,9 +164,10 @@ describe("MCP TUI interaction bridge", () => {
   });
 
   test("settles only the URL request named by a completion notification", async () => {
-    const bridge = createTuiMcpInteractionBridge();
+    const bridge = createTuiInteractionBridge();
     let cancelled = 0;
     bridge.attach({
+      presentProviderAuthentication: unexpectedProviderAuthentication,
       presentForm: () => ({ result: new Promise(() => undefined), cancel: () => undefined }),
       presentUrl: () => ({
         result: new Promise(() => undefined),
@@ -169,7 +177,7 @@ describe("MCP TUI interaction bridge", () => {
       }),
     });
     const request = bridge.handlers.elicitUrl({
-      serverName: "linear",
+      source: "linear",
       elicitationId: "external-auth",
       title: "Authorize",
       message: "Authorization needed",
@@ -201,13 +209,13 @@ describe("MCP TUI interaction bridge", () => {
       },
       async abort() {},
     };
-    const bridge = createTuiMcpInteractionBridge();
+    const bridge = createTuiInteractionBridge();
     const terminal = createTestTerminal();
     const opened: string[] = [];
     const running = startNoesisTui(
       createInMemoryTestRuntime(agent),
       {
-        mcpInteractionBridge: bridge,
+        interactionBridge: bridge,
         openUrl: async (url) => {
           opened.push(url);
         },
@@ -217,7 +225,7 @@ describe("MCP TUI interaction bridge", () => {
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
 
     const form = bridge.handlers.elicitForm({
-      serverName: "linear",
+      source: "linear",
       title: "Create issue",
       message: "Choose the issue properties.",
       fields: [
@@ -297,7 +305,7 @@ describe("MCP TUI interaction bridge", () => {
     });
 
     const url = bridge.handlers.elicitUrl({
-      serverName: "linear",
+      source: "linear",
       elicitationId: "linear-auth",
       title: "Authorize",
       message: "Grant access in your browser.",
@@ -311,7 +319,7 @@ describe("MCP TUI interaction bridge", () => {
     await vi.waitFor(() => expect(opened).toEqual(["https://auth.linear.test/authorize"]));
 
     const declined = bridge.handlers.elicitUrl({
-      serverName: "linear",
+      source: "linear",
       elicitationId: "linear-decline",
       title: "Authorize",
       message: "Grant access in your browser.",
@@ -323,7 +331,7 @@ describe("MCP TUI interaction bridge", () => {
     expect(opened).toEqual(["https://auth.linear.test/authorize"]);
 
     const cancelled = bridge.handlers.elicitUrl({
-      serverName: "linear",
+      source: "linear",
       elicitationId: "linear-cancel",
       title: "Authorize",
       message: "Grant access in your browser.",
@@ -356,13 +364,13 @@ describe("MCP TUI interaction bridge", () => {
       },
       async abort() {},
     };
-    const bridge = createTuiMcpInteractionBridge();
+    const bridge = createTuiInteractionBridge();
     const terminal = createTestTerminal();
     const opened: string[] = [];
     const running = startNoesisTui(
       createInMemoryTestRuntime(agent),
       {
-        mcpInteractionBridge: bridge,
+        interactionBridge: bridge,
         openUrl: async (url) => {
           opened.push(url);
         },
@@ -373,7 +381,7 @@ describe("MCP TUI interaction bridge", () => {
     const hostile = "server\u001b]8;;https://attacker.test\u0007link\u001b]8;;\u001b\\";
 
     const form = bridge.handlers.elicitForm({
-      serverName: hostile,
+      source: hostile,
       title: hostile,
       message: hostile,
       fields: [
@@ -393,7 +401,7 @@ describe("MCP TUI interaction bridge", () => {
     await expect(form).resolves.toEqual({ action: "cancel" });
 
     const defaulted = bridge.handlers.elicitForm({
-      serverName: "linear",
+      source: "linear",
       title: "Input",
       message: "Input needed",
       fields: [{ type: "text", name: "value", label: "Value", defaultValue: hostile }],
@@ -405,7 +413,7 @@ describe("MCP TUI interaction bridge", () => {
     await expect(defaulted).resolves.toEqual({ action: "cancel" });
 
     const url = bridge.handlers.elicitUrl({
-      serverName: hostile,
+      source: hostile,
       elicitationId: "hostile-url",
       title: hostile,
       message: hostile,
@@ -441,9 +449,9 @@ describe("MCP TUI interaction bridge", () => {
       async abort() {},
     };
     const base = createInMemoryTestRuntime(agent);
-    const bridge = createTuiMcpInteractionBridge();
+    const bridge = createTuiInteractionBridge();
     const pending = bridge.handlers.elicitForm({
-      serverName: "linear",
+      source: "linear",
       title: "Input",
       message: "Input needed",
       fields: [],
@@ -457,14 +465,14 @@ describe("MCP TUI interaction bridge", () => {
             throw new Error("startup failed");
           },
         }),
-        { mcpInteractionBridge: bridge },
+        { interactionBridge: bridge },
         createTestTerminal(),
       ),
     ).rejects.toThrow("startup failed");
     await expect(pending).resolves.toEqual({ action: "cancel" });
     await expect(
       bridge.handlers.elicitForm({
-        serverName: "linear",
+        source: "linear",
         title: "Input",
         message: "Input needed",
         fields: [],
@@ -489,17 +497,13 @@ describe("MCP TUI interaction bridge", () => {
       },
       async abort() {},
     };
-    const bridge = createTuiMcpInteractionBridge();
+    const bridge = createTuiInteractionBridge();
     const terminal = createTestTerminal();
-    const running = startNoesisTui(
-      createInMemoryTestRuntime(agent),
-      { mcpInteractionBridge: bridge },
-      terminal,
-    );
+    const running = startNoesisTui(createInMemoryTestRuntime(agent), { interactionBridge: bridge }, terminal);
     await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
     terminal.send("\u001b[200~unterminated paste");
     const elicitation = bridge.handlers.elicitForm({
-      serverName: "linear",
+      source: "linear",
       title: "Input",
       message: "Input needed",
       fields: [{ type: "text", name: "value", label: "Value" }],
@@ -509,5 +513,73 @@ describe("MCP TUI interaction bridge", () => {
 
     await running;
     await expect(elicitation).resolves.toEqual({ action: "cancel" });
+  });
+  test("runs provider sign-in in the /provider overlay without exposing the entered key", async () => {
+    const agent: NoesisAgentRuntime = {
+      name: "provider-elicitation",
+      async run(request) {
+        return {
+          text: request.prompt,
+          provider: request.provider,
+          model: request.model,
+          outcome: "completed",
+          stopReason: "stop",
+        };
+      },
+      async steer() {
+        return { status: "consumed", timelineSequence: 1, consumedAt: new Date().toISOString() };
+      },
+      async abort() {},
+    };
+    const secret = "sk-agent-requested-never-render";
+    let stored: string | undefined;
+    let configured = true;
+    const runtime = Object.freeze({
+      ...createInMemoryTestRuntime(agent),
+      providerAuthStatus: async (provider: string) => ({
+        provider,
+        configured,
+        source: configured ? ("stored-api-key" as const) : ("none" as const),
+      }),
+      authenticateProvider: async (
+        provider: string,
+        callbacks: Parameters<NonNullable<NoesisTuiRuntime["authenticateProvider"]>>[1],
+      ) => {
+        stored = await callbacks.prompt({ type: "secret", message: "Paste your Other Provider API key" });
+        configured = true;
+        return { provider, configured, source: "stored-api-key" as const };
+      },
+    });
+    const bridge = createTuiInteractionBridge();
+    const terminal = createTestTerminal();
+    const running = startNoesisTui(runtime, { interactionBridge: bridge }, terminal);
+    await vi.waitFor(() => expect(terminal.output).toContain("● IDLE"));
+
+    const signIn = bridge.handlers.authenticateProvider({
+      providerId: "other",
+      providerName: "Other Provider",
+      reason: "Noesis asked you to sign in to Other Provider.",
+    });
+    await vi.waitFor(() => expect(terminal.output).toContain("Paste your Other Provider API key"));
+    expect(terminal.output).toContain("Noesis asked you to sign in to Other Provider.");
+    terminal.send(`\u001b[200~${secret}\u001b[201~`);
+    await vi.waitFor(() => expect(terminal.output).toContain("•".repeat(secret.length)));
+    terminal.type(ENTER);
+
+    await expect(signIn).resolves.toEqual({ action: "accept" });
+    expect(stored).toBe(secret);
+    expect(terminal.output).not.toContain(secret);
+
+    const controller = new AbortController();
+    const abandoned = bridge.handlers.authenticateProvider(
+      { providerId: "other", providerName: "Other Provider", reason: "Sign in again." },
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(terminal.output).toContain("Sign in again."));
+    controller.abort();
+    await expect(abandoned).resolves.toEqual({ action: "cancel" });
+
+    terminal.type("/quit\n");
+    await running;
   });
 });

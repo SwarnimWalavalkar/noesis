@@ -32,7 +32,7 @@ import {
   type PiFrozenToolCatalog,
   type RoleBackendRequest,
 } from "@noesis/runtime-pi";
-import { createTuiMcpInteractionBridge } from "@noesis/tui";
+import { createTuiInteractionBridge } from "@noesis/tui";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { z } from "zod";
@@ -406,7 +406,6 @@ describe("apps/noesis production control-plane composition", () => {
     const config = Object.freeze({
       ...resolved,
       context: Object.freeze({ ...resolved.context, tokenBudget: 50000 }),
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
     });
     const histories: NonNullable<AgentRuntimeRequest["history"]>[] = [];
     const compactorInputs: string[] = [];
@@ -565,10 +564,7 @@ describe("apps/noesis production control-plane composition", () => {
     let compactorRuns = 0;
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const runtime = await createApplicationRuntimeComposition({
-      config: Object.freeze({
-        ...config,
-        learning: Object.freeze({ ...config.learning, enabled: false }),
-      }),
+      config: config,
       agent: Object.freeze({
         name: "sensitive-compaction-agent",
         run: async () => {
@@ -637,10 +633,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const runtime = await createApplicationRuntimeComposition({
-      config: Object.freeze({
-        ...config,
-        learning: Object.freeze({ ...config.learning, enabled: false }),
-      }),
+      config: config,
       agent: Object.freeze({
         name: "shutdown-compaction-agent",
         run: async () => {
@@ -789,10 +782,7 @@ describe("apps/noesis production control-plane composition", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = Object.freeze({
-      ...resolved,
-      learning: Object.freeze({ ...resolved.learning, enabled: false }),
-    });
+    const config = resolved;
     const project: ProjectRef = Object.freeze({ projectId: "project_mcp_large", root: projectRoot });
     const returned: JsonValue[] = [];
     const controlled = createControlledPiModels();
@@ -805,7 +795,7 @@ describe("apps/noesis production control-plane composition", () => {
             throw new Error("Sampling is not expected");
           },
         }),
-        interactions: createTuiMcpInteractionBridge(),
+        interactions: createTuiInteractionBridge(),
         openUrl: async () => undefined,
         workspaceTrusted: true,
       });

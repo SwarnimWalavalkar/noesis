@@ -1,5 +1,6 @@
 export * from "./commands.ts";
 export * from "./external-editor.ts";
+export * from "./interaction.ts";
 export * from "./lifecycle-utils.ts";
 export * from "./learning.ts";
 export * from "./mcp.ts";

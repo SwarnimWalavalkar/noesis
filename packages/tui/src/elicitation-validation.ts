@@ -1,8 +1,8 @@
-import type { TuiMcpFormField } from "./mcp-interaction.ts";
+import type { TuiFormField } from "./interaction.ts";
 
-type TextField = Extract<TuiMcpFormField, { readonly type: "text" | "secret" }>;
-type NumberField = Extract<TuiMcpFormField, { readonly type: "number" }>;
-type MultiselectField = Extract<TuiMcpFormField, { readonly type: "multiselect" }>;
+type TextField = Extract<TuiFormField, { readonly type: "text" | "secret" }>;
+type NumberField = Extract<TuiFormField, { readonly type: "number" }>;
+type MultiselectField = Extract<TuiFormField, { readonly type: "multiselect" }>;
 
 function validDate(value: string): boolean {
   const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
@@ -39,7 +39,7 @@ function validFormat(format: NonNullable<TextField["format"]>, value: string): b
   }
 }
 
-export function validateMcpTextField(field: TextField, value: string): string | undefined {
+export function validateTextField(field: TextField, value: string): string | undefined {
   const length = [...value].length;
   if (field.minLength !== undefined && length < field.minLength)
     return `${field.label} must contain at least ${String(field.minLength)} characters.`;
@@ -50,7 +50,7 @@ export function validateMcpTextField(field: TextField, value: string): string | 
   return undefined;
 }
 
-export function validateMcpNumberField(field: NumberField, value: number): string | undefined {
+export function validateNumberField(field: NumberField, value: number): string | undefined {
   if (field.integer && !Number.isInteger(value)) return `${field.label} must be an integer.`;
   if (field.minimum !== undefined && value < field.minimum)
     return `${field.label} must be at least ${String(field.minimum)}.`;
@@ -59,10 +59,7 @@ export function validateMcpNumberField(field: NumberField, value: number): strin
   return undefined;
 }
 
-export function validateMcpMultiselectField(
-  field: MultiselectField,
-  selectedCount: number,
-): string | undefined {
+export function validateMultiselectField(field: MultiselectField, selectedCount: number): string | undefined {
   const minimum = Math.max(field.required ? 1 : 0, field.minItems ?? 0);
   if (selectedCount < minimum)
     return `${field.label} requires at least ${String(minimum)} ${minimum === 1 ? "choice" : "choices"}.`;

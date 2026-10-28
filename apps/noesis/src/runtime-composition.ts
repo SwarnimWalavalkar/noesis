@@ -36,8 +36,11 @@ import {
 import {
   createUserCriterionRepository,
   createWorkspaceUserCriterionPorts,
+  type NoesisConfigPatch,
+  reloadNoesisConfig,
   type ResolvedNoesisConfig,
   ThinkingLevelSchema,
+  updateNoesisConfig,
 } from "@noesis/config";
 import { type ContextFragment, compileContext } from "@noesis/context";
 import {
@@ -150,6 +153,7 @@ import type {
   NoesisTuiRuntime,
   TuiCapabilityManagementIntent,
   TuiLearningActivitySummary,
+  TuiInteractionBridge,
   TuiLearningInspection,
   TuiModelRoute,
 } from "@noesis/tui";
@@ -169,6 +173,8 @@ import {
   createWorkspaceRuntimeInternals,
   type ProtectedWorkspaceRuntime,
 } from "../../../packages/workspace/src/protected-runtime.ts";
+import { createConfigurationTools, type ConfigurationPort } from "./config-tools.ts";
+import { createSessionInspectionTool, type SessionInspectionPort } from "./session-tools.ts";
 import { createMcpManagementTools } from "./mcp-management-tools.ts";
 import { createCapabilityTools } from "./capability-tools.ts";
 import { loadLearningAuditSnapshot } from "./learning-audit-read-model.ts";
@@ -888,6 +894,8 @@ export interface ApplicationRuntimeCompositionOptions {
   readonly providerAuthStatus?: NonNullable<NoesisTuiRuntime["providerAuthStatus"]>;
   readonly authenticateProvider?: NonNullable<NoesisTuiRuntime["authenticateProvider"]>;
   readonly disconnectProvider?: NonNullable<NoesisTuiRuntime["disconnectProvider"]>;
+  /** Lets foreground tools ask the user to complete provider sign-in in the TUI. */
+  readonly interactions?: Pick<TuiInteractionBridge["handlers"], "authenticateProvider">;
 }
 export async function resolveActiveProject(root: string): Promise<ProjectRef> {
   const canonicalRoot = await realpath(root);
@@ -1602,9 +1610,43 @@ export async function createApplicationRuntimeComposition(
   options: ApplicationRuntimeCompositionOptions,
 ): Promise<ApplicationRuntime> {
   const agentDefaults = options.config.agent;
+  /** Rereads after `config.update`; context and subagent settings apply from the next turn. */
+  let liveConfig = options.config;
+  const configurationPort: ConfigurationPort = Object.freeze(
+    createConditionalObject({
+      current: () => liveConfig,
+      update: async (patch: NoesisConfigPatch) => {
+        await updateNoesisConfig(liveConfig.home, patch);
+        liveConfig = await reloadNoesisConfig(liveConfig);
+        return liveConfig;
+      },
+    } as const)
+      .addOptional(options.listModelRoutes ? { listModelRoutes: options.listModelRoutes } : undefined)
+      .addOptional(
+        options.refreshModelRoutes ? { refreshModelRoutes: options.refreshModelRoutes } : undefined,
+      )
+      .addOptional(
+        options.providerAuthStatus ? { providerAuthStatus: options.providerAuthStatus } : undefined,
+      )
+      .addOptional(
+        options.disconnectProvider ? { disconnectProvider: options.disconnectProvider } : undefined,
+      )
+      .addOptional(options.interactions ? { interactions: options.interactions } : undefined)
+      .finish(),
+  );
   const project = options.project ?? (await resolveActiveProject(process.cwd()));
   const workspace = await createWorkspaceStore(options.config.home, {
     recoverInterruptedOperations: options.recoverInterruptedOperations ?? true,
+  });
+  const sessionInspectionPort: SessionInspectionPort = Object.freeze({
+    session: async (sessionId: string) => await workspace.operational.sessions.get(sessionId),
+    completedTurns: (sessionId: string) => getTrail(sessionId).turns.length,
+    config: () => liveConfig,
+    inspectContext: async (sessionId: string) => await inspectContext(sessionId),
+    checkpoints: async (sessionId: string) => {
+      const active = await workspace.operational.contextCheckpoints.getActive(sessionId);
+      return active ? await workspace.operational.contextCheckpoints.lineage(active.checkpointId) : [];
+    },
   });
   const fileMutationCoordinator = createFileMutationCoordinator();
   const savedDefinitionMutationTails = new Map<string, Promise<void>>();
@@ -3568,6 +3610,16 @@ export async function createApplicationRuntimeComposition(
       ...programWorkflowStateTools,
       ...capabilityProgramTools,
       ...mcpTools,
+      ...(!plan.subAgentActor
+        ? [
+            ...createConfigurationTools(configurationPort, {
+              provider: plan.provider,
+              model: plan.model,
+              thinkingLevel: plan.thinkingLevel,
+            }),
+            createSessionInspectionTool(sessionInspectionPort, plan),
+          ]
+        : []),
       ...(!plan.subAgentActor && options.mcp
         ? createMcpManagementTools(options.mcp, {
             provider: plan.provider,
@@ -4971,6 +5023,10 @@ export async function createApplicationRuntimeComposition(
       "skill:*",
       "noesis-history:*",
       "mcp:*",
+      "config:noesis",
+      "session:*",
+      "providers",
+      "provider:*",
       "model:*",
       `session-compaction:${project.projectId}:*`,
     ]),
@@ -5172,8 +5228,9 @@ export async function createApplicationRuntimeComposition(
     );
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const startTrail: NoesisRuntime["startTrail"] = async (input) => {
-    const provider = input.provider ?? agentDefaults.provider;
-    const model = input.model ?? agentDefaults.model;
+    // New sessions follow the live configuration, so config.update applies without a restart.
+    const provider = input.provider ?? liveConfig.agent.provider;
+    const model = input.model ?? liveConfig.agent.model;
     options.resolveModelContext?.(provider, model);
     return await persistTrail(
       Object.freeze({
@@ -5182,7 +5239,7 @@ export async function createApplicationRuntimeComposition(
         status: "idle" as const,
         provider,
         model,
-        thinkingLevel: input.thinkingLevel ?? agentDefaults.thinkingLevel,
+        thinkingLevel: input.thinkingLevel ?? liveConfig.agent.thinkingLevel,
         runtime: agent.name,
         capabilityVersions: Object.freeze({}),
         turns: Object.freeze([]),
@@ -5276,7 +5333,7 @@ export async function createApplicationRuntimeComposition(
   const activeCompactions = new Map<string, AbortController>();
   let compactionsClosing = false;
   const modelContextLimits = (trail: TrailState) => {
-    const configuredTokenBudget = options.config.context.tokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET;
+    const configuredTokenBudget = liveConfig.context.tokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET;
     return (
       options.resolveModelContext?.(trail.provider, trail.model) ??
       Object.freeze({
@@ -5287,7 +5344,7 @@ export async function createApplicationRuntimeComposition(
   };
   const effectiveContextBudget = (trail: TrailState): number =>
     resolveContextTokenBudget(
-      options.config.context.tokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET,
+      liveConfig.context.tokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET,
       modelContextLimits(trail),
     );
   const compactorInputCapacity = (trail: TrailState): number =>
@@ -5298,16 +5355,13 @@ export async function createApplicationRuntimeComposition(
     foregroundThinkingLevel: FrozenTurnPlan["thinkingLevel"],
   ): NonNullable<FrozenTurnPlan["subAgentDefaults"]> => {
     const provider =
-      options.config.agentsSources.provider === "foreground"
-        ? foregroundProvider
-        : options.config.agents.provider;
-    const model =
-      options.config.agentsSources.model === "foreground" ? foregroundModel : options.config.agents.model;
+      liveConfig.agentsSources.provider === "foreground" ? foregroundProvider : liveConfig.agents.provider;
+    const model = liveConfig.agentsSources.model === "foreground" ? foregroundModel : liveConfig.agents.model;
     const thinkingLevel =
-      options.config.agentsSources.thinkingLevel === "foreground"
+      liveConfig.agentsSources.thinkingLevel === "foreground"
         ? foregroundThinkingLevel
-        : options.config.agents.thinkingLevel;
-    const configuredTokenBudget = options.config.context.tokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET;
+        : liveConfig.agents.thinkingLevel;
+    const configuredTokenBudget = liveConfig.context.tokenBudget ?? DEFAULT_CONTEXT_TOKEN_BUDGET;
     const limits =
       options.resolveModelContext?.(provider, model) ??
       Object.freeze({ contextWindow: configuredTokenBudget + 1, maxOutputTokens: 1 });
@@ -5585,10 +5639,11 @@ export async function createApplicationRuntimeComposition(
       trail,
       [input, currentAttachmentText].filter(Boolean).join("\n"),
     );
-    if (options.config.context.autoCompact) await serializeCompaction(trail, "automatic", historyTokenBudget);
+    if (liveConfig.context.autoCompact) await serializeCompaction(trail, "automatic", historyTokenBudget);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const running = await persistTrail(Object.freeze({ ...trail, status: "running" as const }));
-    const thinkingLevel = runOptions?.thinkingLevel ?? agentDefaults.thinkingLevel;
+    // The session's own reasoning level, set when it started from the live configuration or by /reasoning.
+    const thinkingLevel = runOptions?.thinkingLevel ?? running.thinkingLevel;
     const subAgentDefaults = frozenSubAgentDefaults(running.provider, running.model, thinkingLevel);
     try {
       const allContextMessages = await contextVisibleHistoryMessages(workspace, trailId);
@@ -5609,9 +5664,9 @@ export async function createApplicationRuntimeComposition(
       );
       if (resolvedContext.exceedsBudget)
         throw new Error(
-          options.config.context.autoCompact
+          liveConfig.context.autoCompact
             ? "Context remains over budget after compaction."
-            : "Context exceeds its budget and automatic compaction is disabled. Run /compact or enable context.autoCompact in config.json and restart Noesis.",
+            : "Context exceeds its budget and automatic compaction is disabled. Run /compact, or ask Noesis to enable context.autoCompact.",
         );
       const historyById = new Map(allHistoryMessages.map((message) => [message.messageId, message]));
       const historyMessages = Object.freeze(
