@@ -3299,6 +3299,12 @@ export async function createApplicationRuntimeComposition(
           actor,
           relationshipRefs,
         });
+        // A nested spawn originates in its parent's task, which has no foreground turn of its own.
+        // Its record inherits the foreground turn that started the lineage; the frozen plan keeps the task.
+        const parentRecord = plan.subAgentActor
+          ? await workspace.operational.subAgents.get(plan.subAgentActor.agentId)
+          : undefined;
+        if (plan.subAgentActor && !parentRecord) throw new Error("Parent subagent is unavailable");
         const sender = currentAgentAddress();
         const messageId = createId("agent_message");
         const agent: SubAgentRecord = Object.freeze(
@@ -3307,7 +3313,7 @@ export async function createApplicationRuntimeComposition(
             childSessionId,
             projectId: project.projectId,
             originSessionId: plan.sessionId,
-            originTurnId: plan.turnId,
+            originTurnId: parentRecord?.originTurnId ?? plan.turnId,
             originExecutionId: context.executionId,
             status: "starting" as const,
             frozenPlan,

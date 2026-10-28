@@ -1217,6 +1217,85 @@ describe("production codemode journey", () => {
     await runtime.shutdown();
   });
 
+  test("a subagent granted agents.spawn admits and joins its own child", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-subagent-nested-spawn-"));
+    roots.push(home);
+    const resolved = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const config = Object.freeze({
+      ...resolved,
+      learning: Object.freeze({ ...resolved.learning, enabled: false }),
+    });
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText, systemPrompt }) => {
+        const settled = context.messages.at(-1)?.role === "toolResult";
+        if (systemPrompt.includes("subagent inside Noesis")) {
+          if (lastUserText.includes("Grandchild work")) return "Grandchild result: teal";
+          if (!settled)
+            return controlledToolCallResponse(
+              "execute",
+              {
+                source:
+                  'const child = await agents.spawn({ name: "grandchild", prompt: "Grandchild work." }); return await agents.wait({ taskId: child.taskId });',
+              },
+              "call-parent-spawns-grandchild",
+            );
+          return "Parent relayed the grandchild.";
+        }
+        if (settled) return "Foreground delegation settled.";
+        return controlledToolCallResponse(
+          "execute",
+          {
+            source:
+              'const parent = await agents.spawn({ name: "parent", prompt: "Delegate to a grandchild.", tools: ["agents.spawn"] }); return await agents.wait({ taskId: parent.taskId });',
+          },
+          "call-foreground-spawns-parent",
+        );
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
+      createAgent: (_sessionTools, codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const trail = await runtime.startTrail({ title: "Nested subagent spawn acceptance" });
+
+    await expect(
+      runtime.debug.runTurn(trail.trailId, "Delegate through a parent agent."),
+    ).resolves.toMatchObject({
+      output: "Foreground delegation settled.",
+    });
+
+    const agents = await runtime.listSubAgents();
+    const parent = agents.find((agent) => agent.name === "parent");
+    const grandchild = agents.find((agent) => agent.name === "grandchild");
+    if (!parent || !grandchild) throw new Error("Expected a parent and a grandchild agent");
+    expect(grandchild.parentAgentId).toBe(parent.agentId);
+    const parentRecord = await runtime.debug.workspace.operational.subAgents.get(parent.agentId);
+    const grandchildRecord = await runtime.debug.workspace.operational.subAgents.get(grandchild.agentId);
+    expect(grandchildRecord?.originSessionId).toBe(parent.childSessionId);
+    expect(grandchildRecord?.originTurnId).toBe(parentRecord?.originTurnId);
+    expect(grandchildRecord?.frozenPlan.origin).toMatchObject({ parentAgentId: parent.agentId });
+    expect((await runtime.inspectSubAgent(grandchild.agentId)).tasks.at(-1)?.status).toBe("completed");
+    const parentTranscript = await runtime.getSubAgentTranscript(parent.agentId);
+    expect(parentTranscript).toContainEqual(
+      expect.objectContaining({ kind: "action", name: "agents.spawn", status: "completed" }),
+    );
+    expect(JSON.stringify(parentTranscript)).toContain("Grandchild result: teal");
+    await runtime.shutdown();
+  });
+
   test("the production read grant admits an explicitly named file outside the project", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-external-read-"));
     const outside = await mkdtemp(join(tmpdir(), "noesis-external-file-"));
