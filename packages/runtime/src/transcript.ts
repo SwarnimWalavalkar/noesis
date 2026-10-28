@@ -7,6 +7,7 @@ import {
   JsonValueSchema,
 } from "@noesis/domain";
 import type { NoesisWorkspaceStore, ToolCallRecord } from "@noesis/workspace";
+import { z } from "zod";
 import type {
   RuntimeTranscriptAction,
   RuntimeTranscriptEntry,
@@ -55,6 +56,19 @@ const nestedBrokerPayload = (value: unknown, field: "input" | "output"): JsonVal
   if (!isJsonObject(parsed.data) || !Object.hasOwn(parsed.data, field)) return parsed.data;
   return parsed.data[field];
 };
+/**
+ * The exact envelope the broker writes for every call it executes; its response is `{ output }` or
+ * `{ error }`. A strict shape keeps tool arguments that merely share a field name from being unwrapped.
+ */
+const BrokerRequestSchema = z.strictObject({
+  executionId: z.string().optional(),
+  catalogId: z.string(),
+  catalogDigest: z.string(),
+  turnId: z.string().optional(),
+  toolRevisionId: z.string(),
+  input: JsonValueSchema,
+});
+const isBrokerRequest = (value: unknown): boolean => BrokerRequestSchema.safeParse(value).success;
 const executionIdFrom = (...values: readonly unknown[]): string | undefined => {
   for (const value of values) {
     const parsed = JsonValueSchema.safeParse(value);
@@ -231,12 +245,14 @@ export async function loadRuntimeTranscript(
       call.parentToolCallId ??
       (executionId && call.toolName !== "execute" ? executionToTopAction.get(executionId) : undefined);
     const nested = derivedParent !== undefined;
-    const input = jsonValue(nested ? nestedBrokerPayload(call.request, "input") : call.request);
+    // Direct calls the broker executed carry the same envelope as nested ones; show the tool's own payload.
+    const brokerRecorded = nested || isBrokerRequest(call.request);
+    const input = jsonValue(brokerRecorded ? nestedBrokerPayload(call.request, "input") : call.request);
     const update = call.update === undefined ? undefined : jsonValue(call.update);
     const output =
       call.response === undefined
         ? undefined
-        : jsonValue(nested ? nestedBrokerPayload(call.response, "output") : call.response);
+        : jsonValue(brokerRecorded ? nestedBrokerPayload(call.response, "output") : call.response);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const action = Object.freeze(
       createConditionalObject({

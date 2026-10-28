@@ -276,6 +276,11 @@ describe("production codemode journey", () => {
         }),
     });
     const trail = await runtime.startTrail({ title: "Tool-using subagent acceptance" });
+    const liveActionIds: string[] = [];
+    const stopLive = runtime.subscribeSubAgents((event) => {
+      if (event.type === "live" && event.event.type === "tool-start")
+        liveActionIds.push(event.event.actionId);
+    });
 
     const result = await runtime.debug.runTurn(trail.trailId, "Delegate one bounded file read.");
 
@@ -293,6 +298,21 @@ describe("production codemode journey", () => {
     const childTranscript = await runtime.getSubAgentTranscript(summary.agentId);
     expect(childTranscript).toContainEqual(
       expect.objectContaining({ kind: "action", name: "files.read", status: "completed" }),
+    );
+    stopLive();
+    // Live observers and the durable transcript name each child action identically, and a direct
+    // call's durable row exposes the tool's own input rather than the broker envelope.
+    expect(liveActionIds.length).toBeGreaterThan(0);
+    expect(childTranscript.flatMap((entry) => (entry.kind === "action" ? [entry.actionId] : []))).toEqual(
+      expect.arrayContaining(liveActionIds),
+    );
+    expect(childTranscript).toContainEqual(
+      expect.objectContaining({
+        kind: "action",
+        name: "files.read",
+        input: expect.objectContaining({ path: "package.json" }),
+        output: expect.objectContaining({ totalLines: expect.any(Number) }),
+      }),
     );
     const modelCalls = await runtime.debug.workspace.operational.subAgents.listModelCalls(
       summary.latestTaskId,

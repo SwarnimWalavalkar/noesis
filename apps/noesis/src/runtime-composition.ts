@@ -4863,7 +4863,9 @@ export async function createApplicationRuntimeComposition(
                   );
                 enqueue(async () => {
                   await persistSubAgentAction(record.childSessionId, task.taskId, event);
-                  emit(event);
+                  // Live observers see the durable identity, so a transcript reload replaces the
+                  // same action instead of duplicating it.
+                  emit(durable);
                 });
               } else if (event.type === "assistant-message" || event.type === "reasoning-message")
                 enqueue(async () => {
