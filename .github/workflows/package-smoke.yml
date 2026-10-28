@@ -22,6 +22,7 @@ on:
       - "packages/workspace/migrations/**"
       - "packages/codemode/src/runner.mjs"
       - "scripts/test-package.mjs"
+      - "scripts/stage-release.mjs"
       - "scripts/verify-release*"
       - ".github/workflows/**"
   push:
@@ -45,6 +46,7 @@ on:
       - "packages/workspace/migrations/**"
       - "packages/codemode/src/runner.mjs"
       - "scripts/test-package.mjs"
+      - "scripts/stage-release.mjs"
       - "scripts/verify-release*"
       - ".github/workflows/**"
 

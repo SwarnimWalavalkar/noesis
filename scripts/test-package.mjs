@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { copyFile, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { resolve } from "import-meta-resolve";
+import { stageRelease } from "./stage-release.mjs";
 
 const execute = promisify(execFile);
 const repositoryRoot = new URL("../", import.meta.url);
@@ -31,15 +32,16 @@ try {
   const installRoot = join(temporaryRoot, "install");
   const home = join(temporaryRoot, "home");
   const project = join(temporaryRoot, "project");
+  const stage = join(temporaryRoot, "stage");
   await Promise.all([mkdir(packDirectory, { recursive: true }), mkdir(project, { recursive: true })]);
-  const packed = await run("npm", [
-    "pack",
-    "--json",
-    "--pack-destination",
-    packDirectory,
-    "--cache",
-    npmCache,
-  ]);
+  await stageRelease(stage, { npmCache });
+  const packed = await run(
+    "npm",
+    ["pack", "--json", "--pack-destination", packDirectory, "--cache", npmCache],
+    {
+      cwd: stage,
+    },
+  );
   const reportStart = packed.stdout.lastIndexOf("\n[");
   const reportJson = reportStart === -1 ? packed.stdout : packed.stdout.slice(reportStart + 1);
   const [report] = JSON.parse(reportJson);
@@ -58,17 +60,21 @@ try {
     "dist/packages/codemode/src/runner.mjs",
     "dist/packages/workspace/migrations/001_operational.sql",
     "dist/packages/workspace/migrations/048_process_scoped_subagents.sql",
+    "dist/node_modules/@earendil-works/pi-coding-agent/package.json",
   ]) {
     requireCondition(packedPaths.has(required), `Packed artifact is missing ${required}`);
   }
+  // Vendored third-party packages keep their published layout, including type declarations and maps.
   const forbidden = [...packedPaths].find(
     (path) =>
-      path.includes("/.noesis/") ||
-      path.includes("/.env") ||
-      path.includes("/test/") ||
-      path.startsWith("plans/") ||
-      path.endsWith(".map") ||
-      path.endsWith(".ts"),
+      path.endsWith("npm-shrinkwrap.json") ||
+      (!path.startsWith("dist/node_modules/") &&
+        (path.includes("/.noesis/") ||
+          path.includes("/.env") ||
+          path.includes("/test/") ||
+          path.startsWith("plans/") ||
+          path.endsWith(".map") ||
+          path.endsWith(".ts"))),
   );
   requireCondition(forbidden === undefined, `Packed artifact contains forbidden path ${forbidden}`);
   const archive = join(packDirectory, report.filename);
@@ -113,6 +119,20 @@ try {
     !JSON.stringify(manifest).includes("workspace:"),
     "Installed manifest contains workspace dependencies",
   );
+  const runtimeEntry = pathToFileURL(
+    join(packageRoot, "dist/packages/runtime-pi/src/session-lifecycle.js"),
+  ).href;
+  requireCondition(
+    resolve("@earendil-works/pi-coding-agent", runtimeEntry).startsWith(
+      pathToFileURL(join(await realpath(packageRoot), "dist/node_modules/@earendil-works/pi-coding-agent/"))
+        .href,
+    ),
+    "Installed runtime does not use the vendored Pi coding agent",
+  );
+  requireCondition(
+    manifest.dependencies["@earendil-works/pi-coding-agent"] === undefined,
+    "Installed manifest still installs the shrinkwrapped Pi coding agent",
+  );
   // Verify the SDK consumes the published safe pin, not a separate vulnerable nested copy.
   const consumerBase = pathToFileURL(join(packageRoot, "package.json")).href;
   const sdkEntry = resolve("@modelcontextprotocol/sdk/server/index.js", consumerBase);
@@ -151,7 +171,7 @@ try {
     await codeMode.shutdown();
   }
 
-  // Use the consumer's module graph, including shrinkwrapped nested Pi copies.
+  // Use the built code's module graph, which resolves Pi's coding agent to the vendored copy.
   // A referenced timer makes missed cleanup an observable process-exit failure.
   await run(
     process.execPath,
@@ -160,7 +180,7 @@ try {
       "-e",
       `
     import { resolve } from ${JSON.stringify(resolve("import-meta-resolve", pathToFileURL(join(packageRoot, "package.json")).href))};
-    const base = ${JSON.stringify(pathToFileURL(join(packageRoot, "package.json")).href)};
+    const base = ${JSON.stringify(runtimeEntry)};
     const owners = [...new Set([
       resolve("@earendil-works/pi-ai", base),
       ...["@earendil-works/pi-coding-agent", "@earendil-works/pi-agent-core"].map(owner =>
@@ -173,7 +193,7 @@ try {
       const timer = setInterval(() => {}, 1000);
       unregister.push(resources.registerSessionResourceCleanup(id => { clearInterval(timer); seen.push(id); }));
     }
-    const { createEphemeralPiSession } = await import(${JSON.stringify(pathToFileURL(join(packageRoot, "dist/packages/runtime-pi/src/session-lifecycle.js")).href)});
+    const { createEphemeralPiSession } = await import(${JSON.stringify(runtimeEntry)});
     const session = await createEphemeralPiSession();
     await session.close();
     if (seen.length !== owners.length || seen.some(id => id !== session.session.metadata.id + ":main"))

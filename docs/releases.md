@@ -35,6 +35,8 @@ PACKAGE_OUTPUT_DIR="$(mktemp -d)" pnpm package:smoke
 
 The smoke test builds and installs the package in a temporary directory, exercises the installed CLI and runtime, and copies the exact tested tarball to `PACKAGE_OUTPUT_DIR` only after success. It refuses to overwrite an existing archive. Without that variable, it removes the temporary package after testing. None of these commands publishes to npm or creates a GitHub release.
 
+The published package is packed from a staging directory, not the repository root. `scripts/stage-release.mjs` builds the release and vendors `@earendil-works/pi-coding-agent` under `dist/node_modules` without its `npm-shrinkwrap.json`. That shrinkwrap pins transitive dependencies that npm installs for every user, and npm ignores our overrides inside it. The staged manifest declares Pi's dependencies instead, raising any pin that a `pnpm.overrides` security patch covers, so users receive the patched versions. Running `npm pack` at the repository root does not produce a releasable package.
+
 ## Failed releases
 
 A failed check prevents npm publishing. Inspect the Actions logs before retrying. The workflow preserves the tested tarball as an Actions artifact before uploading it to the release.
