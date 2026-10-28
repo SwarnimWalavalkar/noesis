@@ -40,7 +40,7 @@ The full transcript before this turn is the codemode `context` object, not part 
 `session.update({ thinkingLevel?, title? })` changes the running session:
 
 - `thinkingLevel` must be one the session's model supports; `providers.list({ provider })` lists them. Settings are frozen when a turn starts, so the new level applies from the next turn. Tell the user that.
-- `title` names the session in `/resume`. Sessions start named after their model, so offer a short descriptive title when the user asks or when the topic is clear.
+- `title` is the session's stored name. Sessions start with a generic one such as `Noesis session`. `history.*` searches match past sessions by title, and `/resume` shows the title when a session has no message preview yet. Set a short descriptive title when the user asks.
 
 Two session changes stay with the user. Explain why and name the command instead of trying a workaround:
 

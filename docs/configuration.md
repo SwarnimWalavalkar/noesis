@@ -43,15 +43,15 @@ Earlier versions also accepted `learning`, `autonomy`, and `experiments` section
 
 You can ask Noesis what it can change about itself, or ask for a specific change, such as "use Claude for subagents" or "lower the context budget to 96k". The bundled `noesis` skill guides the agent. It uses these tools through codemode:
 
-| Tool                     | What it does                                                                                                                                                                   |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `config.inspect`         | Shows the stored settings, the effective values, where each foreground model value came from, and what each setting does.                                                      |
-| `config.update`          | Validates and writes one change. `null` clears a field: foreground fields fall back to their defaults, and subagent fields inherit the foreground route.                       |
-| `providers.list`         | Lists providers and their sign-in status. With a provider, lists its models and reasoning levels.                                                                              |
-| `providers.authenticate` | Opens the same sign-in overlay as `/provider` and waits for you to finish.                                                                                                     |
-| `providers.logout`       | Removes stored credentials for a provider.                                                                                                                                     |
-| `session.inspect`        | Shows the model the current session runs, how full its context is, its compaction history, and this turn's permissions.                                                        |
-| `session.update`         | Changes the current session's reasoning level, from the next turn, or its title. The model, provider, and compaction stay with you: use `/model`, `/provider`, and `/compact`. |
+| Tool                     | What it does                                                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config.inspect`         | Shows the stored settings, the effective values, where each foreground model value came from, and what each setting does.                                                       |
+| `config.update`          | Validates and writes one change. `null` clears a field: foreground fields fall back to their defaults, and subagent fields inherit the foreground route.                        |
+| `providers.list`         | Lists providers and their sign-in status. With a provider, lists its models and reasoning levels.                                                                               |
+| `providers.authenticate` | Opens the same sign-in overlay as `/provider` and waits for you to finish.                                                                                                      |
+| `providers.logout`       | Removes stored credentials for a provider.                                                                                                                                      |
+| `session.inspect`        | Shows the current session's title, the model it runs, the reasoning level the next turn will use, how full its context is, its compaction history, and this turn's permissions. |
+| `session.update`         | Changes the current session's reasoning level, from the next turn, or its title. The model, provider, and compaction stay with you: use `/model`, `/provider`, and `/compact`.  |
 
 Changes made this way apply without a restart where possible:
 

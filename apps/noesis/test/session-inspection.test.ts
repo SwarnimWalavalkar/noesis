@@ -118,7 +118,11 @@ test("Pi codemode changes the session's reasoning level and title, effective fro
     } catch (error) {
       unsupported = String(error?.message ?? error);
     }
-    const updated = await tools.session.update({ thinkingLevel: "off", title: "Session control" });
+    // Concurrent updates must not overwrite each other.
+    const updated = await Promise.all([
+      tools.session.update({ title: "Session control" }),
+      tools.session.update({ thinkingLevel: "off" }),
+    ]);
     const inspected = await tools.session.inspect({});
     return { unsupported, updated, route: inspected.route, title: inspected.session.title };
   `;
@@ -155,13 +159,12 @@ test("Pi codemode changes the session's reasoning level and title, effective fro
     const calls = await runtime.debug.workspace.operational.toolCalls.listForSession(trail.trailId);
     const program = calls.find((call) => call.toolName === "execute");
     expect(JSON.stringify(program?.response)).toContain("does not support reasoning level low");
-    expect(
-      calls.find((call) => call.toolName === "session.update" && call.status === "completed")?.response,
-    ).toEqual({
+    const updates = calls.filter((call) => call.toolName === "session.update" && call.status === "completed");
+    expect(updates).toHaveLength(2);
+    expect(updates[0]?.response).toMatchObject({
       output: {
         sessionId: trail.trailId,
         previous: { title: "controlled/model", thinkingLevel: "high" },
-        current: { title: "Session control", thinkingLevel: "off" },
         appliesWhen:
           "The reasoning level applies from the next turn; this turn keeps high. The title applies now.",
       },

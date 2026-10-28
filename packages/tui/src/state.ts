@@ -378,6 +378,12 @@ export type NoesisTuiAction =
       readonly reasoningLevel: RuntimeAgentDefaults["thinkingLevel"];
     }
   | {
+      /** The session's own settings, which the agent may change during a turn. */
+      readonly type: "session-settings-synced";
+      readonly title: string;
+      readonly reasoningLevel: RuntimeAgentDefaults["thinkingLevel"];
+    }
+  | {
       readonly type: "model-metadata";
       readonly provider: string;
       readonly model: string;
@@ -930,6 +936,8 @@ export function reduceTui(state: NoesisTuiState, action: NoesisTuiAction): Noesi
         : { ...state, animationFrame: state.animationFrame + 1 };
     case "reasoning-level-changed":
       return { ...state, reasoningLevel: action.reasoningLevel };
+    case "session-settings-synced":
+      return { ...state, title: action.title, reasoningLevel: action.reasoningLevel };
     case "model-metadata":
       return { ...state, provider: action.provider, model: action.model };
     case "usage-updated":

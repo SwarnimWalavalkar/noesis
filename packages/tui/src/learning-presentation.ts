@@ -132,8 +132,8 @@ export async function settledTurnPresentation(
   ]);
   const actions: NoesisTuiAction[] = [
     { type: "transcript-hydrated", trailId: request.trailId, transcript },
-    // The agent may have changed the session's reasoning level during the turn.
-    { type: "reasoning-level-changed", reasoningLevel: trail.thinkingLevel },
+    // The agent may have changed the session's title or reasoning level during the turn.
+    { type: "session-settings-synced", title: trail.title, reasoningLevel: trail.thinkingLevel },
   ];
   if (request.outcome === "completed" && trail.context)
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.

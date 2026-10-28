@@ -1,5 +1,6 @@
 import type { AgentContextInspection, FrozenTurnPlan } from "@noesis/agent-types";
 import { ThinkingLevelSchema, type ResolvedNoesisConfig } from "@noesis/config";
+import { createConditionalObject } from "@noesis/domain";
 import { defineTool, type ToolDefinition } from "@noesis/tools";
 import type { TuiModelRoute } from "@noesis/tui";
 import type { ContextCheckpointRecord, SessionRecord } from "@noesis/workspace";
@@ -12,11 +13,11 @@ export interface SessionPort {
     readonly title: string;
     readonly thinkingLevel: FrozenTurnPlan["thinkingLevel"];
   };
-  readonly setThinkingLevel: (
+  /** Applies the given settings together in one write. */
+  readonly updateSettings: (
     sessionId: string,
-    thinkingLevel: FrozenTurnPlan["thinkingLevel"],
+    change: { readonly title?: string; readonly thinkingLevel?: FrozenTurnPlan["thinkingLevel"] },
   ) => Promise<void>;
-  readonly setTitle: (sessionId: string, title: string) => Promise<void>;
   /** The model catalog, for checking which reasoning levels the session's model supports. */
   readonly modelRoutes: () => readonly Pick<TuiModelRoute, "provider" | "model" | "thinkingLevels">[];
   readonly completedTurns: (sessionId: string) => number;
@@ -244,9 +245,14 @@ function createSessionUpdateTool(port: SessionPort, plan: FrozenTurnPlan): ToolD
           throw new Error(
             `${plan.provider}/${plan.model} does not support reasoning level ${thinkingLevel}. Supported: ${route.thinkingLevels.join(", ")}`,
           );
-        await port.setThinkingLevel(plan.sessionId, thinkingLevel);
       }
-      if (title !== undefined) await port.setTitle(plan.sessionId, title);
+      await port.updateSettings(
+        plan.sessionId,
+        createConditionalObject({})
+          .addOptional(thinkingLevel !== undefined ? { thinkingLevel } : undefined)
+          .addOptional(title !== undefined ? { title } : undefined)
+          .finish(),
+      );
       const current = port.settings(plan.sessionId);
       return {
         sessionId: plan.sessionId,
