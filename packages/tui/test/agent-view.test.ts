@@ -142,6 +142,22 @@ describe("subagent view", () => {
     ]);
   });
 
+  test("a reload read before a tool finished keeps the live result", () => {
+    const finished = {
+      kind: "action",
+      actionId: "shell-1",
+      name: "shell.run",
+      status: "completed",
+      output: "ok",
+    } as const;
+    expect(
+      mergeDurableTimeline(
+        [{ kind: "action", actionId: "shell-1", name: "shell.run", status: "running" }],
+        [finished],
+      ),
+    ).toEqual([finished]);
+  });
+
   test("a reload keeps only live text that no newer durable entry holds", () => {
     const earlier = { kind: "message", messageId: "m-old", role: "assistant", text: "Done." } as const;
     const anchor = { kind: "action", actionId: "read-1", name: "files.read", status: "completed" } as const;

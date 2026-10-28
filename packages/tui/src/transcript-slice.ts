@@ -218,5 +218,14 @@ export function mergeDurableTimeline(
     if (remaining && entry.kind !== "action")
       tail.push(remaining === entry.text ? entry : { ...entry, text: remaining });
   }
-  return [...durable, ...tail];
+  // A snapshot read before a tool-end must not regress an action the live stream already settled.
+  const settled = new Map(
+    previous.flatMap((entry) =>
+      entry.kind === "action" && entry.status !== "running" ? [[entry.actionId, entry] as const] : [],
+    ),
+  );
+  const current = durable.map((entry) =>
+    entry.kind === "action" && entry.status === "running" ? (settled.get(entry.actionId) ?? entry) : entry,
+  );
+  return [...current, ...tail];
 }
