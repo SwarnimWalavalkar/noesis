@@ -318,6 +318,8 @@ async function freezeContextDocument(
 export interface TurnIntelligencePlanner {
   readonly planAndAdmit: (request: TurnPlanningRequest) => Promise<FrozenTurnPlan>;
 }
+/** The total guidance that always-active Capabilities may add to one prompt. */
+export const ALWAYS_GUIDANCE_ALLOWANCE_CHARACTERS = 6_000;
 export interface TurnRoutingHistoryMessage {
   readonly attachments?: readonly ComposerAttachment[];
   readonly messageId: string;
@@ -664,7 +666,28 @@ export function createTurnIntelligencePlanner(
         ),
       );
     }
-    const promptLayers = selections.flatMap((selection) =>
+    // Always-active guidance shares one allowance. A Capability past it is listed on demand for
+    // this turn instead of growing every prompt.
+    let alwaysCharacters = 0;
+    const deliveredSelections = selections.map((selection) => {
+      if (selection.delivery !== "prompt" || selection.baseline.kind === "genesis" || !selection.effects)
+        return selection;
+      const characters = selection.effects
+        .flatMap((effect) =>
+          effect.kind === "instruction" ? [capabilityGuidance(effect.material.content)] : [],
+        )
+        .reduce((total, guidance) => total + guidance.length, 0);
+      if (alwaysCharacters + characters <= ALWAYS_GUIDANCE_ALLOWANCE_CHARACTERS) {
+        alwaysCharacters += characters;
+        return selection;
+      }
+      return Object.freeze({
+        ...selection,
+        delivery: "on_demand" as const,
+        selectionReason: "always active, listed on demand because always guidance exceeded its allowance",
+      });
+    });
+    const promptLayers = deliveredSelections.flatMap((selection) =>
       selection.delivery === "on_demand"
         ? []
         : selection.effects
@@ -686,7 +709,7 @@ export function createTurnIntelligencePlanner(
         project: options.project,
         activationId: activation.activationId,
         activationRevision: activation.revision,
-        selectedCapabilities: Object.freeze(selections),
+        selectedCapabilities: Object.freeze(deliveredSelections),
         conversationHistory,
         contextDocument,
       } as const)
@@ -717,7 +740,7 @@ export function createTurnIntelligencePlanner(
           provider: request.provider,
           model: request.model,
           thinkingLevel: request.thinkingLevel,
-          permissionSnapshot: mergedPermissions(selections, options.basePermissionManifest),
+          permissionSnapshot: mergedPermissions(deliveredSelections, options.basePermissionManifest),
           retrievalCitations: Object.freeze([...(request.retrievalCitations ?? [])]),
           routing: Object.freeze({
             strategyId: "capability-skill-index-v1",

@@ -10,7 +10,11 @@ import {
 } from "@noesis/domain";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
-import { capabilityDocumentRevision, createCapabilityPublisher } from "../src/capability-publisher.ts";
+import {
+  capabilityDocumentRevision,
+  capabilityWorkingDocumentPath,
+  createCapabilityPublisher,
+} from "../src/capability-publisher.ts";
 
 const opened: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
 afterEach(async () => {
@@ -113,7 +117,40 @@ describe("Capability files", () => {
     );
     if (created.status !== "activated") throw new Error("Expected activation");
     const before = await current(workspace, created.capabilityId);
-    const file = join(root, before.document.workingPath);
+    const file = join(root, capabilityWorkingDocumentPath(before.document));
+
+    // A publication that fails, here because the Program does not exist, leaves the file alone and
+    // is never mistaken for a user edit.
+    await expect(
+      publisher.publish(
+        {
+          decision: "revise",
+          capabilityId: created.capabilityId,
+          expectedBindingRevision: before.binding.revisionNumber,
+          proposal: {
+            name: "Use pnpm",
+            description: "Use pnpm for package commands.",
+            applicability: "Package commands in this repository.",
+            summary: "Attach a missing script.",
+            rationale: "Fixture.",
+            anticipatedEffect: "None.",
+            effects: [
+              { kind: "instruction", content: "Rejected guidance." },
+              { kind: "program", mode: "script", name: "missing-script" },
+            ],
+            consequence: "ordinary",
+            consequenceDescription: "Fixture.",
+          },
+        },
+        context,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("Unknown saved script Program missing-script");
+    expect(
+      new TextDecoder().decode(
+        await workspace.reads.readWorkingFile(capabilityWorkingDocumentPath(before.document)),
+      ),
+    ).not.toContain("Rejected guidance.");
 
     // Nothing changed, so nothing is recorded.
     await expect(publisher.recordDocumentEdits(context, new AbortController().signal)).resolves.toEqual({
@@ -134,7 +171,9 @@ describe("Capability files", () => {
     expect(after.binding.revision.capabilityRevisionId).not.toBe(
       before.binding.revision.capabilityRevisionId,
     );
-    expect(after.document.workingPath).toBe(before.document.workingPath);
+    expect(capabilityWorkingDocumentPath(after.document)).toBe(
+      capabilityWorkingDocumentPath(before.document),
+    );
     expect(
       capabilityGuidance(new TextDecoder().decode(await workspace.reads.readRevision(after.document))),
     ).toBe("Run pnpm, not npm. Use pnpm dlx instead of npx.");
@@ -163,13 +202,50 @@ describe("Capability files", () => {
       new AbortController().signal,
     );
     expect(restored).toMatchObject({ status: "restored" });
-    expect(new TextDecoder().decode(await workspace.reads.readWorkingFile(before.document.workingPath))).toBe(
-      new TextDecoder().decode(await workspace.reads.readRevision(before.document)),
-    );
+    expect(
+      new TextDecoder().decode(
+        await workspace.reads.readWorkingFile(capabilityWorkingDocumentPath(before.document)),
+      ),
+    ).toBe(new TextDecoder().decode(await workspace.reads.readRevision(before.document)));
     await expect(publisher.recordDocumentEdits(context, new AbortController().signal)).resolves.toEqual({
       recorded: [],
       problems: [],
     });
+    // The restored file's "when" text is the Capability's applicability again.
+    expect(await workspace.capabilities.getDefinition(created.capabilityId)).toMatchObject({
+      applicability: "Package commands in this repository.",
+    });
+  });
+
+  test("keeps always-active guidance short", async () => {
+    const { publisher, context } = await setup();
+    const proposal = {
+      name: "Long rules",
+      description: "Many rules.",
+      applicability: "Every turn.",
+      summary: "Long rules.",
+      rationale: "Fixture.",
+      anticipatedEffect: "None.",
+      effects: [{ kind: "instruction" as const, content: "x".repeat(2_001) }],
+      consequence: "ordinary" as const,
+      consequenceDescription: "Fixture.",
+    };
+    await expect(
+      publisher.publish(
+        { decision: "create", proposal: { ...proposal, activationMode: "always" } },
+        context,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("at most 2000 characters");
+    const relevant = await publisher.publish(
+      { decision: "create", proposal },
+      context,
+      new AbortController().signal,
+    );
+    if (relevant.status !== "activated") throw new Error("Expected activation");
+    await expect(publisher.assertCurrentGuidanceFitsAlways(relevant.capabilityId)).rejects.toThrow(
+      "at most 2000 characters",
+    );
   });
 
   test("moves a Capability made before Capability files into a file", async () => {

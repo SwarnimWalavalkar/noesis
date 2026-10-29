@@ -428,11 +428,14 @@ Built:
 - Phase 4. The router role and its model call are gone. An `always` Capability goes into the prompt. A `relevant` Capability is listed as a learned skill named `learned-<name>-<id hash>`, and the model loads it with `skills.load`.
 - Phase 5. Migration 053 adds `capability_outcomes`. The reflector sees the Capabilities a turn used, with their track records, and judges each one. A revision with two hurt results and no helped result is paused automatically. `capabilities.inspect` and `/learning` show the track record and the evidence claim.
 - Phase 7. A session review runs 30 minutes after a session's last turn. It uses a prepared packet of the session's requests, matching earlier sessions, and all Capabilities with their track records, and it publishes at most three decisions through the same publisher.
-- Phase 8, first half. `noesis learning report` prints the measures listed above.
+- Phase 8, first half. `noesis learning report [--days N]` prints the measures listed above. Reflection and session-review jobs now store their model's token usage, so the report includes cost. "Corrections after learning" is the share of judged uses that the reflector marked hurt.
+- `always` guidance is limited to 2,000 characters per Capability, and all `always` guidance shares a 6,000 character allowance per turn. A Capability past the allowance is listed on demand for that turn.
+- A session review's published change is announced on the next turn that settles after it, in the session being used.
 
 Changed from the plan:
 
 - The session reviewer has no tools. A prepared packet was simpler and fits the existing role runner. As a result it cannot author new Programs yet. It can still create, revise, pause, and rescope Capabilities.
+- Session scope stays. The plan proposed removing it, but it is a narrow, explicit choice that the model or user makes, existing bindings use it, and removing it would need a migration for no gain in this change.
 - The large-index retrieval fallback is not built. Today's installs have at most 27 Capabilities, so the full index fits.
 
 - Phase 6, built differently from the plan. Each Capability has one Markdown file under `~/.noesis/definitions/capabilities/<name>-<id>.md`, and every revision pins an immutable snapshot of it. The working file is the editable source for the name, the "when" text, and the guidance. Before each turn and when `/learning` opens, Noesis records direct edits as new revisions through the publisher. It leaves an unreadable edit in place and reports it in `/learning`. A restore or a gate approval rewrites the working file to match. At startup, Noesis moves every older Capability into a file as a new revision. Status, scope, and mode stay in the SQLite binding instead of the frontmatter. They change often, and keeping them in SQLite keeps compare and swap and avoids a second copy. Instruction and skill drafts now become one guidance body.

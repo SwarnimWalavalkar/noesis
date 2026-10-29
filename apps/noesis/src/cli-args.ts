@@ -12,6 +12,8 @@ export interface CliInput {
   readonly skillScope?: "personal" | "workspace";
   readonly workspaceTrusted: boolean;
   readonly home: string;
+  /** `learning report --days N` limits the report to the last N days. */
+  readonly sinceDays?: number;
   readonly overrides: ConfigOverrides;
   readonly session:
     | {
@@ -47,7 +49,7 @@ const SKILL_COMMANDS = new Set(["list", "install", "update", "remove"]);
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const AGENT_OPTIONS = ["--provider", "--model", "--thinking-level"] as const;
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-const VALUE_OPTIONS = ["--home", ...AGENT_OPTIONS] as const;
+const VALUE_OPTIONS = ["--home", "--days", ...AGENT_OPTIONS] as const;
 function parseSessionStartup(
   args: readonly string[],
   command: string,
@@ -178,6 +180,7 @@ export function parseArgs(argv: readonly string[]): CliInput {
     allowedOptions.add("--continue");
     allowedOptions.add("--trust-workspace");
   }
+  if (command === "learning") allowedOptions.add("--days");
   if (command === "skills") {
     allowedOptions.add("--workspace");
     allowedOptions.add("--trust-workspace");
@@ -197,6 +200,10 @@ export function parseArgs(argv: readonly string[]): CliInput {
   const home = resolve(
     optionValues.get("--home") ?? process.env["NOESIS_HOME"] ?? join(homedir(), ".noesis"),
   );
+  const daysValue = optionValues.get("--days");
+  const sinceDays = daysValue === undefined ? undefined : Number(daysValue);
+  if (sinceDays !== undefined && (!Number.isInteger(sinceDays) || sinceDays < 1))
+    throw new Error("--days must be a whole number of days, at least 1");
   const provider = optionValues.get("--provider");
   const model = optionValues.get("--model");
   const thinkingLevel = optionValues.get("--thinking-level");
@@ -208,6 +215,7 @@ export function parseArgs(argv: readonly string[]): CliInput {
     .addOptional(subcommand ? { subcommand } : undefined)
     .addOptional(authProvider ? { authProvider } : undefined)
     .addOptional(skillSource ? { skillSource } : undefined)
+    .addOptional(sinceDays === undefined ? undefined : { sinceDays })
     .addOptional(
       command === "skills"
         ? {

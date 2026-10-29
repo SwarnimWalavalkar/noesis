@@ -1,4 +1,4 @@
-import type { AgentMessage, StructuredInferencePort } from "@noesis/agent-types";
+import type { AgentMessage, AgentUsage, StructuredInferencePort } from "@noesis/agent-types";
 import { capabilityEffects } from "@noesis/capabilities";
 import {
   type CapabilityBinding,
@@ -72,6 +72,8 @@ export type SessionReviewResult =
   | {
       readonly status: "reviewed";
       readonly summary: string;
+      /** The review model's token usage. */
+      readonly usage: AgentUsage;
       readonly results: readonly CapabilityPublicationResult[];
     };
 
@@ -258,6 +260,7 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
     return Object.freeze({
       status: "reviewed",
       summary: inferred.value.summary,
+      usage: inferred.trace.usage,
       results: Object.freeze(results),
     });
   };

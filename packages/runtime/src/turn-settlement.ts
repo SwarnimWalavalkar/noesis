@@ -273,6 +273,10 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
           ),
           project: options.project,
           selectedCapabilities: serving,
+          // The frozen plan, not the current binding, says which guidance the model saw.
+          promptCapabilityIds: request.plan.selectedCapabilities
+            .filter((selection) => selection.delivery !== "on_demand")
+            .map((selection) => selection.capabilityId),
         });
         return reflection.job.jobId;
       } catch (error) {

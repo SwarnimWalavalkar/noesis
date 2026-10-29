@@ -69,7 +69,7 @@ Noesis should collaborate with the user when a problem is unclear or calls for j
 
 ### Changes the user can understand
 
-Noesis may change its own instructions and abilities. It can publish and use a project Program in script or workflow mode during a foreground turn. Ambient reflection can create a Capability with exact Instruction, Skill, or Program effects. The foreground agent can author the same complete Capability decision deliberately while it works with the user, without asking a second reflector to reinterpret it. Each Capability must connect an observed problem to evidence and a clear future use.
+Noesis may change its own instructions and abilities. It can publish and use a project Program in script or workflow mode during a foreground turn. Ambient reflection can create a Capability with exact guidance, kept in one readable file the user can edit, and may attach a saved Program. The foreground agent can author the same complete Capability decision deliberately while it works with the user, without asking a second reflector to reinterpret it. Each Capability must connect an observed problem to evidence and a clear future use.
 
 Useful changes should not require approval at every step. The user can still inspect, challenge, keep, or reverse them.
 

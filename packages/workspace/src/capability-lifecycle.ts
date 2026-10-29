@@ -1089,7 +1089,23 @@ export function createCapabilityLifecycleStore(
         .map(decodeOutcome),
     );
   };
+  const updateDefinition: CapabilityLifecycleStore["updateDefinition"] = async (input) => {
+    const definition = CapabilityDefinitionSchema.parse(input);
+    options.database.transaction(() => {
+      const existing = decodeDefinition(
+        db.prepare("SELECT definition_json FROM capabilities WHERE capability_id = ?").get(definition.capabilityId),
+      );
+      if (!existing) throw new Error(`Unknown capability ${definition.capabilityId}`);
+      if (existing.createdAt !== definition.createdAt)
+        throw new Error("A Capability's creation time cannot change");
+      db.prepare("UPDATE capabilities SET definition_json = ? WHERE capability_id = ?").run(
+        canonicalJson(definition),
+        definition.capabilityId,
+      );
+    });
+  };
   return Object.freeze({
+    updateDefinition,
     recordOutcomes,
     trackRecords,
     listOutcomes,

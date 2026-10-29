@@ -5,7 +5,11 @@ import { capabilityEffects, createAtomicCapabilityRegistry } from "@noesis/capab
 import { parseCapabilityDocument } from "@noesis/domain";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
-import { CapabilityProposalSchema, createCapabilityPublisher } from "../src/capability-publisher.ts";
+import {
+  CapabilityProposalSchema,
+  capabilityWorkingDocumentPath,
+  createCapabilityPublisher,
+} from "../src/capability-publisher.ts";
 
 const opened: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
 
@@ -140,7 +144,7 @@ describe("Capability publisher", () => {
     expect(initialEffects.map((effect) => effect.kind)).toEqual(["instruction"]);
     const instruction = initialEffects[0];
     if (instruction?.kind !== "instruction") throw new Error("Expected an instruction effect");
-    expect(instruction.material.workingPath).toMatch(
+    expect(capabilityWorkingDocumentPath(instruction.material)).toMatch(
       /^definitions\/capabilities\/evidence-led-review-[a-f0-9]{6}\.md$/u,
     );
     const document = new TextDecoder().decode(await workspace.reads.readRevision(instruction.material));
@@ -151,7 +155,9 @@ describe("Capability publisher", () => {
     expect(document).toContain("## Why");
     // The working file is the same document, so the user can open and edit it.
     expect(
-      new TextDecoder().decode(await workspace.reads.readWorkingFile(instruction.material.workingPath)),
+      new TextDecoder().decode(
+        await workspace.reads.readWorkingFile(capabilityWorkingDocumentPath(instruction.material)),
+      ),
     ).toBe(document);
 
     await expect(

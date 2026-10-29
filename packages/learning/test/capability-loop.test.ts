@@ -978,6 +978,8 @@ describe("Capability learning loop", () => {
           }),
           project,
           selectedCapabilities: [binding.revision],
+          // The frozen plan delivered this Capability on demand, not in the prompt.
+          promptCapabilityIds: [],
         }),
         new AbortController().signal,
       );
@@ -994,16 +996,30 @@ describe("Capability learning loop", () => {
         capabilityRevisionId: binding.revision.capabilityRevisionId,
         name: "Format after edits",
         how: "loaded_by_model",
+        guidance: "Run the formatter after every edit.",
         trackRecord: { helped: 0, hurt: 0, unclear: 0 },
       },
     ]);
     expect((await workspace.capabilities.getBinding("capability-format"))?.state).toBe("active");
 
+    // A mode change after the turn does not change how the turn used the Capability.
+    const current = await workspace.capabilities.getBinding("capability-format");
+    if (!current) throw new Error("Expected the Capability binding");
+    await workspace.capabilities.updateBinding({
+      capabilityId: "capability-format",
+      expectedRevisionNumber: current.revisionNumber,
+      activationMode: "always",
+    });
     await expect(reflectOn("turn-2", 2)).resolves.toMatchObject({
       status: "paused",
       capabilityId: "capability-format",
     });
     expect((await workspace.capabilities.getBinding("capability-format"))?.state).toBe("paused");
+    const secondInUse = JSON.parse(
+      inference.requests()[1]?.messages.find((message) => message.name === "capabilities_in_use")?.content ??
+        "{}",
+    );
+    expect(secondInUse.capabilities[0]?.how).toBe("loaded_by_model");
     const outcomes = await workspace.capabilities.listOutcomes("capability-format", 10);
     expect(outcomes.map((outcome) => [outcome.turnId, outcome.result])).toEqual([
       ["turn-2", "hurt"],

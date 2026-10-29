@@ -1,4 +1,4 @@
-import type { AgentMessage, StructuredInferencePort } from "@noesis/agent-types";
+import type { AgentMessage, AgentUsage, StructuredInferencePort } from "@noesis/agent-types";
 import {
   type AtomicCapabilityRegistry,
   capabilityEffectKinds,
@@ -19,6 +19,7 @@ import {
   type JsonValue,
   JsonValueSchema,
   type ProjectRef,
+  capabilityGuidance,
   isJsonObject,
   learnedCapabilitySkillSuffix,
   sha256,
@@ -131,8 +132,14 @@ export interface CapabilityLearningTurn {
   readonly turn: LearningTurnInput;
   readonly project: ProjectRef;
   readonly selectedCapabilities: readonly CapabilityRevisionRef[];
+  /**
+   * Capabilities whose guidance the turn's frozen plan put in the system prompt. Older jobs omit
+   * it, and reflection then falls back to each binding's current mode.
+   */
+  readonly promptCapabilityIds?: readonly string[];
 }
-export type CapabilityReflectionResult = CapabilityPublicationResult;
+/** A publication result, with the reflection model's token usage when a model ran. */
+export type CapabilityReflectionResult = CapabilityPublicationResult & { readonly usage?: AgentUsage };
 export type CapabilityManagementIntent =
   | {
       readonly type: "pause";
@@ -1114,10 +1121,34 @@ export function createCapabilityLearningModule(
         capabilityEffects(lifecycle.revision).some(
           (effect) => effect.kind === "skill" && loadedSkillNames.has(effect.name),
         );
-      const how =
-        binding.activationMode === "always" ? "always_in_prompt" : loaded ? "loaded_by_model" : undefined;
-      return how === undefined ? [] : [Object.freeze({ reference, how })];
+      const inPrompt = input.promptCapabilityIds
+        ? input.promptCapabilityIds.includes(reference.capabilityId)
+        : binding.activationMode === "always";
+      const how = inPrompt ? "always_in_prompt" : loaded ? "loaded_by_model" : undefined;
+      return how === undefined ? [] : [Object.freeze({ reference, lifecycle, how })];
     });
+    // The exact guidance of the revision each turn used, shared fairly within one message.
+    const guidanceAllowance = Math.floor(8000 / Math.max(1, inUse.length));
+    const inUseGuidance = await Promise.all(
+      inUse.map(async (used) => {
+        const texts = await Promise.all(
+          capabilityEffects(used.lifecycle.revision).flatMap((effect) =>
+            effect.kind === "program"
+              ? []
+              : [
+                  (async () =>
+                    capabilityGuidance(
+                      new TextDecoder().decode(await options.workspace.reads.readRevision(effect.material)),
+                    ).trim())(),
+                ],
+          ),
+        );
+        const guidance = texts.join("\n\n");
+        return guidance.length <= guidanceAllowance
+          ? guidance
+          : `${guidance.slice(0, guidanceAllowance)}\n… ${String(guidance.length - guidanceAllowance)} more characters`;
+      }),
+    );
     const inUseRecords = await options.store.trackRecords(
       inUse.map((used) => used.reference.capabilityRevisionId),
     );
@@ -1171,11 +1202,12 @@ export function createCapabilityLearningModule(
         content: canonicalJson({
           instruction:
             "These Capabilities shaped the settled turn. Judge each one from the reaction in outcomes. An empty list means the turn used none.",
-          capabilities: inUse.map((used) => ({
+          capabilities: inUse.map((used, index) => ({
             capabilityId: used.reference.capabilityId,
             capabilityRevisionId: used.reference.capabilityRevisionId,
             name: definitionNames.get(used.reference.capabilityId) ?? used.reference.capabilityId,
             how: used.how,
+            guidance: inUseGuidance[index] ?? "",
             trackRecord: {
               helped: inUseRecords.get(used.reference.capabilityRevisionId)?.helped ?? 0,
               hurt: inUseRecords.get(used.reference.capabilityRevisionId)?.hurt ?? 0,
@@ -1302,7 +1334,8 @@ export function createCapabilityLearningModule(
       signal,
     );
     // An automatic pause is the change the user most needs to hear about when nothing else changed.
-    return published.status === "no_change" && automaticPause ? automaticPause : published;
+    const result = published.status === "no_change" && automaticPause ? automaticPause : published;
+    return Object.freeze({ ...result, usage: inferred.trace.usage });
   };
   const manage: CapabilityLearningModule["manage"] = async (intent, signal) => {
     signal.throwIfAborted();
@@ -1403,6 +1436,8 @@ export function createCapabilityLearningModule(
     }
     const binding = await options.store.getBinding(intent.capabilityId);
     if (!binding) throw new Error(`Unknown capability ${intent.capabilityId}`);
+    if (intent.type === "set-activation-mode" && intent.mode === "always")
+      await publisher.assertCurrentGuidanceFitsAlways(intent.capabilityId);
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const request =
       intent.type === "pause" || intent.type === "resume"

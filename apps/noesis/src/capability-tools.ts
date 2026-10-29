@@ -17,6 +17,7 @@ import {
 import { join } from "node:path";
 import {
   capabilityDocumentRevision,
+  capabilityWorkingDocumentPath,
   CapabilityDecisionSchema,
   CapabilityPublicationResultSchema,
   type CapabilityProgramLibrary,
@@ -342,7 +343,7 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
   const capabilityFile = (revision: CapabilityLifecycleRevision | undefined): string | null => {
     const document = revision ? capabilityDocumentRevision(revision) : undefined;
     if (!document) return null;
-    const path = document.workingPath.replace(/^definitions\/candidates\//u, "definitions/");
+    const path = capabilityWorkingDocumentPath(document);
     return options.home ? join(options.home, path) : path;
   };
   const inspect = defineTool({

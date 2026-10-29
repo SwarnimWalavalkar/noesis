@@ -23,7 +23,7 @@ import {
   toJsonValue,
   type WorkingAdjustment,
 } from "@noesis/domain";
-import { capabilityDocumentRevision } from "@noesis/learning";
+import { capabilityDocumentRevision, capabilityWorkingDocumentPath } from "@noesis/learning";
 import { join } from "node:path";
 import { CAPABILITY_REFLECTION_JOB_KIND } from "@noesis/runtime";
 import type {
@@ -1492,7 +1492,7 @@ export async function loadLearningAuditSnapshot(
     );
     const currentFacets = capabilityFacets(currentRevision?.revision);
     const document = currentRevision ? capabilityDocumentRevision(currentRevision) : undefined;
-    const workingDocumentPath = document?.workingPath.replace(/^definitions\/candidates\//u, "definitions/");
+    const workingDocumentPath = document ? capabilityWorkingDocumentPath(document) : undefined;
     const workingDocument = workingDocumentPath
       ? await source.workspace.reads.readWorkingFile(workingDocumentPath)
       : undefined;

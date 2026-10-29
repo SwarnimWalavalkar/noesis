@@ -1237,6 +1237,8 @@ export interface CapabilityLifecycleCounts {
 }
 
 export interface CapabilityLifecycleStore {
+  /** Replaces the name, description, and applicability, e.g. when a restore selects an older file. */
+  readonly updateDefinition: (definition: import("@noesis/domain").CapabilityDefinition) => Promise<void>;
   /** Records judged outcomes. A revision keeps only its first judgment for each turn. */
   readonly recordOutcomes: (
     outcomes: readonly import("@noesis/domain").CapabilityOutcome[],

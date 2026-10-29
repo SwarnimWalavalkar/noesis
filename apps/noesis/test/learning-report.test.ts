@@ -11,6 +11,8 @@ import { computeLearningReport, formatLearningReport } from "../src/learning-rep
 test("parses the learning report command", () => {
   expect(parseArgs(["learning", "report"])).toMatchObject({ command: "learning", subcommand: "report" });
   expect(() => parseArgs(["learning", "purge"])).toThrow("Use learning report");
+  expect(parseArgs(["learning", "report", "--days", "7"])).toMatchObject({ sinceDays: 7 });
+  expect(() => parseArgs(["learning", "report", "--days", "0"])).toThrow("--days");
 });
 
 test("counts each Capability's judged outcomes and evidence", async () => {
@@ -98,7 +100,16 @@ test("counts each Capability's judged outcomes and evidence", async () => {
         unclear: 0,
       }),
     ]);
-    expect(formatLearningReport(report)).toContain("Helped 2 (67%), hurt 1 (33%)");
+    const text = formatLearningReport(report);
+    expect(text).toContain("Helped 2 (67%), hurt 1 (33%)");
+    expect(text).toContain("Corrections after learning");
+    expect(text).toContain("explicit_request: 1");
+    // A window that ends before the outcomes were judged counts none of them.
+    const windowed = await computeLearningReport(workspace, {
+      sinceDays: 1,
+      now: new Date("2026-11-30T00:00:00.000Z"),
+    });
+    expect(windowed.capabilities[0]).toMatchObject({ helped: 0, hurt: 0, usedWithin30Days: true });
   } finally {
     workspace.close();
     await rm(root, { recursive: true, force: true });

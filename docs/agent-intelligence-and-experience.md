@@ -94,7 +94,7 @@ A turn with many tool calls receives a structural projection before reflection. 
 
 The foreground agent is an equally capable semantic author. When the task or user calls for deliberate refinement, it may inspect all current Capability definitions, bindings, revisions, feedback, and exact effect material through progressively disclosed catalog tools. It gathers evidence through ordinary work and submits one complete structured decision. The host adds only the non-forgeable admitted-turn envelope and evidence references; it does not call a second model to revise the decision.
 
-Ambient reflection and foreground authoring share one protected Capability publisher. That publisher records exact instruction and skill bytes, resolves exact saved-program revisions, validates scope and consequence, compares the expected binding revision, preserves predecessor lineage, and either activates or creates the same small protected gate. A foreground publication changes later frozen turn plans, never the already-admitted current plan. Subagents may inspect and advise but cannot publish.
+Ambient reflection and foreground authoring share one protected Capability publisher. That publisher records the Capability's file as an exact revision, resolves exact saved-program revisions, validates scope and consequence, compares the expected binding revision, preserves predecessor lineage, and either activates or creates the same small protected gate. A foreground publication changes later frozen turn plans, never the already-admitted current plan. Subagents may inspect and advise but cannot publish.
 
 Reflection also receives an exact foreground Capability surface. It distinguishes material injected into the initial system prompt, effect skills exposed only as name-and-description metadata, completed `skills.load` calls that later exposed a full frozen body, and exact saved-program adapters. Complete predecessor materials remain available separately for revision authoring; their presence in reflector context is not evidence that the foreground model saw them.
 
@@ -104,9 +104,11 @@ Credential export, recovery or audit control, and irreversible external actions 
 
 A Capability states when an ability should help, why the evidence supports it, what behavior changes, and its anticipated effect. Its revision contains one or more exact effects rather than a mechanism label.
 
-New Capabilities are globally eligible and relevant by default. Semantic routing decides when they apply. The user may narrow the scope or make one always active.
+New Capabilities are globally eligible and relevant by default. The foreground model sees each one's name and "when" text with the other skills and loads it when it applies. The user may narrow the scope or make one always active.
 
-Direct deliberate learning and ambient reflection both publish versioned Capabilities through the same protected publisher. A lasting user fact, preference, or criterion that should alter future behavior is represented as a Capability with an exact Instruction or Skill effect, not as a second model-facing memory primitive. Historical user criteria remain readable evaluation and audit data.
+Direct deliberate learning and ambient reflection both publish versioned Capabilities through the same protected publisher. A lasting user fact, preference, or criterion that should alter future behavior is represented as a Capability whose file holds its guidance, not as a second model-facing memory primitive.
+
+A session review runs once a session has been quiet for 30 minutes after its last turn. It receives a prepared packet: the session's requests, matching requests from earlier sessions, and every current Capability with its track record. It has no tools. It may create, revise, pause, or rescope at most three Capabilities through the same publisher, and it cannot author Programs. Historical user criteria remain readable evaluation and audit data.
 
 Inside `execute`, `capabilities.inspect` progressively exposes the Capability list, one complete lifecycle, or one exact effect material. `capabilities.refine` accepts the complete decision schema and returns the authoritative publication result. These schemas come from the frozen Tool Catalog and remain discoverable through `noesis.describe`; they are not handwritten into the system prompt or skill body. Completed normal-sensitivity calls earlier in the same foreground execution, plus the current user message, form the bounded publication evidence set.
 

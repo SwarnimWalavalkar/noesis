@@ -86,6 +86,7 @@ import {
   contextCheckpointActivationRequestDigest,
   compareTrailRecency,
   CAPABILITY_REFLECTION_JOB_KIND,
+  SESSION_REVIEW_JOB_KIND,
   createCapabilityCoordinator,
   type CapabilityCoordinator,
   CONTEXT_NOTEBOOK_ENVELOPE_RESERVE_TOKENS,
@@ -175,6 +176,7 @@ import {
 } from "../../../packages/workspace/src/protected-runtime.ts";
 import { createConfigurationTools, type ConfigurationPort } from "./config-tools.ts";
 import { createSessionTools, SessionTitleSchema, type SessionPort } from "./session-tools.ts";
+import { sessionReviewNotices } from "./session-review-notices.ts";
 import { createMcpManagementTools } from "./mcp-management-tools.ts";
 import { createCapabilityTools } from "./capability-tools.ts";
 import { loadLearningAuditSnapshot } from "./learning-audit-read-model.ts";
@@ -6596,35 +6598,52 @@ export async function createApplicationRuntimeComposition(
         .finish(),
     );
   };
-  /** Maps each user turn in a session to the next user turn, which is its reaction. */
-  const sessionReactionTurnIds = async (sessionId: string): Promise<ReadonlyMap<string, string>> => {
-    const userTurnIds = (await workspace.operational.messages.listForSession(sessionId))
+  /** The session's user turns in order, each with when its message arrived. */
+  const sessionUserTurns = async (sessionId: string) =>
+    (await workspace.operational.messages.listForSession(sessionId))
       .filter((message) => message.role === "user" && message.metadata["origin"] !== "collaboration")
       .sort(
         (left, right) =>
           left.createdAt.localeCompare(right.createdAt) || left.messageId.localeCompare(right.messageId),
       )
-      .flatMap((message) =>
-        typeof message.metadata["turnId"] === "string" ? [message.metadata["turnId"]] : [],
-      );
+      .flatMap((message) => {
+        const turnId = message.metadata["turnId"];
+        return typeof turnId === "string" ? [{ turnId, createdAt: message.createdAt }] : [];
+      });
+  /** Maps each user turn in a session to the next user turn, which is its reaction. */
+  const reactionTurnIdsFor = (
+    userTurns: readonly { readonly turnId: string }[],
+  ): ReadonlyMap<string, string> => {
     const reactions = new Map<string, string>();
-    for (const [index, turnId] of userTurnIds.entries()) {
-      const next = userTurnIds[index + 1];
-      if (next !== undefined) reactions.set(turnId, next);
+    for (const [index, turn] of userTurns.entries()) {
+      const next = userTurns[index + 1];
+      if (next !== undefined) reactions.set(turn.turnId, next.turnId);
     }
     return reactions;
   };
   const listLearningActivity: NonNullable<NoesisTuiRuntime["listLearningActivity"]> = async (sessionId) => {
-    const [jobs, reactionTurnIds] = await Promise.all([
+    const [jobs, userTurns] = await Promise.all([
       workspace.jobs.list({
         kind: CAPABILITY_REFLECTION_JOB_KIND,
         payloadSessionId: sessionId,
         order: "newest",
         limit: 1000,
       }),
-      sessionReactionTurnIds(sessionId),
+      sessionUserTurns(sessionId),
     ]);
-    return Object.freeze(jobs.map((job) => capabilityActivity(job, reactionTurnIds)));
+    const reactionTurnIds = reactionTurnIdsFor(userTurns);
+    return Object.freeze([
+      ...jobs.map((job) => capabilityActivity(job, reactionTurnIds)),
+      ...sessionReviewNotices(
+        await workspace.jobs.list({
+          kind: SESSION_REVIEW_JOB_KIND,
+          status: "completed",
+          order: "newest",
+          limit: 20,
+        }),
+        userTurns,
+      ),
+    ]);
   };
   const inspectLearning: NonNullable<NoesisTuiRuntime["inspectLearning"]> = async (
     sessionId,

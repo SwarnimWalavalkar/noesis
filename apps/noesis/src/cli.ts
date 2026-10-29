@@ -59,7 +59,7 @@ Usage:
   noesis skills list [--workspace] [--trust-workspace] [--home PATH]
   noesis skills install|remove SOURCE [--workspace] [--trust-workspace] [--home PATH]
   noesis skills update [SOURCE] [--workspace] [--trust-workspace] [--home PATH]
-  noesis learning report [--home PATH]
+  noesis learning report [--days N] [--home PATH]
   noesis update
   noesis help
   noesis --version
@@ -402,7 +402,14 @@ async function main(): Promise<void> {
   if (input.command === "learning") {
     const workspace = await createWorkspaceStore(input.home);
     try {
-      console.log(formatLearningReport(await computeLearningReport(workspace)));
+      console.log(
+        formatLearningReport(
+          await computeLearningReport(
+            workspace,
+            input.sinceDays === undefined ? {} : { sinceDays: input.sinceDays },
+          ),
+        ),
+      );
     } finally {
       workspace.close();
     }
