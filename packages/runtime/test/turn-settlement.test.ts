@@ -53,8 +53,6 @@ function turnPlan(
     sessionId,
     turnId,
     project: Object.freeze({ projectId: "project_test", root: "/workspace/noesis" }),
-    activationId: "activation-test",
-    activationRevision: 2,
     selectedCapabilities: Object.freeze(
       selections.map((selection) =>
         Object.freeze({
@@ -63,7 +61,6 @@ function turnPlan(
           applicability: `When ${selection.name} applies.`,
           selectionReason: "fixture",
           revision: revisionRef(selection.capabilityId),
-          baseline: Object.freeze({ kind: "genesis" as const }),
           promptModules: Object.freeze([]),
           skills: Object.freeze([]),
           tools: Object.freeze([]),

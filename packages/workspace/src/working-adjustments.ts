@@ -78,40 +78,6 @@ export function createProtectedWorkingAdjustmentStore(
     return row === undefined ? null : requiredString(row, "adjustment_id");
   };
 
-  const listSettledEvidence: ProtectedWorkingAdjustmentStore["listSettledEvidence"] = async (request) => {
-    if (!request.projectId) throw new Error("Working adjustment evidence requires a project ID");
-    if (!request.adjustmentId) throw new Error("Working adjustment evidence requires an adjustment ID");
-    if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 100)
-      throw new Error("Working adjustment evidence limit must be an integer between 1 and 100");
-    const adjustment = await get(request.adjustmentId);
-    if (!adjustment || adjustment.scope.projectId !== request.projectId) return Object.freeze([]);
-    return Object.freeze(
-      db
-        .prepare(
-          `SELECT plan.plan_id, turn.session_id, turn.turn_id, turn.outcome_id, turn.settled_at
-           FROM frozen_turn_plans AS plan
-           JOIN foreground_turns AS turn ON turn.plan_id = plan.plan_id
-           WHERE turn.status = 'completed'
-             AND turn.outcome_id IS NOT NULL
-             AND turn.settled_at IS NOT NULL
-             AND json_extract(plan.plan_json, '$.project.projectId') = ?
-             AND json_extract(plan.plan_json, '$.workingAdjustmentId') = ?
-           ORDER BY turn.settled_at DESC, turn.turn_id DESC
-           LIMIT ?`,
-        )
-        .all(request.projectId, request.adjustmentId, request.limit)
-        .map((row) =>
-          Object.freeze({
-            planId: requiredString(row, "plan_id"),
-            sessionId: requiredString(row, "session_id"),
-            turnId: requiredString(row, "turn_id"),
-            outcomeId: requiredString(row, "outcome_id"),
-            settledAt: requiredString(row, "settled_at"),
-          }),
-        ),
-    );
-  };
-
   const apply: ProtectedWorkingAdjustmentStore["apply"] = async (request) => {
     const adjustment = WorkingAdjustmentSchema.parse(request.adjustment);
     const encoded = JSON.stringify(adjustment);
@@ -243,5 +209,5 @@ export function createProtectedWorkingAdjustmentStore(
       });
     });
 
-  return Object.freeze({ get, getActive, list, listSettledEvidence, apply, unapply });
+  return Object.freeze({ get, getActive, list, apply, unapply });
 }

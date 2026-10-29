@@ -6,7 +6,6 @@ import type {
   AgentAddress,
   AgentRuntimeEvent,
   AgentUsage,
-  FrozenBaselineRef,
   FrozenSubAgentPlan,
   FrozenTurnPlan,
   NoesisAgentRuntime,
@@ -74,7 +73,6 @@ import {
   createCapabilityLearningModule,
   createSessionReview,
   createCapabilityPublisher,
-  createWorkspaceLearningCandidateManifestStore,
 } from "@noesis/learning";
 import { createMcpToolDefinitions, type McpHostManager } from "@noesis/mcp";
 import {
@@ -191,6 +189,9 @@ const HISTORY_RERANK_MAX_EXCERPT_CHARACTERS = 480;
 const HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE = 4096;
 const LATE_REFLECTION_REFRESH_MS = 5000;
 const BASE_SYSTEM_PROMPT = [
+  "You are Noesis, a thinking-and-creation partner.",
+  "Deliver immediate value, preserve evidence, and keep adaptations inspectable.",
+  "Work with the user on ambiguous intellectual work and execute clear bounded requests directly.",
   "Follow the user's instructions, use tools when useful, and finish the work.",
   "Use one direct tool for a simple operation and one coherent `execute` program for related multi-call work.",
   "Treat explicit truncation as incomplete evidence. Use returned recovery fields when available; if saved evidence is itself incomplete, narrow or safely rerun the collection. Never infer that omitted content is absent.",
@@ -695,22 +696,7 @@ export interface ApplicationRuntime extends NoesisTuiRuntime {
     readonly workspace: NoesisWorkspaceStore;
     /** Drives one foreground turn without the product interaction surface. Tests only. */
     readonly runTurn: (trailId: string, input: string, options?: RunTurnOptions) => Promise<TurnResult>;
-    readonly adaptations: {
-      readonly activations: Pick<
-        ProtectedWorkspaceRuntime["activations"],
-        "current" | "getOperation" | "listOperations" | "getApproval" | "getTurnPin" | "getTurnPlan"
-      >;
-      readonly feedback: Pick<
-        ProtectedWorkspaceRuntime["feedback"],
-        | "operationForActivation"
-        | "getObservation"
-        | "listObservations"
-        | "getResearchRun"
-        | "listResearchRuns"
-        | "getOutcome"
-        | "getSuccessorInput"
-      >;
-    };
+    readonly turnPlans: Pick<ProtectedWorkspaceRuntime["turnPlans"], "get">;
   };
   readonly shutdown: () => Promise<void>;
 }
@@ -1377,116 +1363,6 @@ function registerRevision(
     throw new Error(`Capability registry changed exact revision ${revision.capabilityRevisionId}`);
   return constructed;
 }
-const GENESIS_CAPABILITY = Object.freeze({
-  capabilityId: "general-collaboration",
-  name: "General collaboration",
-  scope: "general",
-  intent: "Provide the stable baseline for ordinary Noesis collaboration and future comparison.",
-});
-const GENESIS_REVISION_ID = "general-collaboration-genesis-v1";
-async function publishGenesisDefinition(
-  workspace: NoesisWorkspaceStore,
-  input: {
-    readonly definitionId: string;
-    readonly workingPath: string;
-    readonly content: string;
-  },
-): Promise<FileRevisionRef> {
-  const bytes = encoder.encode(input.content);
-  const current = await workspace.definitionMetadata.getCurrent("genesis_baseline", input.definitionId);
-  if (current) {
-    const recorded = await workspace.reads.readRevision(current.definitionRevision);
-    if (decoder.decode(recorded) !== input.content)
-      throw new Error(`Genesis definition ${input.definitionId} changed without a revision`);
-    return current.definitionRevision;
-  }
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const published = await workspace.definitionPublications.publish({
-    namespace: "genesis_baseline",
-    definitionId: input.definitionId,
-    revision: 1,
-    workingPath: input.workingPath,
-    bytes,
-    activity: Object.freeze({
-      kind: "genesis_baseline.initialized",
-      actor: Object.freeze({ actorId: "protected-genesis-bootstrap", kind: "system" as const }),
-      reason: "Immutable general collaboration baseline",
-    }),
-  });
-  if (!published.ok) throw new Error(published.error.message);
-  return published.value.definitionRevision;
-}
-async function bootstrapGenesisBaseline(
-  workspace: NoesisWorkspaceStore,
-  protectedRuntime: ProtectedWorkspaceRuntime,
-  registry: ReturnType<typeof createAtomicCapabilityRegistry>,
-): Promise<CapabilityRevisionRef> {
-  const [prompt, skill, router] = await Promise.all([
-    publishGenesisDefinition(workspace, {
-      definitionId: "general-collaboration-prompt",
-      workingPath: "prompts/general-collaboration.md",
-      content: [
-        "You are Noesis, a thinking-and-creation partner.",
-        "Deliver immediate value, preserve evidence, and keep adaptations inspectable.",
-      ].join("\n"),
-    }),
-    publishGenesisDefinition(workspace, {
-      definitionId: "general-collaboration-skill",
-      workingPath: "skills/general-collaboration.md",
-      content: [
-        "# General collaboration",
-        "",
-        "Work with the user on ambiguous intellectual work and execute clear bounded requests directly.",
-      ].join("\n"),
-    }),
-    publishGenesisDefinition(workspace, {
-      definitionId: "general-collaboration-router",
-      workingPath: "capabilities/general-collaboration-router.json",
-      content: `${canonicalJson({ strategyId: "general-collaboration-v1", scope: "general" })}\n`,
-    }),
-  ]);
-  const revision: CapabilityRevision = Object.freeze({
-    capabilityRevisionId: GENESIS_REVISION_ID,
-    capabilityId: GENESIS_CAPABILITY.capabilityId,
-    promptModules: Object.freeze([prompt]),
-    skills: Object.freeze([skill]),
-    tools: Object.freeze([]),
-    toolset: Object.freeze({
-      toolRevisionIds: Object.freeze([]),
-      routerRevision: router,
-      strategyId: "general-collaboration-v1",
-    }),
-    activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
-    permissionManifest: Object.freeze({
-      effects: Object.freeze([]),
-      resourcePatterns: Object.freeze([]),
-      credentialRefs: Object.freeze([]),
-    }),
-    evidenceRefs: Object.freeze([]),
-    sourceEvaluationDefinitions: Object.freeze([]),
-    requestedPermissionDelta: Object.freeze({
-      addedEffects: Object.freeze([]),
-      widenedResources: Object.freeze([]),
-      addedCredentialRefs: Object.freeze([]),
-    }),
-  });
-  const revisionRef = registerRevision(registry, revision, GENESIS_CAPABILITY);
-  const manifest = await publishGenesisDefinition(workspace, {
-    definitionId: "general-collaboration-manifest",
-    workingPath: "capabilities/general-collaboration.json",
-    content: `${canonicalJson({ capability: GENESIS_CAPABILITY, revision, revisionRef })}\n`,
-  });
-  await protectedRuntime.activations.bootstrapGenesis({
-    capabilityRevision: revisionRef,
-    activeDefinitions: Object.freeze({
-      "general-collaboration:manifest": manifest,
-      "general-collaboration:prompt-0": prompt,
-      "general-collaboration:skill-0": skill,
-      "general-collaboration:router": router,
-    }),
-  });
-  return revisionRef;
-}
 function configurationPrompt(configuration: ApplicationRoleConfiguration): FileRevisionRef {
   const prompt = configuration.variant.configurationRefs[0];
   if (!prompt) throw new Error(`Role ${configuration.variant.variantId} has no immutable prompt revision`);
@@ -1591,7 +1467,7 @@ export async function createApplicationRuntimeComposition(
   });
   options.mcp?.setSamplingAuthorizer(async ({ serverName, request, signal, invocation, execute }) => {
     if (!invocation.turnId) throw new Error("MCP sampling requires an admitted foreground turn identity");
-    const plan = await protectedRuntime.activations.getTurnPlan(invocation.sessionId, invocation.turnId);
+    const plan = await protectedRuntime.turnPlans.get(invocation.sessionId, invocation.turnId);
     if (!plan) throw new Error("MCP sampling could not resolve its admitted foreground turn");
     if (
       plan.provider !== invocation.route.provider ||
@@ -1640,20 +1516,6 @@ export async function createApplicationRuntimeComposition(
     researchState: workspace.research,
     controlStore: createWorkspaceCapabilityControlStore(workspace),
   });
-  const manifests = createWorkspaceLearningCandidateManifestStore(workspace);
-  const genesisRevision = await bootstrapGenesisBaseline(workspace, protectedRuntime, registry);
-  const hydrateRevisions = async (): Promise<void> => {
-    const experiments = await workspace.research.experiments.listExperiments({ limit: 1000 });
-    for (const experiment of experiments) {
-      try {
-        const durable = await manifests.rehydrate(experiment.experimentId);
-        if (durable) registerRevision(registry, durable.revision, durable.brief.capability);
-      } catch {
-        // Hypothesis-only and pre-authoring experiments have no candidate manifest to hydrate.
-      }
-    }
-  };
-  await hydrateRevisions();
   const hydrateCapabilityLifecycle = async (): Promise<void> => {
     for (const definition of await workspace.capabilities.listDefinitions()) {
       for (const lifecycleRevision of await workspace.capabilities.listRevisions(definition.capabilityId))
@@ -4906,27 +4768,8 @@ export async function createApplicationRuntimeComposition(
   ): Promise<CapabilityRevision | undefined> => {
     const memory = registry.getRevision(reference);
     if (memory) return memory;
-    await hydrateRevisions();
+    await hydrateCapabilityLifecycle();
     return registry.getRevision(reference);
-  };
-  const resolveBaseline = async (reference: CapabilityRevisionRef): Promise<FrozenBaselineRef> => {
-    if (sameCapabilityRevisionRef(reference, genesisRevision))
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      return Object.freeze({ kind: "genesis" as const });
-    const experiments = await workspace.research.experiments.listExperiments({ limit: 1000 });
-    const origin = experiments.find(
-      (experiment) =>
-        experiment.activatedRevision !== undefined &&
-        sameCapabilityRevisionRef(experiment.activatedRevision, reference),
-    );
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    return origin
-      ? Object.freeze({
-          kind: "capability_revision" as const,
-          experimentId: origin.experimentId,
-          revision: origin.baselineRevision,
-        })
-      : Object.freeze({ kind: "unknown_legacy" as const });
   };
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const basePermissionManifest = Object.freeze({
@@ -4964,7 +4807,6 @@ export async function createApplicationRuntimeComposition(
     capabilities: Object.freeze({
       resolveCapability: async (capabilityId: string) => registry.getCapability(capabilityId),
       resolveRevision,
-      resolveBaseline,
     }),
     project,
   });
@@ -5766,9 +5608,22 @@ export async function createApplicationRuntimeComposition(
           priority: 90,
         }),
       ];
-      const usedCapabilities = Object.freeze(
+      // Each selected Capability is labeled with the binding revision that admission verified.
+      const selectedBindings = new Map(
+        (
+          await workspace.capabilities.getBindings(
+            plan.selectedCapabilities.map((selection) => selection.capabilityId),
+          )
+        ).map((binding) => [binding.capabilityId, binding] as const),
+      );
+      const usedCapabilities: Readonly<Record<string, number>> = Object.freeze(
         Object.fromEntries(
-          plan.selectedCapabilities.map((selection) => [selection.capabilityId, plan.activationRevision]),
+          plan.selectedCapabilities.flatMap((selection) => {
+            const binding = selectedBindings.get(selection.capabilityId);
+            return binding && sameCapabilityRevisionRef(binding.revision, selection.revision)
+              ? [[selection.capabilityId, binding.revisionNumber] as const]
+              : [];
+          }),
         ),
       );
       const context = compileContext(contextFragments, usedCapabilities, {
@@ -6001,10 +5856,10 @@ export async function createApplicationRuntimeComposition(
                           workspace.paths.root,
                         ),
                         history,
-                        activeCapabilities: plan.selectedCapabilities.map((selection) => ({
-                          name: selection.name,
-                          version: plan.activationRevision,
-                        })),
+                        activeCapabilities: plan.selectedCapabilities.flatMap((selection) => {
+                          const version = usedCapabilities[selection.capabilityId];
+                          return version === undefined ? [] : [{ name: selection.name, version }];
+                        }),
                         frozenTurnPlan: plan,
                       },
                       emit,
@@ -6649,8 +6504,6 @@ export async function createApplicationRuntimeComposition(
     return await loadLearningAuditSnapshot(
       {
         workspace,
-        activations: protectedRuntime.activations,
-        feedback: protectedRuntime.feedback,
         resolveRevision,
         resolveCapability: (capabilityId) => registry.getCapability(capabilityId),
         project,
@@ -6885,25 +6738,7 @@ export async function createApplicationRuntimeComposition(
       debug: Object.freeze({
         workspace,
         runTurn: debugRunTurn,
-        adaptations: Object.freeze({
-          activations: Object.freeze({
-            current: protectedRuntime.activations.current,
-            getOperation: protectedRuntime.activations.getOperation,
-            listOperations: protectedRuntime.activations.listOperations,
-            getApproval: protectedRuntime.activations.getApproval,
-            getTurnPin: protectedRuntime.activations.getTurnPin,
-            getTurnPlan: protectedRuntime.activations.getTurnPlan,
-          }),
-          feedback: Object.freeze({
-            operationForActivation: protectedRuntime.feedback.operationForActivation,
-            getObservation: protectedRuntime.feedback.getObservation,
-            listObservations: protectedRuntime.feedback.listObservations,
-            getResearchRun: protectedRuntime.feedback.getResearchRun,
-            listResearchRuns: protectedRuntime.feedback.listResearchRuns,
-            getOutcome: protectedRuntime.feedback.getOutcome,
-            getSuccessorInput: protectedRuntime.feedback.getSuccessorInput,
-          }),
-        }),
+        turnPlans: Object.freeze({ get: protectedRuntime.turnPlans.get }),
       }),
       agentDefaults,
       startTrail,

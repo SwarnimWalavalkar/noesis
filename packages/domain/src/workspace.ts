@@ -302,19 +302,6 @@ export interface WorkingAdjustmentReadPort {
     readonly projectId?: string;
     readonly limit: number;
   }) => Promise<readonly WorkingAdjustment[]>;
-  readonly listSettledEvidence: (request: {
-    readonly projectId: string;
-    readonly adjustmentId: string;
-    readonly limit: number;
-  }) => Promise<readonly WorkingAdjustmentSettledEvidence[]>;
-}
-
-export interface WorkingAdjustmentSettledEvidence {
-  readonly planId: string;
-  readonly sessionId: string;
-  readonly turnId: string;
-  readonly outcomeId: string;
-  readonly settledAt: string;
 }
 
 export type DurableJobStatus =

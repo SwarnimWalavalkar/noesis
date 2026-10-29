@@ -1,14 +1,8 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { FrozenTurnPlan } from "@noesis/agent-types";
-import {
-  type CapabilityRevisionRef,
-  type FileRevisionRef,
-  type JsonValue,
-  sha256,
-  type WorkingAdjustment,
-} from "@noesis/domain";
+import { frozenTurnPlanDigest, type FrozenTurnPlan } from "@noesis/agent-types";
+import { type JsonValue, sha256, type WorkingAdjustment } from "@noesis/domain";
 import {
   type AuthorityBoundary,
   type AuthorityReceipt,
@@ -70,7 +64,6 @@ function mutableWorkingAdjustments(): {
     get: async (adjustmentId: string) => records.get(adjustmentId),
     getActive: async (projectId: string) => activeByProject.get(projectId),
     list: async () => Object.freeze([...records.values()]),
-    listSettledEvidence: async () => Object.freeze([]),
     apply: async (request: Parameters<ProtectedWorkingAdjustmentStore["apply"]>[0]) => {
       applyCalls += 1;
       const projectId = request.adjustment.scope.projectId;
@@ -128,43 +121,38 @@ async function runtimeWithWorkingAdjustments(
   return createProtectedWorkspaceRuntime({
     workspaceRoot: root,
     authority: wrapAuthority(internals.authority),
-    activations: internals.protectedRuntime.activations,
-    feedback: internals.protectedRuntime.feedback,
+    turnPlans: internals.protectedRuntime.turnPlans,
     measurements: internals.protectedRuntime.measurements,
     workingAdjustments,
   });
 }
 
-function mutationPorts(onPin: () => void) {
+function turnPlan(sessionId: string, turnId: string): FrozenTurnPlan {
+  const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
+    schemaVersion: 1,
+    planId: `plan-${turnId}`,
+    sessionId,
+    turnId,
+    selectedCapabilities: [],
+    renderedSystemPrompt: "Noesis",
+    provider: "fake",
+    model: "fake-1",
+    thinkingLevel: "off",
+    permissionSnapshot: { effects: [], resourcePatterns: [], credentialRefs: [] },
+    retrievalCitations: [],
+    routing: { strategyId: "fixture", reason: "No Capability" },
+    createdAt: "2026-07-25T00:00:00.000Z",
+  };
+  return { ...body, canonicalDigest: frozenTurnPlanDigest(body) };
+}
+
+function mutationPorts(onAdmit: () => void) {
   return Object.freeze({
-    activations: Object.freeze({
-      prepare: unsupported,
-      supersede: unsupported,
-      decideApproval: unsupported,
-      commit: unsupported,
-      pinTurn: async (request: { readonly sessionId: string; readonly turnId: string }) => {
-        onPin();
-        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-        return Object.freeze({
-          turnKey: `${request.sessionId}:${request.turnId}`,
-          sessionId: request.sessionId,
-          turnId: request.turnId,
-          activationId: "activation-test",
-          activationRevision: 1,
-          activeDefinitions: Object.freeze({}) as Readonly<Record<string, FileRevisionRef>>,
-          activeCapabilityRevisions: Object.freeze({}) as Readonly<Record<string, CapabilityRevisionRef>>,
-          pinnedAt: "2026-07-25T00:00:00.000Z",
-        });
+    turnPlans: Object.freeze({
+      admit: async (plan: FrozenTurnPlan) => {
+        onAdmit();
+        return plan;
       },
-      admitTurnPlan: async (plan: FrozenTurnPlan) => plan,
-      bootstrapGenesis: unsupported,
-      recoverCommittedPublications: async () => 0,
-    }),
-    feedback: Object.freeze({
-      recordObservation: unsupported,
-      classifyObservations: unsupported,
-      putResearchRun: unsupported,
-      commitOutcome: unsupported,
     }),
     workingAdjustments: Object.freeze({
       apply: unsupported,
@@ -593,15 +581,14 @@ describe("protected workspace runtime", () => {
     });
     const guarded = createReceiptGuardedProtectedMutations({
       verifier: owner.receiptVerifier,
-      activations: ports.activations,
-      feedback: ports.feedback,
+      turnPlans: ports.turnPlans,
       workingAdjustments: ports.workingAdjustments,
     });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const expected = Object.freeze({
       effect: "promote" as const,
-      resource: "workspace:alpha:turn:session-1:turn-1:pin",
-      idempotencyKey: "protected:turn:pin:session-1:turn-1",
+      resource: "workspace:alpha:turn:session-1:turn-1:admit",
+      idempotencyKey: "protected:turn:admit:session-1:turn-1",
     });
     const operation = authorityOperationFields(
       "promoter",
@@ -636,22 +623,15 @@ describe("protected workspace runtime", () => {
     for (const receipt of [forged, foreignReceipt, wrongEffect, wrongResource, wrongWorkspace])
       await expect(
         Promise.resolve().then(
-          async () =>
-            await guarded.activations.pinTurn(expected, receipt, {
-              sessionId: "session-1",
-              turnId: "turn-1",
-            }),
+          async () => await guarded.turnPlans.admit(expected, receipt, turnPlan("session-1", "turn-1")),
         ),
       ).rejects.toThrow(/exact authority receipt/iu);
     expect(mutations).toBe(0);
 
     const valid = await captureReceipt(owner, expected.resource, expected.idempotencyKey);
     await expect(
-      guarded.activations.pinTurn(expected, valid, {
-        sessionId: "session-1",
-        turnId: "turn-1",
-      }),
-    ).resolves.toMatchObject({ activationId: "activation-test" });
+      guarded.turnPlans.admit(expected, valid, turnPlan("session-1", "turn-1")),
+    ).resolves.toMatchObject({ planId: "plan-turn-1" });
     expect(mutations).toBe(1);
   });
 
@@ -694,33 +674,32 @@ describe("protected workspace runtime", () => {
       },
     });
     const authority = createDurableAuthorityBoundary(state);
-    const activations = Object.freeze({
-      ...baseRuntime.activations,
-      pinTurn: async (request: Parameters<typeof baseRuntime.activations.pinTurn>[0]) => {
+    const turnPlans = Object.freeze({
+      ...baseRuntime.turnPlans,
+      admit: async (plan: FrozenTurnPlan) => {
         mutationCalls += 1;
-        return await baseRuntime.activations.pinTurn(request);
+        return await baseRuntime.turnPlans.admit(plan);
       },
     });
     const runtime = createProtectedWorkspaceRuntime({
       workspaceRoot: root,
       authority,
-      activations,
-      feedback: baseRuntime.feedback,
+      turnPlans,
       measurements: baseRuntime.measurements,
       workingAdjustments: baseRuntime.workingAdjustments,
     });
 
-    await expect(
-      runtime.activations.pinTurn({
-        sessionId: "session-unresolved",
-        turnId: "turn-unresolved",
-      }),
-    ).rejects.toThrow(/authority ambiguous.*authoritative outcome/iu);
+    await expect(runtime.turnPlans.admit(turnPlan("session-unresolved", "turn-unresolved"))).rejects.toThrow(
+      /authority ambiguous.*authoritative outcome/iu,
+    );
 
     expect(attemptedOperations).toHaveLength(1);
     const attempted = attemptedOperations[0];
     if (!attempted) throw new Error("Expected the original protected operation attempt");
-    expect(attempted.identity.idempotencyKey).toBe("protected:turn:pin:session-unresolved:turn-unresolved");
+    const unresolvedPlan = turnPlan("session-unresolved", "turn-unresolved");
+    expect(attempted.identity.idempotencyKey).toBe(
+      `protected:turn:admit:${unresolvedPlan.planId}:${unresolvedPlan.canonicalDigest}`,
+    );
     expect(attempted.identity.operationId).toBe(
       authorityOperationFields(
         "promoter",
@@ -732,7 +711,7 @@ describe("protected workspace runtime", () => {
     );
     expect(mutationCalls).toBe(0);
     expect(terminalWrites).toBe(0);
-    expect(await baseRuntime.activations.getTurnPin("session-unresolved", "turn-unresolved")).toBeUndefined();
+    expect(await baseRuntime.turnPlans.get("session-unresolved", "turn-unresolved")).toBeUndefined();
     workspace.close();
   });
 
@@ -741,17 +720,16 @@ describe("protected workspace runtime", () => {
     roots.push(root);
     const workspace = await createWorkspaceStore(root);
     expect("authority" in workspace).toBe(false);
-    expect("protectedActivations" in workspace).toBe(false);
-    expect("protectedFeedback" in workspace).toBe(false);
+    expect("protectedTurnPlans" in workspace).toBe(false);
     expect("compoundingMeasurements" in workspace).toBe(false);
-    expect(createWorkspaceRuntimeInternals(workspace).protectedRuntime.activations).toBeDefined();
+    expect(createWorkspaceRuntimeInternals(workspace).protectedRuntime.turnPlans).toBeDefined();
 
     const publicIndex = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
     expect(publicIndex).not.toMatch(
-      /createWorkspaceRuntimeInternals|ProtectedActivationStore|ProtectedFeedbackStore/iu,
+      /createWorkspaceRuntimeInternals|createProtectedTurnPlanStore|createProtectedWorkspaceRuntime/iu,
     );
     const tui = await readFile(new URL("../../tui/src/index.ts", import.meta.url), "utf8");
-    expect(tui).not.toMatch(/protected-runtime|protectedActivations|protectedFeedback/iu);
+    expect(tui).not.toMatch(/protected-runtime|protectedTurnPlans/iu);
     const generatedRoleContext = await readFile(
       new URL("../../runtime-pi/src/role-context.ts", import.meta.url),
       "utf8",

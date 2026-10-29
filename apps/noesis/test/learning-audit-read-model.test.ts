@@ -158,22 +158,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        activations: {
-          current: async () => undefined,
-          listOperations: async () => Object.freeze([]),
-          getApproval: async () => undefined,
-        },
-        feedback: {
-          listObservations: async () => Object.freeze([]),
-          listResearchRuns: async () => Object.freeze([]),
-          getOutcome: async () => undefined,
-          getSuccessorInput: async () => undefined,
-        },
-        continuousFeedback: {
-          experimentComparison: async () => {
-            throw new Error("No preflight comparison should be loaded in this fixture");
-          },
-        },
         resolveRevision: async () => undefined,
         resolveCapability: () => undefined,
         project: Object.freeze({ projectId: "project-a", root: "/workspace/a" }),
@@ -281,22 +265,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        activations: {
-          current: async () => undefined,
-          listOperations: async () => Object.freeze([]),
-          getApproval: async () => undefined,
-        },
-        feedback: {
-          listObservations: async () => Object.freeze([]),
-          listResearchRuns: async () => Object.freeze([]),
-          getOutcome: async () => undefined,
-          getSuccessorInput: async () => undefined,
-        },
-        continuousFeedback: {
-          experimentComparison: async () => {
-            throw new Error("No preflight comparison should be loaded in this fixture");
-          },
-        },
         resolveRevision: async () => undefined,
         resolveCapability: () => undefined,
         project,
@@ -480,22 +448,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        activations: {
-          current: async () => undefined,
-          listOperations: async () => Object.freeze([]),
-          getApproval: async () => undefined,
-        },
-        feedback: {
-          listObservations: async () => Object.freeze([]),
-          listResearchRuns: async () => Object.freeze([]),
-          getOutcome: async () => undefined,
-          getSuccessorInput: async () => undefined,
-        },
-        continuousFeedback: {
-          experimentComparison: async () => {
-            throw new Error("No preflight comparison should be loaded in this fixture");
-          },
-        },
         resolveRevision: async () => undefined,
         resolveCapability: () => undefined,
         project,
@@ -710,22 +662,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace: sourceWorkspace,
-        activations: {
-          current: async () => undefined,
-          listOperations: async () => Object.freeze([]),
-          getApproval: async () => undefined,
-        },
-        feedback: {
-          listObservations: async () => Object.freeze([]),
-          listResearchRuns: async () => Object.freeze([]),
-          getOutcome: async () => undefined,
-          getSuccessorInput: async () => undefined,
-        },
-        continuousFeedback: {
-          experimentComparison: async () => {
-            throw new Error("No preflight comparison should be loaded in this fixture");
-          },
-        },
         resolveRevision: async () => undefined,
         resolveCapability: () => undefined,
         project,

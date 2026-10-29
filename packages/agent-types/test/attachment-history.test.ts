@@ -32,8 +32,6 @@ function freeze(entry: FrozenConversationHistoryEntry) {
     planId: "plan",
     sessionId: "session",
     turnId: "turn",
-    activationId: "activation",
-    activationRevision: 1,
     selectedCapabilities: [],
     renderedSystemPrompt: "System",
     provider: "controlled",

@@ -20,8 +20,6 @@ describe("durable compounding measurement reservations", () => {
       planId: `plan-${turnId}`,
       sessionId: "session-1",
       turnId,
-      activationId: "activation_genesis",
-      activationRevision: 1,
       selectedCapabilities: [],
       renderedSystemPrompt: "Noesis baseline",
       provider: "fake",
@@ -40,16 +38,7 @@ describe("durable compounding measurement reservations", () => {
     roots.push(root);
     const store = await createWorkspaceStore(root);
     const protectedRuntime = createWorkspaceRuntimeInternals(store).protectedRuntime;
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: "a".repeat(64),
-      },
-      activeDefinitions: {},
-    });
-    const admitted = await protectedRuntime.activations.admitTurnPlan(createPlan("turn-1"));
+    const admitted = await protectedRuntime.turnPlans.admit(createPlan("turn-1"));
     await protectedRuntime.measurements.putBudget({
       budgetId: "budget-1",
       maximumCalls: 1,

@@ -46,8 +46,6 @@ function plan(): FrozenTurnPlan {
     planId: "image-plan",
     sessionId: request.trailId,
     turnId: "image-turn",
-    activationId: "image-activation",
-    activationRevision: 1,
     selectedCapabilities: [],
     renderedSystemPrompt: request.systemPrompt,
     provider: request.provider,

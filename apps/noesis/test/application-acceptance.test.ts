@@ -47,10 +47,6 @@ describe("credential-free Pi application acceptance", () => {
     });
 
     try {
-      const genesis = await runtime.debug.adaptations.activations.current();
-      expect(genesis).toBeDefined();
-      if (!genesis) return;
-
       const correctionSession = await runtime.startTrail({ title: "Learning correction" });
       await runtime.debug.runTurn(
         correctionSession.trailId,

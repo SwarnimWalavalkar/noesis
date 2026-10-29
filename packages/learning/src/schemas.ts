@@ -1,9 +1,7 @@
 import {
   canonicalJson,
-  type EvidenceRef,
   EvidenceRefSchema,
   type ExperimentVariantRef,
-  type FileRevisionRef,
   FileRevisionRefSchema,
   ProjectRefSchema,
   WORKING_ADJUSTMENT_LIMITS,
@@ -132,39 +130,3 @@ export const LearningTurnInputSchema = z.strictObject({
     .default({ retryCount: 0, toolFailureCount: 0, aborted: false }),
 });
 export type LearningTurnInput = Readonly<z.infer<typeof LearningTurnInputSchema>>;
-
-export interface LearningCitation {
-  readonly source:
-    | {
-        readonly kind: "database_row";
-        readonly table: "sessions" | "messages" | "tool_calls" | "outcomes" | "experiments";
-        readonly rowId: string;
-        readonly field: string;
-      }
-    | {
-        readonly kind: "file_revision";
-        readonly revisionId: string;
-        readonly field: "bytes";
-      };
-  readonly occurredAt: string;
-  readonly excerpt: string;
-  readonly startOffset: number;
-  readonly endOffset: number;
-  readonly contentDigest: string;
-}
-
-export interface LearningSourceCase {
-  readonly caseId: string;
-  readonly title: string;
-  readonly scope: string;
-  readonly input: string;
-  readonly expectedBehavior: string;
-  readonly evidenceRefs: readonly EvidenceRef[];
-  readonly citations: readonly LearningCitation[];
-}
-
-export interface RoleResearchMetadata {
-  readonly promptRevision: FileRevisionRef;
-  readonly model: string;
-  readonly reasoning: LearningRoleConfiguration["reasoning"];
-}

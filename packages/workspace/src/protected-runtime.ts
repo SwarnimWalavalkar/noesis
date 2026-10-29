@@ -1,3 +1,4 @@
+import type { FrozenTurnPlan } from "@noesis/agent-types";
 import { canonicalJson, type JsonValue, sha256, toJsonValue, WorkingAdjustmentSchema } from "@noesis/domain";
 import {
   type AuthorityBoundary,
@@ -10,44 +11,16 @@ import {
 import { z } from "zod";
 import type { McpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
 import type {
-  ClassifyExperimentObservationsRequest,
-  CommitExperimentOutcomeRequest,
   CompoundingMeasurementStore,
-  ExperimentObservationRecord,
-  ExperimentResearchRunRecord,
   NoesisWorkspaceStore,
-  PrepareActivationOperationRequest,
-  ProtectedActivationStore,
-  ProtectedFeedbackStore,
+  ProtectedTurnPlanStore,
   ProtectedWorkingAdjustmentStore,
   WorkingAdjustmentApplyResult,
   WorkingAdjustmentUnapplyResult,
 } from "./types.ts";
-import {
-  isCapabilityBindingAdmissionConflictError,
-  isWorkingAdjustmentAdmissionConflictError,
-} from "./types.ts";
+import { isCapabilityBindingAdmissionConflictError } from "./types.ts";
 
-type ActivationMutation = Pick<
-  ProtectedActivationStore,
-  | "prepare"
-  | "supersede"
-  | "decideApproval"
-  | "commit"
-  | "pinTurn"
-  | "admitTurnPlan"
-  | "bootstrapGenesis"
-  | "recoverCommittedPublications"
->;
-
-type ActivationInspection = Omit<ProtectedActivationStore, keyof ActivationMutation>;
-
-type FeedbackMutation = Pick<
-  ProtectedFeedbackStore,
-  "recordObservation" | "classifyObservations" | "putResearchRun" | "commitOutcome"
->;
-
-type FeedbackInspection = Omit<ProtectedFeedbackStore, keyof FeedbackMutation>;
+type TurnPlanMutation = Pick<ProtectedTurnPlanStore, "admit">;
 type WorkingAdjustmentMutation = Pick<ProtectedWorkingAdjustmentStore, "apply" | "unapply">;
 type WorkingAdjustmentInspection = Omit<ProtectedWorkingAdjustmentStore, keyof WorkingAdjustmentMutation>;
 
@@ -83,8 +56,7 @@ const WorkingAdjustmentUnapplyResultSchema: z.ZodType<WorkingAdjustmentUnapplyRe
 );
 
 export interface ProtectedWorkspaceRuntime {
-  readonly activations: ProtectedActivationStore;
-  readonly feedback: ProtectedFeedbackStore;
+  readonly turnPlans: ProtectedTurnPlanStore;
   readonly measurements: CompoundingMeasurementStore;
   readonly workingAdjustments: ProtectedWorkingAdjustmentStore;
 }
@@ -102,19 +74,12 @@ interface ProtectedMutationBinding {
 }
 
 interface ReceiptGuardedProtectedMutations {
-  readonly activations: {
-    readonly [Key in keyof ActivationMutation]: (
+  readonly turnPlans: {
+    readonly [Key in keyof TurnPlanMutation]: (
       binding: ProtectedMutationBinding,
       receipt: AuthorityReceipt,
-      ...args: Parameters<ActivationMutation[Key]>
-    ) => ReturnType<ActivationMutation[Key]>;
-  };
-  readonly feedback: {
-    readonly [Key in keyof FeedbackMutation]: (
-      binding: ProtectedMutationBinding,
-      receipt: AuthorityReceipt,
-      ...args: Parameters<FeedbackMutation[Key]>
-    ) => ReturnType<FeedbackMutation[Key]>;
+      ...args: Parameters<TurnPlanMutation[Key]>
+    ) => ReturnType<TurnPlanMutation[Key]>;
   };
   readonly workingAdjustments: {
     readonly [Key in keyof WorkingAdjustmentMutation]: (
@@ -128,8 +93,7 @@ interface ReceiptGuardedProtectedMutations {
 interface CreateProtectedWorkspaceRuntimeOptions {
   readonly workspaceRoot: string;
   readonly authority: AuthorityBoundary;
-  readonly activations: ProtectedActivationStore;
-  readonly feedback: ProtectedFeedbackStore;
+  readonly turnPlans: ProtectedTurnPlanStore;
   readonly measurements: CompoundingMeasurementStore;
   readonly workingAdjustments: ProtectedWorkingAdjustmentStore;
 }
@@ -179,34 +143,21 @@ function assertMatchingReceipt(
  */
 export function createReceiptGuardedProtectedMutations(input: {
   readonly verifier: AuthorityReceiptVerifier;
-  readonly activations: ActivationMutation;
-  readonly feedback: FeedbackMutation;
+  readonly turnPlans: TurnPlanMutation;
   readonly workingAdjustments: WorkingAdjustmentMutation;
 }): ReceiptGuardedProtectedMutations {
   // BOUNDARY: This private wrapper preserves each exact mutation signature after receipt verification.
-  const activation = <Key extends keyof ActivationMutation>(
+  const turnPlan = <Key extends keyof TurnPlanMutation>(
     method: Key,
-  ): ReceiptGuardedProtectedMutations["activations"][Key] =>
+  ): ReceiptGuardedProtectedMutations["turnPlans"][Key] =>
     // SAFETY: Key selects the same source and target mutation member; the wrapper only prepends receipt checks.
     ((mutation: ProtectedMutationBinding, receipt: AuthorityReceipt, ...args: unknown[]) => {
       assertMatchingReceipt(input.verifier, mutation, receipt);
       // BOUNDARY: Indexed mutation signatures are erased only inside this receipt-guarded dispatcher.
-      // SAFETY: method selects this exact ActivationMutation member before its original arguments are forwarded.
-      const invoke = input.activations[method] as (...parameters: unknown[]) => unknown;
+      // SAFETY: method selects this exact TurnPlanMutation member before its original arguments are forwarded.
+      const invoke = input.turnPlans[method] as (...parameters: unknown[]) => unknown;
       return invoke(...args);
-    }) as ReceiptGuardedProtectedMutations["activations"][Key];
-  // BOUNDARY: This private wrapper preserves each exact mutation signature after receipt verification.
-  const feedback = <Key extends keyof FeedbackMutation>(
-    method: Key,
-  ): ReceiptGuardedProtectedMutations["feedback"][Key] =>
-    // SAFETY: Key selects the same source and target mutation member; the wrapper only prepends receipt checks.
-    ((mutation: ProtectedMutationBinding, receipt: AuthorityReceipt, ...args: unknown[]) => {
-      assertMatchingReceipt(input.verifier, mutation, receipt);
-      // BOUNDARY: Indexed mutation signatures are erased only inside this receipt-guarded dispatcher.
-      // SAFETY: method selects this exact FeedbackMutation member before its original arguments are forwarded.
-      const invoke = input.feedback[method] as (...parameters: unknown[]) => unknown;
-      return invoke(...args);
-    }) as ReceiptGuardedProtectedMutations["feedback"][Key];
+    }) as ReceiptGuardedProtectedMutations["turnPlans"][Key];
   // BOUNDARY: This private wrapper preserves each exact mutation signature after receipt verification.
   const workingAdjustment = <Key extends keyof WorkingAdjustmentMutation>(
     method: Key,
@@ -221,22 +172,7 @@ export function createReceiptGuardedProtectedMutations(input: {
     }) as ReceiptGuardedProtectedMutations["workingAdjustments"][Key];
 
   return Object.freeze({
-    activations: Object.freeze({
-      prepare: activation("prepare"),
-      supersede: activation("supersede"),
-      decideApproval: activation("decideApproval"),
-      commit: activation("commit"),
-      pinTurn: activation("pinTurn"),
-      admitTurnPlan: activation("admitTurnPlan"),
-      bootstrapGenesis: activation("bootstrapGenesis"),
-      recoverCommittedPublications: activation("recoverCommittedPublications"),
-    }),
-    feedback: Object.freeze({
-      recordObservation: feedback("recordObservation"),
-      classifyObservations: feedback("classifyObservations"),
-      putResearchRun: feedback("putResearchRun"),
-      commitOutcome: feedback("commitOutcome"),
-    }),
+    turnPlans: Object.freeze({ admit: turnPlan("admit") }),
     workingAdjustments: Object.freeze({
       apply: workingAdjustment("apply"),
       unapply: workingAdjustment("unapply"),
@@ -253,16 +189,12 @@ async function runAuthorized<Result>(
   guarded: (mutation: ProtectedMutationBinding, receipt: AuthorityReceipt) => Promise<Result>,
   mutation: ProtectedMutationBinding,
   rehydrate: () => Promise<Result | undefined>,
-  acceptRehydrated: (result: Result) => boolean = () => true,
-  recoverCurrentFailure = false,
-  authorityAction: "promote" | "rollback" = "promote",
 ): Promise<Result> {
   let result: Result | undefined;
   let completed = false;
   let callbackStarted = false;
   let callbackError: unknown;
-  const authorize = authorityAction === "rollback" ? authority.rollback : authority.promote;
-  const decision = await authorize(mutation.resource, mutation.idempotencyKey, async (receipt) => {
+  const decision = await authority.promote(mutation.resource, mutation.idempotencyKey, async (receipt) => {
     callbackStarted = true;
     try {
       result = await guarded(mutation, receipt);
@@ -274,15 +206,11 @@ async function runAuthorized<Result>(
     }
   });
   if (!decision.ok) {
-    if (
-      isWorkingAdjustmentAdmissionConflictError(callbackError) ||
-      isCapabilityBindingAdmissionConflictError(callbackError)
-    )
-      throw callbackError;
-    if (!callbackStarted || recoverCurrentFailure) {
+    if (isCapabilityBindingAdmissionConflictError(callbackError)) throw callbackError;
+    if (!callbackStarted) {
       try {
         const recovered = await rehydrate();
-        if (recovered !== undefined && acceptRehydrated(recovered)) return recovered;
+        if (recovered !== undefined) return recovered;
       } catch {
         // Preserve the original fail-closed authority decision when authoritative state
         // cannot be rehydrated.
@@ -292,7 +220,7 @@ async function runAuthorized<Result>(
   }
   if (!completed) {
     const replayed = await rehydrate();
-    if (replayed === undefined || !acceptRehydrated(replayed))
+    if (replayed === undefined)
       throw new Error("Protected workspace mutation replayed without authoritative durable state");
     return replayed;
   }
@@ -372,176 +300,22 @@ export function createProtectedWorkspaceRuntime(
   const workspaceId = workspaceResourceId(options.workspaceRoot);
   const guarded = createReceiptGuardedProtectedMutations({
     verifier: options.authority.receiptVerifier,
-    activations: options.activations,
-    feedback: options.feedback,
+    turnPlans: options.turnPlans,
     workingAdjustments: options.workingAdjustments,
   });
 
-  const activations: ProtectedActivationStore = Object.freeze({
-    ...({
-      getOperation: options.activations.getOperation,
-      listOperations: options.activations.listOperations,
-      getApproval: options.activations.getApproval,
-      current: options.activations.current,
-      getTurnPin: options.activations.getTurnPin,
-      getTurnPlan: options.activations.getTurnPlan,
-    } satisfies ActivationInspection),
-    prepare: async (request: PrepareActivationOperationRequest) =>
+  const turnPlans: ProtectedTurnPlanStore = Object.freeze({
+    get: options.turnPlans.get,
+    admit: async (plan: FrozenTurnPlan) =>
       await runAuthorized(
         options.authority,
-        async (mutation, receipt) => await guarded.activations.prepare(mutation, receipt, request),
-        binding(
-          workspaceId,
-          `activation:${request.operationId}:prepare`,
-          `protected:activation:prepare:${request.idempotencyKey}`,
-        ),
-        async () => await options.activations.getOperation(request.operationId),
-      ),
-    supersede: async (request: Parameters<ProtectedActivationStore["supersede"]>[0]) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) => await guarded.activations.supersede(mutation, receipt, request),
-        binding(
-          workspaceId,
-          `activation:${request.operationId}:supersede:${request.supersededByOperationId}`,
-          `protected:activation:supersede:${request.operationId}:${request.supersededByOperationId}`,
-        ),
-        async () => await options.activations.getOperation(request.operationId),
-      ),
-    decideApproval: async (request: Parameters<ProtectedActivationStore["decideApproval"]>[0]) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) => await guarded.activations.decideApproval(mutation, receipt, request),
-        binding(
-          workspaceId,
-          `activation:${request.operationId}:approval:${request.decision}`,
-          `protected:activation:approval:${request.approvalId}:${request.decision}:${request.bindingDigest}`,
-        ),
-        async () => await options.activations.getOperation(request.operationId),
-      ),
-    commit: async (request: Parameters<ProtectedActivationStore["commit"]>[0]) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) => await guarded.activations.commit(mutation, receipt, request),
-        binding(
-          workspaceId,
-          `activation:${request.operationId}:commit`,
-          `protected:activation:commit:${request.operationId}:${request.bindingDigest}`,
-        ),
-        async () => await options.activations.getOperation(request.operationId),
-        (operation) => operation.status === "committed",
-      ),
-    pinTurn: async (request: Parameters<ProtectedActivationStore["pinTurn"]>[0]) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) => await guarded.activations.pinTurn(mutation, receipt, request),
-        binding(
-          workspaceId,
-          `turn:${request.sessionId}:${request.turnId}:pin`,
-          `protected:turn:pin:${request.sessionId}:${request.turnId}`,
-        ),
-        async () => await options.activations.getTurnPin(request.sessionId, request.turnId),
-      ),
-    admitTurnPlan: async (plan: Parameters<ProtectedActivationStore["admitTurnPlan"]>[0]) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) => await guarded.activations.admitTurnPlan(mutation, receipt, plan),
+        async (mutation, receipt) => await guarded.turnPlans.admit(mutation, receipt, plan),
         binding(
           workspaceId,
           `turn:${plan.sessionId}:${plan.turnId}:admit`,
           `protected:turn:admit:${plan.planId}:${plan.canonicalDigest}`,
         ),
-        async () => await options.activations.getTurnPlan(plan.sessionId, plan.turnId),
-      ),
-    bootstrapGenesis: async (request: Parameters<ProtectedActivationStore["bootstrapGenesis"]>[0]) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) => await guarded.activations.bootstrapGenesis(mutation, receipt, request),
-        binding(
-          workspaceId,
-          `activation:genesis:${request.capabilityRevision.capabilityRevisionId}`,
-          `protected:activation:genesis:${request.capabilityRevision.bundleDigest}`,
-        ),
-        options.activations.current,
-      ),
-    recoverCommittedPublications: async () =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) =>
-          await guarded.activations.recoverCommittedPublications(mutation, receipt),
-        binding(workspaceId, "activation:recover-publications", "protected:activation:recover-publications"),
-        async () => 0,
-      ),
-  });
-
-  const feedback: ProtectedFeedbackStore = Object.freeze({
-    ...({
-      operationForActivation: options.feedback.operationForActivation,
-      getObservation: options.feedback.getObservation,
-      getObservationClassification: options.feedback.getObservationClassification,
-      listObservationsForOutcome: options.feedback.listObservationsForOutcome,
-      listObservations: options.feedback.listObservations,
-      getResearchRun: options.feedback.getResearchRun,
-      listResearchRuns: options.feedback.listResearchRuns,
-      getOutcome: options.feedback.getOutcome,
-      getSuccessorInput: options.feedback.getSuccessorInput,
-    } satisfies FeedbackInspection),
-    recordObservation: async (
-      record: Omit<ExperimentObservationRecord, "createdAt">,
-      maximumObservations: number,
-    ) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) =>
-          await guarded.feedback.recordObservation(mutation, receipt, record, maximumObservations),
-        binding(
-          workspaceId,
-          `feedback:${record.experimentId}:observation:${record.observationId}`,
-          `protected:feedback:observation:${record.dedupeKey}`,
-        ),
-        async () => await options.feedback.getObservation(record.observationId),
-      ),
-    classifyObservations: async (request: ClassifyExperimentObservationsRequest) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) => await guarded.feedback.classifyObservations(mutation, receipt, request),
-        binding(
-          workspaceId,
-          `feedback:outcome:${request.outcomeId}:classification:${request.classification}`,
-          `protected:feedback:classification:${request.outcomeId}:${request.classification}`,
-        ),
-        async () => await options.feedback.getObservationClassification(request),
-      ),
-    putResearchRun: async (record: Omit<ExperimentResearchRunRecord, "createdAt" | "updatedAt">) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) => await guarded.feedback.putResearchRun(mutation, receipt, record),
-        binding(
-          workspaceId,
-          `feedback:${record.experimentId}:research:${record.runId}:${record.status}`,
-          `protected:feedback:research:${record.runId}:${record.inputDigest}:${record.status}:${record.attempt}`,
-        ),
-        async () => await options.feedback.getResearchRun(record.runId),
-        (run) =>
-          run.status === record.status &&
-          run.inputDigest === record.inputDigest &&
-          run.attempt === record.attempt,
-      ),
-    commitOutcome: async (request: CommitExperimentOutcomeRequest) =>
-      await runAuthorized(
-        options.authority,
-        async (mutation, receipt) => await guarded.feedback.commitOutcome(mutation, receipt, request),
-        binding(
-          workspaceId,
-          // AuthorityBoundary.rollback intentionally uses the protected "promote" effect too:
-          // the resource binds whether this transition keeps, revises, or restores state.
-          `feedback:${request.experimentId}:outcome:${request.decision}`,
-          `protected:feedback:outcome:${request.idempotencyKey}`,
-        ),
-        async () => await options.feedback.getOutcome(request.experimentId),
-        (outcome) => outcome.operationId === request.operationId,
-        true,
-        request.decision === "revert" ? "rollback" : "promote",
+        async () => await options.turnPlans.get(plan.sessionId, plan.turnId),
       ),
   });
 
@@ -550,7 +324,6 @@ export function createProtectedWorkspaceRuntime(
       get: options.workingAdjustments.get,
       getActive: options.workingAdjustments.getActive,
       list: options.workingAdjustments.list,
-      listSettledEvidence: options.workingAdjustments.listSettledEvidence,
     } satisfies WorkingAdjustmentInspection),
     apply: async (request: Parameters<ProtectedWorkingAdjustmentStore["apply"]>[0]) => {
       assertWorkingAdjustmentMutationActive(request.signal);
@@ -603,8 +376,7 @@ export function createProtectedWorkspaceRuntime(
   });
 
   return Object.freeze({
-    activations,
-    feedback,
+    turnPlans,
     measurements: options.measurements,
     workingAdjustments,
   });

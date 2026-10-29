@@ -20,12 +20,7 @@ import {
 } from "@noesis/domain";
 import type { AuthorityReceipt } from "@noesis/policy";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import {
-  createWorkspaceStore,
-  isWorkingAdjustmentAdmissionConflictError,
-  type NoesisWorkspaceStore,
-  restoreWorkspaceBackup,
-} from "../src/index.ts";
+import { createWorkspaceStore, type NoesisWorkspaceStore, restoreWorkspaceBackup } from "../src/index.ts";
 import { decodeModelCall, decodeWorkflowRun } from "../src/decoders.ts";
 import { createWorkspaceRuntimeInternals } from "../src/protected-runtime.ts";
 // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
@@ -76,8 +71,6 @@ const runningTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
     planId: `plan-${turnId}`,
     sessionId,
     turnId,
-    activationId: "activation_genesis",
-    activationRevision: 1,
     selectedCapabilities: [],
     renderedSystemPrompt: "Noesis recovery fixture",
     provider: "controlled",
@@ -96,25 +89,7 @@ const admitAndSettleSourceTurn = async (
   turnId: string,
 ): Promise<void> => {
   const runtime = createWorkspaceRuntimeInternals(store).protectedRuntime;
-  const activation = await runtime.activations.bootstrapGenesis({
-    capabilityRevision: {
-      kind: "capability_revision",
-      capabilityId: "general-collaboration",
-      capabilityRevisionId: "general-collaboration-genesis-v1",
-      bundleDigest: digest("a"),
-    },
-    activeDefinitions: Object.freeze({}),
-  });
-  const initial = runningTurnPlan(sessionId, turnId);
-  const { canonicalDigest: _discardedDigest, ...initialBody } = initial;
-  const body = Object.freeze({
-    ...initialBody,
-    activationId: activation.activationId,
-    activationRevision: activation.revision,
-  });
-  await runtime.activations.admitTurnPlan(
-    Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) }),
-  );
+  await runtime.turnPlans.admit(runningTurnPlan(sessionId, turnId));
   const outcomeId = `${turnId}:outcome`;
   await store.operational.outcomes.put({
     outcomeId,
@@ -1142,93 +1117,6 @@ describe("WorkspaceStore", () => {
     expect(await reopened.workingAdjustments.getActive(project.projectId)).toBeUndefined();
     reopened.close();
   });
-  test("admits only the current project adjustment and derives settled serving evidence", async () => {
-    const store = await createWorkspaceStore(await temporary("working-adjustment-admission"));
-    await store.operational.sessions.put(session("session-adjustment-admission"));
-    const runtime = createWorkspaceRuntimeInternals(store).protectedRuntime;
-    await runtime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: digest("a"),
-      },
-      activeDefinitions: Object.freeze({}),
-    });
-    await admitAndSettleSourceTurn(store, "session-adjustment-admission", "turn-source");
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const evidence = Object.freeze({
-      kind: "database_row" as const,
-      table: "sessions" as const,
-      rowId: "session-adjustment-admission",
-    });
-    const project = Object.freeze({ projectId: "project-admission", root: "/tmp/project-admission" });
-    const adjustment = (adjustmentId: string) =>
-      Object.freeze({
-        adjustmentId,
-        scope: project,
-        observation: "A project strategy was inferred from settled evidence.",
-        strategy: `Serve ${adjustmentId} as bounded temporary strategy data.`,
-        successSignal: "A later completed turn records an outcome.",
-        evidenceRefs: Object.freeze([evidence]),
-        createdFromTurnId: "turn-source",
-      });
-    await runtime.workingAdjustments.apply({
-      adjustment: adjustment("adjustment-admission-a"),
-      expectedActiveAdjustmentId: null,
-    });
-    const planFor = (adjustmentId: string): FrozenTurnPlan => {
-      const initial = runningTurnPlan("session-adjustment-admission", "turn-adjustment-admission");
-      const { canonicalDigest: _discardedDigest, ...initialBody } = initial;
-      const body = Object.freeze({
-        ...initialBody,
-        project,
-        workingAdjustmentId: adjustmentId,
-      });
-      return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
-    };
-    const stalePlan = planFor("adjustment-admission-a");
-    await runtime.workingAdjustments.apply({
-      adjustment: adjustment("adjustment-admission-b"),
-      expectedActiveAdjustmentId: "adjustment-admission-a",
-    });
-    await expect(runtime.activations.admitTurnPlan(stalePlan)).rejects.toSatisfy(
-      isWorkingAdjustmentAdmissionConflictError,
-    );
-    const admitted = await runtime.activations.admitTurnPlan(planFor("adjustment-admission-b"));
-    await store.operational.outcomes.put({
-      outcomeId: "outcome-adjustment-admission",
-      sessionId: admitted.sessionId,
-      turnId: admitted.turnId,
-      status: "accepted",
-      summary: "The adjustment was served in a completed turn.",
-      sensitivity: "normal",
-      createdAt: "2026-07-26T00:00:01.000Z",
-      metadata: Object.freeze({}),
-    });
-    await store.operational.foregroundTurns.settle({
-      turnId: admitted.turnId,
-      outcomeId: "outcome-adjustment-admission",
-      status: "completed",
-      settledAt: "2026-07-26T00:00:01.000Z",
-    });
-    await expect(
-      store.workingAdjustments.listSettledEvidence({
-        projectId: project.projectId,
-        adjustmentId: "adjustment-admission-b",
-        limit: 8,
-      }),
-    ).resolves.toEqual([
-      {
-        planId: admitted.planId,
-        sessionId: admitted.sessionId,
-        turnId: admitted.turnId,
-        outcomeId: "outcome-adjustment-admission",
-        settledAt: "2026-07-26T00:00:01.000Z",
-      },
-    ]);
-    store.close();
-  });
   test("classifies one canonical turn outcome with an idempotent semantic transition", async () => {
     const store = await createWorkspaceStore(await temporary("semantic-outcome"));
     await store.operational.sessions.put({
@@ -1658,18 +1546,7 @@ describe("WorkspaceStore", () => {
       metadata: Object.freeze({}),
     });
     const protectedRuntime = createWorkspaceRuntimeInternals(first).protectedRuntime;
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: digest("a"),
-      },
-      activeDefinitions: Object.freeze({}),
-    });
-    await protectedRuntime.activations.admitTurnPlan(
-      runningTurnPlan("session-interrupted-turn", "turn-interrupted"),
-    );
+    await protectedRuntime.turnPlans.admit(runningTurnPlan("session-interrupted-turn", "turn-interrupted"));
     await first.operational.toolCalls.put({
       toolCallId: "action-interrupted",
       sessionId: "session-interrupted-turn",
@@ -1731,16 +1608,7 @@ describe("WorkspaceStore", () => {
     await first.operational.sessions.put(session("session-aborted", "aborted"));
     await first.operational.sessions.put(session("session-failed", "failed"));
     const protectedRuntime = createWorkspaceRuntimeInternals(first).protectedRuntime;
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: digest("a"),
-      },
-      activeDefinitions: Object.freeze({}),
-    });
-    await protectedRuntime.activations.admitTurnPlan(
+    await protectedRuntime.turnPlans.admit(
       runningTurnPlan("session-after-settlement", "turn-already-settled"),
     );
     await first.operational.outcomes.put({
@@ -2279,7 +2147,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 53 });
+    ).toEqual({ version: 54 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -2851,6 +2719,102 @@ describe("WorkspaceStore", () => {
     expect(versions).toEqual(Array.from({ length: versions.length }, (_, index) => index + 1));
     expect(versions.at(-1)).toBeGreaterThanOrEqual(9);
   });
+  test("migration 54 removes activations and keeps admitted turns referenced by their plans", async () => {
+    const root = await temporary("remove-activations");
+    const { database } = await seedWorkspaceThroughMigration(root, 53);
+    const at = "2026-07-26T00:00:00.000Z";
+    database
+      .prepare(`INSERT INTO sessions(
+          session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+        ) VALUES (?, ?, 'idle', 'controlled', 'controlled', 'pi', ?, ?, '{}')`)
+      .run("session-legacy", "Legacy", at, at);
+    database
+      .prepare(`INSERT INTO activations(
+          activation_id, revision, previous_activation_id, definitions_json,
+          capability_revisions_json, preflight_id, created_at
+        ) VALUES ('activation_genesis', 1, NULL, '{}', '{}', NULL, ?)`)
+      .run(at);
+    database
+      .prepare(`INSERT INTO activation_state(state_id, activation_id, revision, updated_at)
+          VALUES ('current', 'activation_genesis', 1, ?)`)
+      .run(at);
+    database
+      .prepare(`INSERT INTO frozen_turn_plans(
+          plan_id, session_id, turn_id, schema_version, activation_id, activation_revision,
+          plan_json, canonical_digest, created_at
+        ) VALUES ('plan-legacy', 'session-legacy', 'turn-legacy', 1, 'activation_genesis', 1, '{}', ?, ?)`)
+      .run(digest("b"), at);
+    database
+      .prepare(`INSERT INTO foreground_turns(
+          turn_id, session_id, plan_id, status, outcome_id, admitted_at, settled_at
+        ) VALUES ('turn-legacy', 'session-legacy', 'plan-legacy', 'running', NULL, ?, NULL)`)
+      .run(at);
+    database
+      .prepare(`INSERT INTO turn_activation_pins(
+          turn_key, session_id, turn_id, activation_id, activation_revision,
+          definitions_json, capability_revisions_json, pinned_at
+        ) VALUES ('pin-legacy', 'session-legacy', 'turn-legacy', 'activation_genesis', 1, '{}', '{}', ?)`)
+      .run(at);
+    database
+      .prepare(`INSERT INTO compounding_replay_budgets(
+          budget_id, maximum_calls, maximum_tokens, maximum_cost, created_at
+        ) VALUES ('budget-legacy', 1, 1, 1, ?)`)
+      .run(at);
+    database
+      .prepare(`INSERT INTO compounding_replay_runs(replay_id, plan_id, budget_id, status, created_at)
+          VALUES ('replay-legacy', 'plan-legacy', 'budget-legacy', 'running', ?)`)
+      .run(at);
+    database
+      .prepare(`INSERT INTO agent_messages(
+          message_id, project_id, sender_kind, sender_id, recipient_kind, recipient_id,
+          content, sensitivity, status, sequence, task_id, created_at
+        ) VALUES ('message-legacy', 'project', 'foreground', 'session-legacy', 'foreground', 'session-legacy',
+          'hello', 'normal', 'accepted', 1, NULL, ?)`)
+      .run(at);
+    database.close();
+
+    const store = await createWorkspaceStore(root);
+    store.close();
+    const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
+      version: 54,
+    });
+    expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(
+      upgraded
+        .prepare("SELECT name FROM pragma_table_info('frozen_turn_plans') ORDER BY cid")
+        .all()
+        .map((row) => row["name"]),
+    ).toEqual([
+      "plan_id",
+      "session_id",
+      "turn_id",
+      "schema_version",
+      "plan_json",
+      "canonical_digest",
+      "created_at",
+    ]);
+    expect(upgraded.prepare("SELECT plan_id, turn_id FROM frozen_turn_plans").all()).toEqual([
+      { plan_id: "plan-legacy", turn_id: "turn-legacy" },
+    ]);
+    expect(upgraded.prepare("SELECT turn_id, plan_id FROM foreground_turns").all()).toEqual([
+      { turn_id: "turn-legacy", plan_id: "plan-legacy" },
+    ]);
+    expect(upgraded.prepare("SELECT replay_id FROM compounding_replay_runs").all()).toEqual([
+      { replay_id: "replay-legacy" },
+    ]);
+    expect(upgraded.prepare("SELECT COUNT(*) AS count FROM agent_messages").get()).toEqual({ count: 0 });
+    expect(
+      upgraded
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND (
+            name LIKE 'activation%' OR name IN (
+              'turn_activation_pins', 'outcome_activation_publications', 'experiment_observations',
+              'experiment_outcomes', 'experiment_research_runs', 'successor_lineage_inputs'
+            ))`)
+        .all(),
+    ).toEqual([]);
+    upgraded.close();
+  });
   test("upgrades an old version-20 workspace through corrected execution lineage contracts", async () => {
     const root = await temporary("development-migrations");
     await mkdir(join(root, "database"), { recursive: true });
@@ -3012,7 +2976,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(53);
+    expect(versions.at(-1)).toBe(54);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

@@ -1,7 +1,6 @@
 import { renderComposerAttachmentText } from "./attachments.ts";
 import {
   type AgentThinkingLevel,
-  type FrozenBaselineRef,
   type FrozenCapabilitySelection,
   type FrozenContextCheckpoint,
   type FrozenContextDocument,
@@ -45,7 +44,6 @@ const decoder = new TextDecoder("utf8", { fatal: true });
 export interface TurnCapabilityResolver {
   readonly resolveCapability: (capabilityId: string) => Promise<Capability | undefined>;
   readonly resolveRevision: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
-  readonly resolveBaseline: (reference: CapabilityRevisionRef) => Promise<FrozenBaselineRef>;
 }
 export interface TurnPlanningRequest {
   readonly sessionId: string;
@@ -495,14 +493,10 @@ export function createTurnIntelligencePlanner(
   const now = options.now ?? (() => new Date().toISOString());
   const createPlanId = options.createPlanId ?? ((turnId) => `turn_plan_${turnId}`);
   const planAndAdmitOnce = async (request: TurnPlanningRequest): Promise<FrozenTurnPlan> => {
-    const [activation, lifecycleBindings] = await Promise.all([
-      options.protectedRuntime.activations.current(),
-      options.workspace.capabilities.listEligibleBindings({
-        project: options.project,
-        sessionId: request.sessionId,
-      }),
-    ]);
-    if (!activation) throw new Error("A frozen turn plan requires an active genesis baseline");
+    const bindings = await options.workspace.capabilities.listEligibleBindings({
+      project: options.project,
+      sessionId: request.sessionId,
+    });
     const [conversationHistory, contextCheckpoint, contextDocument] = await Promise.all([
       freezeConversationHistory(options.workspace, request.sessionId, request.priorHistory ?? []),
       freezeContextCheckpoint(
@@ -513,110 +507,62 @@ export function createTurnIntelligencePlanner(
       ),
       freezeContextDocument(options.workspace, request.sessionId),
     ]);
-    const resolved: {
-      readonly reference: CapabilityRevisionRef;
-      readonly capability: Capability;
-      readonly definition?: import("@noesis/domain").CapabilityDefinition;
-      readonly revision: CapabilityRevision;
-      readonly baseline: FrozenBaselineRef;
-    }[] = [];
-    const legacyReferences = Object.values(activation.activeCapabilityRevisions);
-    const legacyCapabilityReferences = legacyReferences.filter(
-      (reference): reference is CapabilityRevisionRef => reference.kind === "capability_revision",
-    );
-    const legacyBindingBatches: Promise<readonly import("@noesis/domain").CapabilityBinding[]>[] = [];
-    for (let offset = 0; offset < legacyCapabilityReferences.length; offset += 1000)
-      legacyBindingBatches.push(
-        options.workspace.capabilities.getBindings(
-          legacyCapabilityReferences.slice(offset, offset + 1000).map((reference) => reference.capabilityId),
-        ),
-      );
-    const lifecycleCapabilityIds = new Set(
-      (await Promise.all(legacyBindingBatches)).flat().map((binding) => binding.capabilityId),
-    );
-    const legacyWithoutLifecycleBinding = legacyCapabilityReferences.filter(
-      (reference) => !lifecycleCapabilityIds.has(reference.capabilityId),
-    );
-    const lifecycleModes = new Map(
-      lifecycleBindings.map((binding) => [binding.capabilityId, binding.activationMode]),
-    );
-    const lifecycleScopes = new Map(
-      lifecycleBindings.map((binding) => [binding.capabilityId, binding.scope]),
-    );
-    const referencesByCapabilityId = new Map<string, CapabilityRevisionRef>();
-    for (const reference of legacyWithoutLifecycleBinding)
-      referencesByCapabilityId.set(reference.capabilityId, reference);
-    for (const binding of lifecycleBindings)
-      referencesByCapabilityId.set(binding.capabilityId, binding.revision);
-    const references = [...referencesByCapabilityId.values()];
-    for (const reference of references) {
-      if (reference.kind !== "capability_revision") continue;
-      const [capability, definition, revision, baseline] = await Promise.all([
-        options.capabilities.resolveCapability(reference.capabilityId),
-        options.workspace.capabilities.getDefinition(reference.capabilityId),
-        options.capabilities.resolveRevision(reference),
-        options.capabilities.resolveBaseline(reference),
-      ]);
-      if (!capability || !revision)
-        throw new Error(
-          `Active capability ${reference.capabilityRevisionId} cannot be rehydrated from immutable state`,
-        );
-      resolved.push(
-        Object.freeze(
-          createConditionalObject({ reference, capability, revision, baseline } as const)
+    const resolved = await Promise.all(
+      bindings.map(async (binding) => {
+        const reference = binding.revision;
+        const [capability, definition, revision] = await Promise.all([
+          options.capabilities.resolveCapability(reference.capabilityId),
+          options.workspace.capabilities.getDefinition(reference.capabilityId),
+          options.capabilities.resolveRevision(reference),
+        ]);
+        if (!capability || !revision)
+          throw new Error(
+            `Active capability ${reference.capabilityRevisionId} cannot be rehydrated from immutable state`,
+          );
+        return Object.freeze(
+          createConditionalObject({ binding, reference, capability, revision } as const)
             .addOptional(definition ? { definition } : undefined)
             .finish(),
-        ),
-      );
-    }
-    const general = resolved.filter((item) => item.baseline.kind === "genesis");
-    const always = resolved.filter(
-      (item) =>
-        item.baseline.kind !== "genesis" && lifecycleModes.get(item.reference.capabilityId) === "always",
+        );
+      }),
     );
-    const candidates = resolved.filter(
-      (item) =>
-        item.baseline.kind !== "genesis" &&
-        (lifecycleModes.get(item.reference.capabilityId) ?? "relevant") === "relevant",
-    );
-    // `relevant` Capabilities are listed by name and "when" text, the same way skills are. The
-    // foreground model chooses which to load, so planning makes no separate routing model call.
+    // `always` Capabilities go in the prompt. `relevant` Capabilities are listed by name and "when"
+    // text, the same way skills are. The foreground model chooses which to load, so planning makes
+    // no separate routing model call.
     const selectedResolved = [
-      ...general.map((item) =>
-        Object.freeze({
-          ...item,
-          selectionReason: "protected genesis baseline",
-          delivery: "prompt" as const,
-        }),
-      ),
-      ...always.map((item) =>
-        Object.freeze({ ...item, selectionReason: "always active", delivery: "prompt" as const }),
-      ),
-      ...candidates.map((item) =>
-        Object.freeze({
-          ...item,
-          selectionReason: "listed for the model to load when relevant",
-          delivery: "on_demand" as const,
-        }),
-      ),
+      ...resolved
+        .filter((item) => item.binding.activationMode === "always")
+        .map((item) =>
+          Object.freeze({ ...item, selectionReason: "always active", delivery: "prompt" as const }),
+        ),
+      ...resolved
+        .filter((item) => item.binding.activationMode === "relevant")
+        .map((item) =>
+          Object.freeze({
+            ...item,
+            selectionReason: "listed for the model to load when relevant",
+            delivery: "on_demand" as const,
+          }),
+        ),
     ];
     const selections: FrozenCapabilitySelection[] = [];
     for (const {
+      binding,
       reference,
       capability,
       definition,
       revision,
-      baseline,
       selectionReason,
       delivery,
     } of selectedResolved) {
       const currentEffects = capabilityEffects(revision);
       if (currentEffects.length > 0) {
         validateCapabilityEffects(currentEffects);
-        const scope = lifecycleScopes.get(reference.capabilityId);
-        if (!scope)
-          throw new Error(`Effects-first capability ${reference.capabilityId} has no lifecycle binding`);
-        assertCapabilityEffectsEligible({ effects: currentEffects, scope, project: options.project });
+        assertCapabilityEffectsEligible({
+          effects: currentEffects,
+          scope: binding.scope,
+          project: options.project,
+        });
       }
       const [promptModules, skills, tools, router] = await Promise.all([
         Promise.all(revision.promptModules.map(async (item) => await materialize(options.workspace, item))),
@@ -652,7 +598,6 @@ export function createTurnIntelligencePlanner(
             selectionReason,
             delivery,
             revision: reference,
-            baseline,
           } as const)
             .addOptional(!(effects.length === 0) ? { effects: Object.freeze(effects) } : undefined)
             .add({
@@ -670,8 +615,7 @@ export function createTurnIntelligencePlanner(
     // this turn instead of growing every prompt.
     let alwaysCharacters = 0;
     const deliveredSelections = selections.map((selection) => {
-      if (selection.delivery !== "prompt" || selection.baseline.kind === "genesis" || !selection.effects)
-        return selection;
+      if (selection.delivery !== "prompt" || !selection.effects) return selection;
       const characters = selection.effects
         .flatMap((effect) =>
           effect.kind === "instruction" ? [capabilityGuidance(effect.material.content)] : [],
@@ -707,8 +651,6 @@ export function createTurnIntelligencePlanner(
         sessionId: request.sessionId,
         turnId: request.turnId,
         project: options.project,
-        activationId: activation.activationId,
-        activationRevision: activation.revision,
         selectedCapabilities: Object.freeze(deliveredSelections),
         conversationHistory,
         contextDocument,
@@ -754,7 +696,7 @@ export function createTurnIntelligencePlanner(
     const plan = validateFrozenTurnPlan(
       Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) }),
     );
-    return await options.protectedRuntime.activations.admitTurnPlan(plan);
+    return await options.protectedRuntime.turnPlans.admit(plan);
   };
   const planAndAdmit = async (request: TurnPlanningRequest): Promise<FrozenTurnPlan> => {
     try {

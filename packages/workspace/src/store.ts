@@ -62,7 +62,6 @@ import {
   JsonValueSchema,
 } from "@noesis/domain";
 import { z } from "zod";
-import { createProtectedActivationStore } from "./activation-store.ts";
 import { createWorkspaceAuthorityBoundary } from "./authority-state.ts";
 import { createBackup, inspectWorkspaceIntegrity } from "./backup.ts";
 import { createCompoundingMeasurementStore } from "./compounding-measurements.ts";
@@ -102,7 +101,7 @@ import {
   SearchConfigurationSchema,
   SensitivitySchema,
 } from "./decoders.ts";
-import { createProtectedFeedbackStore } from "./feedback-store.ts";
+import { createProtectedTurnPlanStore } from "./turn-plan-store.ts";
 import { importLegacyWorkspace } from "./importer.ts";
 import { createDurableJobStore } from "./jobs.ts";
 import { createMcpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
@@ -151,12 +150,6 @@ export interface WorkspaceStoreOptions {
   readonly runtimeOwnerId?: string;
   readonly afterRuntimeOwnerAcquiredForTesting?: () => void;
   readonly afterDefinitionCommitForTesting?: () => void;
-  readonly beforeActivationCommitForTesting?: () => void;
-  readonly duringActivationCommitForTesting?: () => void;
-  readonly afterActivationCommitForTesting?: () => void;
-  readonly beforeOutcomeCommitForTesting?: () => void;
-  readonly duringOutcomeCommitForTesting?: () => void;
-  readonly afterOutcomeCommitForTesting?: () => void;
 }
 const ActorSchema = z.strictObject({
   actorId: z.string().min(1),
@@ -908,54 +901,6 @@ export async function createWorkspaceStore(
       throw new Error(`Immutable file digest mismatch: ${storedPath}`);
     return bytes;
   };
-  const normalizeActiveWorkingPath = (workingPath: string): string =>
-    pathsForDefinition(workingPath, "active").stored;
-  const outcomePublicationDirectory = (operationId: string): string =>
-    join(paths.staging, "outcome-publications", sha256(operationId));
-  const stageActiveRevision = async (
-    operationId: string,
-    publicationKey: string,
-    sourceRevision: FileRevisionRef,
-  ): Promise<{
-    readonly workingPath: string;
-    readonly stagedPath: string;
-    readonly contentDigest: string;
-  }> => {
-    assertStoredReference(db, sourceRevision);
-    const bytes = await readVerifiedFile(sourceRevision.snapshotPath, sourceRevision.contentDigest);
-    const target = pathsForDefinition(sourceRevision.workingPath, "active");
-    const stagedAbsolute = join(outcomePublicationDirectory(operationId), sha256(publicationKey), "content");
-    await persistAtomically(stagedAbsolute, bytes);
-    return Object.freeze({
-      workingPath: target.stored,
-      stagedPath: workspaceRelative(paths, stagedAbsolute),
-      contentDigest: sourceRevision.contentDigest,
-    });
-  };
-  const publishStagedActiveRevision = async (publication: {
-    readonly workingPath: string;
-    readonly stagedPath: string;
-    readonly contentDigest: string;
-    readonly sourceRevision: FileRevisionRef;
-  }): Promise<void> => {
-    let bytes: Uint8Array;
-    try {
-      bytes = await readVerifiedFile(publication.stagedPath, publication.contentDigest);
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      bytes = await readVerifiedFile(
-        publication.sourceRevision.snapshotPath,
-        publication.sourceRevision.contentDigest,
-      );
-    }
-    await persistAtomically(pathsForDefinition(publication.workingPath, "active").absolute, bytes);
-  };
-  const deleteActiveDefinition = async (workingPath: string): Promise<void> => {
-    await unlink(pathsForDefinition(workingPath, "active").absolute).catch(ignoreMissing);
-  };
-  const cleanupOutcomePublicationStage = async (operationId: string): Promise<void> => {
-    await rm(outcomePublicationDirectory(operationId), { recursive: true, force: true });
-  };
   const resolveRevision = async (revisionId: string): Promise<FileRevisionRef | undefined> => {
     const row = db
       .prepare(`SELECT revision_id, working_path, snapshot_path, content_digest
@@ -1311,82 +1256,11 @@ export async function createWorkspaceStore(
           mediaType: requiredString(row, "media_type"),
         });
   };
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const protectedActivations = await createProtectedActivationStore(
-    createConditionalObject({
-      database,
-      now,
-    } as const)
-      .addOptional(
-        !(options.beforeActivationCommitForTesting === undefined)
-          ? {
-              beforeActivationCommitForTesting: options.beforeActivationCommitForTesting,
-            }
-          : undefined,
-      )
-      .addOptional(
-        !(options.duringActivationCommitForTesting === undefined)
-          ? {
-              duringActivationCommitForTesting: options.duringActivationCommitForTesting,
-            }
-          : undefined,
-      )
-      .addOptional(
-        !(options.afterActivationCommitForTesting === undefined)
-          ? {
-              afterActivationCommitForTesting: options.afterActivationCommitForTesting,
-            }
-          : undefined,
-      )
-      .add({
-        recordActivity,
-        assertStoredReference: (reference: EvidenceRef) => assertStoredReference(db, reference),
-        readVerifiedFile,
-        persistAtomically,
-        pathsForDefinition,
-        resolveRevision,
-        recordDefinitionBytes,
-      } as const)
-      .finish(),
-  );
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const protectedFeedback = await createProtectedFeedbackStore(
-    createConditionalObject({
-      database,
-      now,
-    } as const)
-      .addOptional(
-        !(options.beforeOutcomeCommitForTesting === undefined)
-          ? {
-              beforeOutcomeCommitForTesting: options.beforeOutcomeCommitForTesting,
-            }
-          : undefined,
-      )
-      .addOptional(
-        !(options.duringOutcomeCommitForTesting === undefined)
-          ? {
-              duringOutcomeCommitForTesting: options.duringOutcomeCommitForTesting,
-            }
-          : undefined,
-      )
-      .addOptional(
-        !(options.afterOutcomeCommitForTesting === undefined)
-          ? {
-              afterOutcomeCommitForTesting: options.afterOutcomeCommitForTesting,
-            }
-          : undefined,
-      )
-      .add({
-        recordActivity,
-        assertStoredReference: (reference: EvidenceRef) => assertStoredReference(db, reference),
-        stageActiveRevision,
-        publishStagedActiveRevision,
-        deleteActiveDefinition,
-        normalizeActiveWorkingPath,
-        cleanupOutcomePublicationStage,
-      } as const)
-      .finish(),
-  );
+  const protectedTurnPlans = createProtectedTurnPlanStore({
+    database,
+    recordActivity,
+    assertStoredReference: (reference) => assertStoredReference(db, reference),
+  });
   const cutoverLegacyOperationalAuthority = async (
     legacyRoot: string,
     actor: ActorRef,
@@ -1709,7 +1583,6 @@ export async function createWorkspaceStore(
       get: protectedWorkingAdjustments.get,
       getActive: protectedWorkingAdjustments.getActive,
       list: protectedWorkingAdjustments.list,
-      listSettledEvidence: protectedWorkingAdjustments.listSettledEvidence,
     }),
     declaredAuthority: declaredAuthorityFor,
     operational,
@@ -1757,8 +1630,7 @@ export async function createWorkspaceStore(
         protectedRuntime: createProtectedWorkspaceRuntime({
           workspaceRoot: paths.root,
           authority,
-          activations: protectedActivations,
-          feedback: protectedFeedback,
+          turnPlans: protectedTurnPlans,
           measurements: compoundingMeasurements,
           workingAdjustments: protectedWorkingAdjustments,
         }),
@@ -2394,12 +2266,8 @@ function createOperationalRepositories(
           AND NOT EXISTS(SELECT 1 FROM context_checkpoints WHERE session_id = ?)
           AND NOT EXISTS(SELECT 1 FROM session_context_state WHERE session_id = ?)
           AND NOT EXISTS(SELECT 1 FROM job_observations WHERE source_session_id = ?)
-          AND NOT EXISTS(SELECT 1 FROM turn_activation_pins WHERE session_id = ?)
-          AND NOT EXISTS(SELECT 1 FROM frozen_turn_plans WHERE session_id = ?)
-          AND NOT EXISTS(SELECT 1 FROM experiment_observations WHERE session_id = ?)`)
+          AND NOT EXISTS(SELECT 1 FROM frozen_turn_plans WHERE session_id = ?)`)
           .run(
-            sessionId,
-            sessionId,
             sessionId,
             sessionId,
             sessionId,

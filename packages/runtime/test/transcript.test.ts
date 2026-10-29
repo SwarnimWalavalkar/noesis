@@ -17,8 +17,6 @@ const plan = (sessionId: string, turnId: string): FrozenTurnPlan => {
     planId: `plan-${turnId}`,
     sessionId,
     turnId,
-    activationId: "activation_genesis",
-    activationRevision: 1,
     selectedCapabilities: [],
     renderedSystemPrompt: "Noesis",
     provider: "controlled",
@@ -48,16 +46,7 @@ describe("runtime transcript projection", () => {
       metadata: Object.freeze({}),
     });
     const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: "a".repeat(64),
-      },
-      activeDefinitions: {},
-    });
-    await protectedRuntime.activations.admitTurnPlan(plan("session-1", "turn-1"));
+    await protectedRuntime.turnPlans.admit(plan("session-1", "turn-1"));
     await workspace.operational.messages.put({
       messageId: "turn-1:user",
       sessionId: "session-1",
@@ -346,16 +335,7 @@ describe("runtime transcript projection", () => {
       metadata: Object.freeze({}),
     });
     const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: "a".repeat(64),
-      },
-      activeDefinitions: {},
-    });
-    await protectedRuntime.activations.admitTurnPlan(plan("session-turn-timeline", "turn-timeline"));
+    await protectedRuntime.turnPlans.admit(plan("session-turn-timeline", "turn-timeline"));
     const createdAt = "2026-07-30T00:00:01.000Z";
     for (const message of [
       {
@@ -469,17 +449,8 @@ describe("runtime transcript projection", () => {
       metadata: Object.freeze({}),
     });
     const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: "a".repeat(64),
-      },
-      activeDefinitions: {},
-    });
-    await protectedRuntime.activations.admitTurnPlan(plan("session-cross-turn", "turn-a"));
-    await protectedRuntime.activations.admitTurnPlan(plan("session-cross-turn", "turn-b"));
+    await protectedRuntime.turnPlans.admit(plan("session-cross-turn", "turn-a"));
+    await protectedRuntime.turnPlans.admit(plan("session-cross-turn", "turn-b"));
     const createdAt = "2026-07-30T00:00:01.000Z";
     await workspace.operational.messages.put({
       messageId: "z-assistant-a",
@@ -546,16 +517,7 @@ describe("runtime transcript projection", () => {
       metadata: Object.freeze({}),
     });
     const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: "a".repeat(64),
-      },
-      activeDefinitions: {},
-    });
-    await protectedRuntime.activations.admitTurnPlan(plan("session-interrupted", "turn-interrupted"));
+    await protectedRuntime.turnPlans.admit(plan("session-interrupted", "turn-interrupted"));
     await workspace.operational.toolCalls.put({
       toolCallId: "action-running",
       sessionId: "session-interrupted",

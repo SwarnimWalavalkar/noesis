@@ -1,4 +1,3 @@
-import type { FrozenBaselineRef } from "@noesis/agent-types";
 import {
   createConditionalObject,
   type Capability,
@@ -59,8 +58,7 @@ describe("effects-first Capability turn planning", () => {
       if (!result.ok) throw new Error(result.error.message);
       return result.value.definitionRevision;
     };
-    const [genesisPrompt, router, instruction, skill] = await Promise.all([
-      publish("genesis-prompt", "prompts/genesis.md", "GENESIS"),
+    const [router, instruction, skill] = await Promise.all([
       publish("router", "capabilities/router.json", "{}"),
       publish("instruction", "capabilities/effects/instruction.md", "Keep answers evidence-dense."),
       publish(
@@ -107,7 +105,6 @@ describe("effects-first Capability turn planning", () => {
           } as const)
           .finish(),
       );
-    const genesis = makeRevision("general", "general-r1", [genesisPrompt]);
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const learned = makeRevision(
       "evidence-synthesis",
@@ -123,12 +120,7 @@ describe("effects-first Capability turn planning", () => {
         }),
       ],
     );
-    const genesisRef = capabilityRevisionRef(genesis);
     const learnedRef = capabilityRevisionRef(learned);
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: genesisRef,
-      activeDefinitions: Object.freeze({ prompt: genesisPrompt, router }),
-    });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.capabilities.create({
       definition: Object.freeze({
@@ -155,7 +147,6 @@ describe("effects-first Capability turn planning", () => {
       }),
     });
     const capabilities = new Map<string, Capability>([
-      ["general", { capabilityId: "general", name: "General", scope: "general", intent: "baseline" }],
       [
         "evidence-synthesis",
         {
@@ -166,15 +157,11 @@ describe("effects-first Capability turn planning", () => {
         },
       ],
     ]);
-    const revisions = new Map<string, CapabilityRevision>([
-      [genesisRef.capabilityRevisionId, genesis],
-      [learnedRef.capabilityRevisionId, learned],
-    ]);
+    const revisions = new Map<string, CapabilityRevision>([[learnedRef.capabilityRevisionId, learned]]);
     const resolver: TurnCapabilityResolver = Object.freeze({
       resolveCapability: async (capabilityId: string) => capabilities.get(capabilityId),
       resolveRevision: async (reference: CapabilityRevisionRef) =>
         revisions.get(reference.capabilityRevisionId),
-      resolveBaseline: async (): Promise<FrozenBaselineRef> => Object.freeze({ kind: "unknown_legacy" }),
     });
     const planner = createTurnIntelligencePlanner({
       workspace,

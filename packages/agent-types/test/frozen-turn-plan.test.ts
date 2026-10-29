@@ -73,8 +73,6 @@ describe("frozen context notebook", () => {
       planId: "plan-1",
       sessionId: "session-1",
       turnId: "turn-1",
-      activationId: "activation-1",
-      activationRevision: 1,
       selectedCapabilities: Object.freeze([]),
       contextCheckpoint,
       contextTokenBudget: 10_000,

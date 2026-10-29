@@ -92,8 +92,6 @@ function frozenPlan(
     planId: "plan-runtime-tools",
     sessionId: "trail-runtime-tools",
     turnId: "turn-runtime-tools",
-    activationId: "activation-runtime-tools",
-    activationRevision: 1,
     selectedCapabilities: Object.freeze([
       Object.freeze({
         capabilityId: "grounded",
@@ -108,7 +106,6 @@ function frozenPlan(
           capabilityRevisionId: "grounded-v1",
           bundleDigest: sha256("grounded-v1"),
         }),
-        baseline: Object.freeze({ kind: "genesis" as const }),
         promptModules: Object.freeze([prompt]),
         skills: Object.freeze([skill]),
         tools: Object.freeze([]),

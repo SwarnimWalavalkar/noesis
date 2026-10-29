@@ -344,7 +344,6 @@ export interface TuiLearningAuditSnapshot {
   readonly sessionId: string;
   readonly generatedAt: string;
   readonly activeAdjustmentId?: string;
-  readonly activeActivationId?: string;
   readonly primitives: readonly TuiLearningPrimitive[];
 }
 

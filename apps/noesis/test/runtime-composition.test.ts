@@ -143,8 +143,6 @@ const recoveryTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => 
     planId: `plan-${turnId}`,
     sessionId,
     turnId,
-    activationId: "activation_genesis",
-    activationRevision: 1,
     selectedCapabilities: [],
     renderedSystemPrompt: "Noesis recovery fixture",
     provider: CONTROLLED_PI_PROVIDER,
@@ -1000,18 +998,7 @@ describe("apps/noesis production control-plane composition", () => {
       metadata: Object.freeze({}),
     });
     const protectedRuntime = createWorkspaceRuntimeInternals(seed).protectedRuntime;
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: "a".repeat(64),
-      },
-      activeDefinitions: Object.freeze({}),
-    });
-    await protectedRuntime.activations.admitTurnPlan(
-      recoveryTurnPlan("session-process-killed", "turn-process-killed"),
-    );
+    await protectedRuntime.turnPlans.admit(recoveryTurnPlan("session-process-killed", "turn-process-killed"));
     await seed.operational.messages.put({
       messageId: "turn-process-killed:user",
       sessionId: "session-process-killed",
@@ -1089,16 +1076,7 @@ describe("apps/noesis production control-plane composition", () => {
     await seed.operational.sessions.put(runningSession("session-before-admission"));
     await seed.operational.sessions.put(runningSession("session-after-settlement"));
     const protectedRuntime = createWorkspaceRuntimeInternals(seed).protectedRuntime;
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: {
-        kind: "capability_revision",
-        capabilityId: "general-collaboration",
-        capabilityRevisionId: "general-collaboration-genesis-v1",
-        bundleDigest: "a".repeat(64),
-      },
-      activeDefinitions: Object.freeze({}),
-    });
-    await protectedRuntime.activations.admitTurnPlan(
+    await protectedRuntime.turnPlans.admit(
       recoveryTurnPlan("session-after-settlement", "turn-before-idle-persist"),
     );
     await seed.operational.messages.put({
@@ -1987,15 +1965,8 @@ describe("apps/noesis production control-plane composition", () => {
       status: "completed",
       outcomeId: `${turnId}:outcome`,
     });
-    const pin = await runtime.debug.adaptations.activations.getTurnPin(trail.trailId, turnId);
-    const storedPlan = await runtime.debug.adaptations.activations.getTurnPlan(trail.trailId, turnId);
+    const storedPlan = await runtime.debug.turnPlans.get(trail.trailId, turnId);
     const deliveredPlan = requests[0]?.frozenTurnPlan;
-    expect(pin).toMatchObject({
-      activationId: "activation_genesis",
-      activeCapabilityRevisions: {
-        "general-collaboration": { capabilityRevisionId: "general-collaboration-genesis-v1" },
-      },
-    });
     expect(deliveredPlan).toEqual(storedPlan);
     expect(result.frozenTurnPlan).toEqual(storedPlan);
     expect(requests[0]?.systemPrompt).toBe(storedPlan?.renderedSystemPrompt);
@@ -2005,19 +1976,12 @@ describe("apps/noesis production control-plane composition", () => {
       schemaVersion: 1,
       sessionId: trail.trailId,
       turnId,
-      selectedCapabilities: [
-        {
-          capabilityId: "general-collaboration",
-          baseline: { kind: "genesis" },
-          promptModules: [
-            {
-              content: expect.stringContaining("thinking-and-creation partner"),
-            },
-          ],
-          tools: [],
-        },
-      ],
+      selectedCapabilities: [],
     });
+    expect(storedPlan?.renderedSystemPrompt).toContain("You are Noesis, a thinking-and-creation partner.");
+    expect(storedPlan?.renderedSystemPrompt).toContain(
+      "Work with the user on ambiguous intellectual work and execute clear bounded requests directly.",
+    );
     expect(await runtime.debug.workspace.definitionMetadata.listCurrent("runtime_role")).toHaveLength(5);
     expect(JSON.stringify(seenConfigurations)).not.toMatch(
       /protectedActivations|protectedFeedback|authorityBoundary|restorationHandle/iu,
@@ -2028,8 +1992,7 @@ describe("apps/noesis production control-plane composition", () => {
     const reopenedProtected = createWorkspaceRuntimeInternals(reopened).protectedRuntime;
     expect(await reopened.operational.messages.listForSession(trail.trailId)).toHaveLength(2);
     expect(await reopened.operational.outcomes.listForSession(trail.trailId)).toHaveLength(1);
-    expect(await reopenedProtected.activations.getTurnPin(trail.trailId, turnId)).toBeDefined();
-    expect(await reopenedProtected.activations.getTurnPlan(trail.trailId, turnId)).toEqual(storedPlan);
+    expect(await reopenedProtected.turnPlans.get(trail.trailId, turnId)).toEqual(storedPlan);
     reopened.close();
   });
   test("an ordinary production turn degrades around one persistently unreadable skill", async () => {
@@ -2451,8 +2414,8 @@ describe("apps/noesis production control-plane composition", () => {
     expect(isolatedTurn.frozenTurnPlan?.renderedSystemPrompt).not.toContain(strategy);
     await isolated.shutdown();
   });
-  test("a first-turn correction on a fresh home reflects against the immutable genesis baseline", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-app-genesis-correction-"));
+  test("a first-turn correction on a fresh home reflects with no Capability selected", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-first-correction-"));
     roots.push(home);
     const config = reflectImmediately(
       await resolveNoesisConfig({
@@ -2483,12 +2446,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const trail = await runtime.startTrail({ title: "First correction" });
     const result = await runtime.debug.runTurn(trail.trailId, "Actually, keep this research brief concise.");
-    expect(result.frozenTurnPlan?.selectedCapabilities).toMatchObject([
-      {
-        capabilityId: "general-collaboration",
-        baseline: { kind: "genesis" },
-      },
-    ]);
+    expect(result.frozenTurnPlan?.selectedCapabilities).toEqual([]);
     await runtime.controlPlane.idle();
     expect(reflectorRuns).toBe(1);
     const outcomes = await runtime.debug.workspace.operational.outcomes.listForSession(trail.trailId);

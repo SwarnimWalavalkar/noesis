@@ -28,15 +28,8 @@ export type AgentRole =
   | "session_compactor"
   | "session_titler"
   | "history_reranker"
-  | "signal_interpreter"
   | "reflector"
-  | "session_reviewer"
-  | "revision_author"
-  | "case_generator"
-  | "trial"
-  | "judge_critic"
-  | "revision_agent"
-  | "ux_explainer";
+  | "session_reviewer";
 export interface AgentMessage {
   readonly role: "system" | "user" | "assistant" | "tool";
   readonly content: string;
@@ -428,18 +421,6 @@ export interface AgentContextInspection {
   readonly note: string;
 }
 export type AgentCompletedStopReason = "stop" | "length" | "toolUse";
-export type FrozenBaselineRef =
-  | {
-      readonly kind: "genesis";
-    }
-  | {
-      readonly kind: "unknown_legacy";
-    }
-  | {
-      readonly kind: "capability_revision";
-      readonly experimentId: string;
-      readonly revision: CapabilityRevisionRef;
-    };
 export interface FrozenRevisionMaterial {
   readonly revision: FileRevisionRef;
   /** Exact UTF-8 bytes decoded from the immutable revision at planning time. */
@@ -477,7 +458,6 @@ export interface FrozenCapabilitySelection {
    */
   readonly delivery?: "prompt" | "on_demand" | undefined;
   readonly revision: CapabilityRevisionRef;
-  readonly baseline: FrozenBaselineRef;
   /** Present on effects-first revisions. Legacy frozen plans omit it. */
   readonly effects?: readonly FrozenCapabilityEffect[] | undefined;
   readonly promptModules: readonly FrozenRevisionMaterial[];
@@ -610,10 +590,6 @@ export interface FrozenTurnPlan {
   readonly turnId: string;
   /** Host-derived project identity. Absent only on plans persisted before project-local adjustment support. */
   readonly project?: ProjectRef;
-  /** Exact immutable project adjustment admitted to this turn, when one was active. */
-  readonly workingAdjustmentId?: string;
-  readonly activationId: string;
-  readonly activationRevision: number;
   readonly selectedCapabilities: readonly FrozenCapabilitySelection[];
   /** Exact bounded SQLite-authoritative history served to this turn. Absent only on legacy plans. */
   readonly conversationHistory?: readonly FrozenConversationHistoryEntry[];
@@ -684,15 +660,6 @@ const FrozenCapabilityEffectSchema = z.discriminatedUnion("kind", [
     definition: FrozenRevisionMaterialSchema,
   }),
 ]);
-const FrozenBaselineRefSchema = z.discriminatedUnion("kind", [
-  z.strictObject({ kind: z.literal("genesis") }),
-  z.strictObject({ kind: z.literal("unknown_legacy") }),
-  z.strictObject({
-    kind: z.literal("capability_revision"),
-    experimentId: z.string().min(1),
-    revision: CapabilityRevisionRefSchema,
-  }),
-]);
 const FrozenCapabilitySelectionSchema = z.strictObject({
   capabilityId: z.string().min(1),
   name: z.string().min(1),
@@ -702,7 +669,6 @@ const FrozenCapabilitySelectionSchema = z.strictObject({
   selectionReason: z.string().min(1),
   delivery: z.enum(["prompt", "on_demand"]).optional(),
   revision: CapabilityRevisionRefSchema,
-  baseline: FrozenBaselineRefSchema,
   effects: z.array(FrozenCapabilityEffectSchema).min(1).max(32).optional(),
   promptModules: z.array(FrozenRevisionMaterialSchema),
   skills: z.array(FrozenRevisionMaterialSchema),
@@ -786,9 +752,6 @@ export const FrozenTurnPlanSchema = z.strictObject({
   sessionId: z.string().min(1),
   turnId: z.string().min(1),
   project: ProjectRefSchema.optional(),
-  workingAdjustmentId: z.string().min(1).optional(),
-  activationId: z.string().min(1),
-  activationRevision: z.number().int().positive(),
   selectedCapabilities: z.array(FrozenCapabilitySelectionSchema),
   conversationHistory: z.array(FrozenConversationHistoryEntrySchema).optional(),
   contextCheckpoint: FrozenContextCheckpointSchema.optional(),
@@ -845,7 +808,6 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     contextTokenBudget,
     requestTokenBudget,
     project,
-    workingAdjustmentId,
     subAgentDefaults,
     subAgentActor,
     routing,
@@ -922,7 +884,6 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       .addOptional(!(contextTokenBudget === undefined) ? { contextTokenBudget } : undefined)
       .addOptional(!(requestTokenBudget === undefined) ? { requestTokenBudget } : undefined)
       .addOptional(!(project === undefined) ? { project: Object.freeze({ ...project }) } : undefined)
-      .addOptional(!(workingAdjustmentId === undefined) ? { workingAdjustmentId } : undefined)
       .addOptional(
         !(subAgentDefaults === undefined)
           ? { subAgentDefaults: Object.freeze({ ...subAgentDefaults }) }
@@ -968,10 +929,6 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
         );
     }
   }
-  if (plan.workingAdjustmentId !== undefined && plan.project === undefined)
-    throw new Error(
-      `Frozen turn plan ${plan.planId} pins a working adjustment without a host-derived project`,
-    );
   if ((plan.conversationHistory?.length ?? 0) > MAX_FROZEN_CONVERSATION_HISTORY_MESSAGES)
     throw new Error(`Frozen turn plan ${plan.planId} exceeds the conversation-history message bound`);
   const historyMessageIds = new Set<string>();
@@ -1058,15 +1015,10 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     plan.contextTokenBudget >= plan.requestTokenBudget
   )
     throw new Error(`Frozen turn plan ${plan.planId} does not reserve non-history request capacity`);
-  const narrowSelections = plan.selectedCapabilities.filter(
-    (selection) => selection.baseline.kind !== "genesis",
-  );
   const attribution = plan.routing.learningAttribution;
-  if (narrowSelections.length === 0 && attribution !== undefined)
-    throw new Error(`Frozen turn plan ${plan.planId} attributes learning without a narrow capability`);
   if (
     attribution !== undefined &&
-    !narrowSelections.some((selection) => selection.capabilityId === attribution.capabilityId)
+    !plan.selectedCapabilities.some((selection) => selection.capabilityId === attribution.capabilityId)
   )
     throw new Error(
       `Frozen turn plan ${plan.planId} attributes learning to unselected capability ${attribution.capabilityId}`,

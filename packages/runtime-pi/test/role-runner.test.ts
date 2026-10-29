@@ -135,15 +135,15 @@ describe("adapter-neutral role runner", () => {
     const backend = createScriptedRoleModelBackend({ respond: () => ({ text: "not json" }) });
     const runner = createAgentRoleRunner({
       backend,
-      variants: [configuration("case_generator", "cases-v1")],
+      variants: [configuration("session_reviewer", "review-v1")],
     });
     const structured = createStructuredInferencePort({ runner, maxRepairAttempts: 1 });
 
     let failure: unknown;
     try {
       await structured.run(
-        request("case_generator", "cases-v1", [
-          { role: "user", name: "behavioral_objective", content: "preserve voice" },
+        request("session_reviewer", "review-v1", [
+          { role: "user", name: "session_review", content: "preserve voice" },
         ]),
         z.strictObject({ cases: z.array(z.string()) }),
       );
@@ -273,36 +273,29 @@ describe("research role isolation", () => {
   });
 
   test("derives custom isolated-role policies without weakening the default whitelist", () => {
-    const policy = createRestrictedRoleContextPolicy("judge_critic", {
-      policyId: "application-judge-v1",
+    const policy = createRestrictedRoleContextPolicy("session_reviewer", {
+      policyId: "application-reviewer-v1",
       maxMessages: 12,
     });
 
     expect(policy.allowedMessageNames).toEqual([
-      "rubric",
-      "arm_A",
-      "arm_B",
-      "relevant_traces",
+      "session_review",
+      "current_capabilities",
+      "related_history",
       "output_contract",
       "output_repair",
     ]);
-    expect(policy.includeCapabilityRevisions).toBe(false);
     expect(policy.maxMessages).toBe(12);
     expect(() =>
-      createRestrictedRoleContextPolicy("judge_critic", {
+      createRestrictedRoleContextPolicy("session_reviewer", {
         maxTotalCharacters: 65_000,
       }),
     ).toThrow("cannot widen maxTotalCharacters");
     expect(() =>
-      createRestrictedRoleContextPolicy("judge_critic", {
-        allowedMessageNames: ["rubric", "candidate_identity"],
+      createRestrictedRoleContextPolicy("session_reviewer", {
+        allowedMessageNames: ["session_review", "candidate_identity"],
       }),
     ).toThrow("cannot add undeclared message names");
-    expect(() =>
-      createRestrictedRoleContextPolicy("judge_critic", {
-        includeCapabilityRevisions: true,
-      }),
-    ).toThrow("cannot expose capability revisions");
   });
 
   test("preserves long structured isolated-role context as valid JSON and rejects overflow instead of slicing", async () => {
@@ -440,52 +433,20 @@ describe("research role isolation", () => {
     expect(capturedSystem).toContain("x".repeat(5_000));
   });
 
-  test("rejects undeclared revision-author context", async () => {
+  test("rejects undeclared isolated-role context", async () => {
     const backend = createScriptedRoleModelBackend({ respond: () => ({ text: "unused" }) });
     const runner = createAgentRoleRunner({
       backend,
-      variants: [configuration("revision_author", "author-v1")],
+      variants: [configuration("session_titler", "titler-v1")],
     });
 
     await expect(
       runner.run(
-        request("revision_author", "author-v1", [
+        request("session_titler", "titler-v1", [
           { role: "user", name: "judgment_evidence", content: "judge preferred arm A" },
         ]),
       ),
     ).rejects.toThrow("rejects undeclared message judgment_evidence");
-  });
-
-  test("excludes capability identity from judge model context", async () => {
-    let capturedPrompt = "";
-    const backend = createScriptedRoleModelBackend({
-      respond(backendRequest) {
-        capturedPrompt = backendRequest.prompt;
-        return { text: '{"winner":"A"}' };
-      },
-    });
-    const runner = createAgentRoleRunner({
-      backend,
-      variants: [configuration("judge_critic", "judge-v1")],
-    });
-    const messages = [
-      { role: "user" as const, name: "rubric", content: "Prefer the clearer answer." },
-      { role: "user" as const, name: "arm_A", content: JSON.stringify({ answer: "two" }) },
-      { role: "user" as const, name: "arm_B", content: JSON.stringify({ answer: "one" }) },
-    ];
-
-    const result = await runner.run(request("judge_critic", "judge-v1", messages));
-    const rendered = JSON.parse(capturedPrompt);
-
-    expect(rendered.messages.map((message: { name: string }) => message.name)).toEqual([
-      "rubric",
-      "arm_A",
-      "arm_B",
-    ]);
-    expect(capturedPrompt).not.toContain(capabilityRevision.capabilityId);
-    expect(capturedPrompt).not.toMatch(/baseline|candidate|authority|promotion/i);
-    expect(result.trace.capabilityRevisions).toEqual([capabilityRevision]);
-    expect(result.capabilityRevisions).toEqual([capabilityRevision]);
   });
 });
 

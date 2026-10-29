@@ -35,8 +35,7 @@ import type {
   TuiLearningPrimitiveKind,
   TuiLearningRelation,
 } from "@noesis/tui";
-import type { ExperimentObservationRecord, NoesisWorkspaceStore } from "@noesis/workspace";
-import type { ProtectedWorkspaceRuntime } from "../../../packages/workspace/src/protected-runtime.ts";
+import type { NoesisWorkspaceStore } from "@noesis/workspace";
 const AUDIT_LIMIT = 1000;
 const RAW_JSON_LIMIT = 64000;
 const EVIDENCE_PREVIEW_LIMIT = 8;
@@ -53,19 +52,6 @@ interface LearningAuditSource {
   readonly home?: string;
   /** Why an edited Capability file could not be applied, by Capability ID. */
   readonly editProblems?: ReadonlyMap<string, string>;
-  readonly activations: Pick<
-    ProtectedWorkspaceRuntime["activations"],
-    "current" | "listOperations" | "getApproval"
-  >;
-  readonly feedback: Pick<
-    ProtectedWorkspaceRuntime["feedback"],
-    "listObservations" | "listResearchRuns" | "getOutcome" | "getSuccessorInput"
-  >;
-  readonly continuousFeedback?: Readonly<{
-    readonly experimentComparison: (
-      experimentId: string,
-    ) => Promise<Readonly<{ readonly observations: readonly ExperimentObservationRecord[] }>>;
-  }>;
   readonly resolveRevision: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
   readonly resolveCapability: (capabilityId: string) =>
     | Readonly<{
@@ -837,19 +823,16 @@ export async function loadLearningAuditSnapshot(
   source: LearningAuditSource,
   sessionId: string,
 ): Promise<TuiLearningAuditSnapshot> {
-  const [reflectionJobs, adjustments, activation, allActivationOperations, allFeedbackSignals] =
-    await Promise.all([
-      listProjectReflectionJobs(source.workspace, source.project.projectId),
-      source.workspace.workingAdjustments.list({
-        projectId: source.project.projectId,
-        limit: AUDIT_LIMIT,
-      }),
-      source.activations.current(),
-      source.activations.listOperations(AUDIT_LIMIT),
-      source.workspace.research.feedbackSignals.listFeedbackSignals({
-        limit: AUDIT_LIMIT,
-      }),
-    ]);
+  const [reflectionJobs, adjustments, allFeedbackSignals] = await Promise.all([
+    listProjectReflectionJobs(source.workspace, source.project.projectId),
+    source.workspace.workingAdjustments.list({
+      projectId: source.project.projectId,
+      limit: AUDIT_LIMIT,
+    }),
+    source.workspace.research.feedbackSignals.listFeedbackSignals({
+      limit: AUDIT_LIMIT,
+    }),
+  ]);
   const projectSessionIds = [...new Set(reflectionJobs.map(jobSessionId).filter(defined))];
   const sourceSessionJobs = await listSourceSessionJobs(source.workspace, projectSessionIds);
   const originJobs = [...reflectionJobs, ...sourceSessionJobs];
@@ -863,9 +846,6 @@ export async function loadLearningAuditSnapshot(
     ),
   );
   const jobs = Object.freeze(allJobs.slice(0, AUDIT_LIMIT));
-  const activationOperations = allActivationOperations.filter((operation) =>
-    experimentIds.has(operation.binding.experimentId),
-  );
   const referencedFeedbackSignalIds = new Set(
     experiments.flatMap((experiment) => experiment.feedbackSignalIds),
   );
@@ -913,10 +893,6 @@ export async function loadLearningAuditSnapshot(
     adjustments.map((adjustment) => [adjustment.adjustmentId, adjustment] as const),
   );
   const originSessions = originSessionMaps(allJobs, adjustments, experiments);
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const hypothesisByExperimentId = new Map(
-    experiments.map((experiment) => [experiment.experimentId, experiment.hypothesis] as const),
-  );
   const resolveEvidencePreviews = createEvidencePreviewResolver(source.workspace);
   const primitives: TuiLearningPrimitive[] = await Promise.all(
     jobs.map(async (job) => await jobPrimitive(job, adjustmentsById, resolveEvidencePreviews)),
@@ -1012,15 +988,9 @@ export async function loadLearningAuditSnapshot(
           .finish(),
       ),
     );
-    const [trials, evaluations, comparison, researchRuns, outcome, successorInput] = await Promise.all([
+    const [trials, evaluations] = await Promise.all([
       source.workspace.research.trials.listTrials(experiment.experimentId),
       source.workspace.research.evaluations.listEvaluations(experiment.experimentId),
-      experiment.preflightRef && source.continuousFeedback
-        ? source.continuousFeedback.experimentComparison(experiment.experimentId)
-        : undefined,
-      source.feedback.listResearchRuns(experiment.experimentId),
-      source.feedback.getOutcome(experiment.experimentId),
-      source.feedback.getSuccessorInput(experiment.experimentId),
     ]);
     const report = experiment.preflightRef
       ? await source.workspace.research.preflights.getPreflightReport(experiment.preflightRef.rowId)
@@ -1151,144 +1121,31 @@ export async function loadLearningAuditSnapshot(
             .finish(),
         ),
       );
-    for (const observation of comparison?.observations ?? []) {
-      const observationSession = observation.sessionId ?? experimentSession;
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      primitives.push(
-        primitive(
-          createConditionalObject({
-            id: nativeId("observation", observation.observationId),
-            kind: "observation",
-            group: "feedback",
-            status: observation.hardRegression
-              ? "hard regression"
-              : (observation.userDecision ?? observation.precedence),
-            tone: observation.hardRegression
-              ? "negative"
-              : observation.userDecision === "keep"
-                ? "positive"
-                : observation.userDecision === "revert"
-                  ? "negative"
-                  : "neutral",
-            title: observation.hardRegression
-              ? "Hard regression"
-              : observation.userDecision
-                ? `Observation · ${observation.userDecision}`
-                : "Live experiment observation",
-            summary: experiment.hypothesis,
-            occurredAt: observation.createdAt,
-          } as const)
-            .addOptional(observationSession ? { sessionId: observationSession } : undefined)
-            .add({
-              experimentId: experiment.experimentId,
-              capabilityId: observation.capabilityRevision.capabilityId,
-              evidence: observation.evidenceRefs,
-              relations: [
-                relation("experiment", "experiment", experiment.experimentId),
-                relation("signal", "feedback_signal", observation.signalId),
-              ].filter(defined),
-              raw: observation,
-            } as const)
-            .finish(),
-        ),
-      );
-    }
-    for (const run of researchRuns)
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      primitives.push(
-        primitive(
-          createConditionalObject({
-            id: nativeId("outcome_research", run.runId),
-            kind: "outcome_research",
-            group: "feedback",
-            status: run.proposal ? `${run.status} · ${run.proposal}` : run.status,
-            tone: run.status === "completed" ? "positive" : run.status === "failed" ? "negative" : "pending",
-            title: "Outcome research",
-            summary: experiment.hypothesis,
-            occurredAt: run.updatedAt,
-            experimentId: experiment.experimentId,
-          } as const)
-            .addOptional(experimentSession ? { sessionId: experimentSession } : undefined)
-            .add({
-              evidence: run.evidenceRefs,
-              relations: [
-                relation("experiment", "experiment", experiment.experimentId),
-                ...run.citedObservationIds.map((id) => relation("observation", "observation", id)),
-              ].filter(defined),
-              raw: run,
-            } as const)
-            .finish(),
-        ),
-      );
-    if (outcome)
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      primitives.push(
-        primitive(
-          createConditionalObject({
-            id: nativeId("experiment_outcome", outcome.operationId),
-            kind: "experiment_outcome",
-            group: "feedback",
-            status: outcome.decision,
-            tone:
-              outcome.decision === "keep"
-                ? "positive"
-                : outcome.decision === "revert"
-                  ? "negative"
-                  : "neutral",
-            title: `Experiment ${outcome.decision}`,
-            summary: experiment.hypothesis,
-            occurredAt: outcome.committedAt,
-            experimentId: experiment.experimentId,
-          } as const)
-            .addOptional(experimentSession ? { sessionId: experimentSession } : undefined)
-            .add({
-              evidence: outcome.evidenceRefs,
-              relations: [
-                relation("experiment", "experiment", experiment.experimentId),
-                relation("research", "outcome_research", outcome.researchRunId),
-                relation("successor", "experiment", outcome.successorExperimentId),
-              ].filter(defined),
-              raw: outcome,
-            } as const)
-            .finish(),
-        ),
-      );
-    if (successorInput)
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      primitives.push(
-        primitive(
-          createConditionalObject({
-            id: nativeId("successor_lineage", successorInput.inputId),
-            kind: "successor_lineage",
-            group: "feedback",
-            status: "recorded",
-            title: "Successor experiment",
-            summary: experiment.hypothesis,
-            occurredAt: successorInput.createdAt,
-            experimentId: experiment.experimentId,
-          } as const)
-            .addOptional(experimentSession ? { sessionId: experimentSession } : undefined)
-            .add({
-              evidence: successorInput.evidenceRefs,
-              relations: [
-                relation("predecessor", "experiment", successorInput.predecessorExperimentId),
-                relation("successor", "experiment", successorInput.successorExperimentId),
-              ].filter(defined),
-              raw: successorInput,
-            } as const)
-            .finish(),
-        ),
-      );
   }
+  const [capabilityDefinitions, capabilityBindings, pendingGates] = await Promise.all([
+    source.workspace.capabilities.listDefinitions(),
+    source.workspace.capabilities.listBindings({
+      project: source.project,
+      sessionId,
+      limit: AUDIT_LIMIT,
+    }),
+    source.workspace.capabilities.listPendingGates({
+      project: source.project,
+      sessionId,
+      limit: AUDIT_LIMIT,
+    }),
+  ]);
   for (const reference of revisionRefs.values()) {
     const [revision, capability] = await Promise.all([
       source.resolveRevision(reference),
       Promise.resolve(source.resolveCapability(reference.capabilityId)),
     ]);
-    const currentRevision = activation?.activeCapabilityRevisions[reference.capabilityId];
-    const activeRevision =
-      currentRevision?.kind === "capability_revision" &&
-      currentRevision.capabilityRevisionId === reference.capabilityRevisionId;
+    const activeRevision = capabilityBindings.some(
+      (binding) =>
+        binding.state === "active" &&
+        binding.capabilityId === reference.capabilityId &&
+        binding.revision.capabilityRevisionId === reference.capabilityRevisionId,
+    );
     primitives.push(
       primitive({
         id: nativeId("capability_revision", reference.capabilityRevisionId),
@@ -1304,112 +1161,6 @@ export async function loadLearningAuditSnapshot(
       }),
     );
   }
-  for (const operation of activationOperations) {
-    const operationSession = originSessions.sessionByExperimentId.get(operation.binding.experimentId);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    primitives.push(
-      primitive(
-        createConditionalObject({
-          id: nativeId("activation", operation.operationId),
-          kind: "activation",
-          group: "activation",
-          status: operation.status,
-          tone:
-            operation.status === "committed" || operation.status === "approved"
-              ? "positive"
-              : operation.status === "blocked" || operation.status === "rejected"
-                ? "negative"
-                : "pending",
-          title: `Activation · ${operation.decision.replaceAll("_", " ")}`,
-          summary:
-            hypothesisByExperimentId.get(operation.binding.experimentId) ??
-            `${operation.binding.candidateRevision.capabilityId}@${operation.binding.candidateRevision.capabilityRevisionId}`,
-          occurredAt: operation.updatedAt,
-          experimentId: operation.binding.experimentId,
-        } as const)
-          .addOptional(operationSession ? { sessionId: operationSession } : undefined)
-          .add({
-            capabilityId: operation.binding.candidateRevision.capabilityId,
-            evidence: [],
-            relations: [
-              relation("experiment", "experiment", operation.binding.experimentId),
-              relation(
-                "candidate",
-                "capability_revision",
-                operation.binding.candidateRevision.capabilityRevisionId,
-              ),
-              relation("report", "preflight_report", operation.binding.preflightId),
-              relation("approval", "approval", operation.approvalId),
-            ].filter(defined),
-            raw: operation,
-          } as const)
-          .finish(),
-      ),
-    );
-    if (operation.approvalId) {
-      const approval = await source.activations.getApproval(operation.approvalId);
-      if (approval)
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        primitives.push(
-          primitive(
-            createConditionalObject({
-              id: nativeId("approval", approval.approvalId),
-              kind: "approval",
-              group: "activation",
-              status: approval.status,
-              tone:
-                approval.status === "approved"
-                  ? "positive"
-                  : approval.status === "rejected"
-                    ? "negative"
-                    : "pending",
-              title: "Activation approval",
-              summary:
-                hypothesisByExperimentId.get(operation.binding.experimentId) ??
-                approval.decisionActor ??
-                "Awaiting a protected decision",
-              occurredAt: approval.decidedAt ?? approval.requestedAt,
-            } as const)
-              .addOptional(operationSession ? { sessionId: operationSession } : undefined)
-              .add({
-                relations: [relation("activation", "activation", approval.operationId)].filter(defined),
-                raw: approval,
-              } as const)
-              .finish(),
-          ),
-        );
-    }
-  }
-  if (activation)
-    primitives.push(
-      primitive({
-        id: nativeId("activation", activation.activationId),
-        kind: "activation",
-        group: "activation",
-        status: "current",
-        tone: "active",
-        title: `Current activation r${String(activation.revision)}`,
-        summary: `${String(Object.keys(activation.activeCapabilityRevisions).length)} active capabilities`,
-        occurredAt: activation.createdAt,
-        relations: [relation("previous", "activation", activation.previousActivationId ?? undefined)].filter(
-          defined,
-        ),
-        raw: activation,
-      }),
-    );
-  const [capabilityDefinitions, capabilityBindings, pendingGates] = await Promise.all([
-    source.workspace.capabilities.listDefinitions(),
-    source.workspace.capabilities.listBindings({
-      project: source.project,
-      sessionId,
-      limit: AUDIT_LIMIT,
-    }),
-    source.workspace.capabilities.listPendingGates({
-      project: source.project,
-      sessionId,
-      limit: AUDIT_LIMIT,
-    }),
-  ]);
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const capabilityDefinitionById = new Map(
     capabilityDefinitions.map((definition) => [definition.capabilityId, definition] as const),
@@ -1757,7 +1508,6 @@ export async function loadLearningAuditSnapshot(
       generatedAt: (source.now ?? (() => new Date()))().toISOString(),
     } as const)
       .addOptional(activeAdjustment ? { activeAdjustmentId: activeAdjustment.adjustmentId } : undefined)
-      .addOptional(activation ? { activeActivationId: activation.activationId } : undefined)
       .add({
         primitives: presented,
       } as const)

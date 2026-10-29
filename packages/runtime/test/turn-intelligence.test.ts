@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { FrozenBaselineRef } from "@noesis/agent-types";
 import {
   type Capability,
   type CapabilityRevision,
@@ -131,60 +130,37 @@ describe("turn intelligence", () => {
       const reference = capabilityRevisionRef(revision);
       capabilities.set(capability.capabilityId, capability);
       revisions.set(reference.capabilityRevisionId, revision);
-      const promptRevision = revision.promptModules[0];
-      const skillRevision = revision.skills[0];
-      if (!promptRevision || !skillRevision) throw new Error("Fixture revision is incomplete");
-      if (capability.capabilityId === "general")
-        await protectedRuntime.activations.bootstrapGenesis({
-          capabilityRevision: reference,
-          activeDefinitions: Object.freeze({
-            [`${capability.capabilityId}:prompt`]: promptRevision,
-            [`${capability.capabilityId}:skill`]: skillRevision,
-            [`${capability.capabilityId}:router`]: revision.toolset.routerRevision,
-          }),
-        });
-      else
-        // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-        await workspace.capabilities.create({
-          definition: Object.freeze({
-            capabilityId: capability.capabilityId,
-            name: capability.name,
-            kind: "instruction",
-            description: capability.intent,
-            applicability: capability.scope,
-            createdAt: "2026-07-24T00:00:00.000Z",
-          }),
-          revision: Object.freeze({
-            revision,
-            reference,
-            summary: "Keep research briefs concise",
-            rationale: "The user corrected overly broad research output",
-            anticipatedEffect: "Shorter research briefs",
-            createdAt: "2026-07-24T00:00:00.000Z",
-          }),
-          binding: Object.freeze({
-            capabilityId: capability.capabilityId,
-            revision: reference,
-            scope: Object.freeze({ kind: "global" as const }),
-            activationMode: "relevant",
-            state: "active",
-          }),
-        });
+      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+      await workspace.capabilities.create({
+        definition: Object.freeze({
+          capabilityId: capability.capabilityId,
+          name: capability.name,
+          kind: "instruction",
+          description: capability.intent,
+          applicability: capability.scope,
+          createdAt: "2026-07-24T00:00:00.000Z",
+        }),
+        revision: Object.freeze({
+          revision,
+          reference,
+          summary: "Keep research briefs concise",
+          rationale: "The user corrected overly broad research output",
+          anticipatedEffect: "Shorter research briefs",
+          createdAt: "2026-07-24T00:00:00.000Z",
+        }),
+        binding: Object.freeze({
+          capabilityId: capability.capabilityId,
+          revision: reference,
+          scope: Object.freeze({ kind: "global" as const }),
+          activationMode: capability.capabilityId === "general" ? "always" : "relevant",
+          state: "active",
+        }),
+      });
     }
     const resolver: TurnCapabilityResolver = Object.freeze({
       resolveCapability: async (capabilityId: string) => capabilities.get(capabilityId),
       resolveRevision: async (reference: CapabilityRevisionRef) =>
         revisions.get(reference.capabilityRevisionId),
-      resolveBaseline: async (reference: CapabilityRevisionRef): Promise<FrozenBaselineRef> => {
-        if (reference.capabilityId === "general") return Object.freeze({ kind: "genesis" });
-        const baseline = revisions.get("general-v1");
-        if (!baseline) throw new Error("Fixture baseline is missing");
-        return Object.freeze({
-          kind: "capability_revision",
-          experimentId: "experiment-research-brief",
-          revision: capabilityRevisionRef(baseline),
-        });
-      },
     });
     const planner = createTurnIntelligencePlanner({
       workspace,
@@ -306,9 +282,7 @@ describe("turn intelligence", () => {
       resourcePatterns: ["*"],
       credentialRefs: [],
     });
-    expect(await protectedRuntime.activations.getTurnPlan("session-related", "turn-related")).toEqual(
-      related,
-    );
+    expect(await protectedRuntime.turnPlans.get("session-related", "turn-related")).toEqual(related);
 
     await expect(
       planner.planAndAdmit({
@@ -322,9 +296,7 @@ describe("turn intelligence", () => {
         baseSystemPrompt: "BASE",
       }),
     ).rejects.toThrow("does not match authoritative SQLite state");
-    expect(
-      await protectedRuntime.activations.getTurnPlan("session-related", "turn-tampered-history"),
-    ).toBeUndefined();
+    expect(await protectedRuntime.turnPlans.get("session-related", "turn-tampered-history")).toBeUndefined();
 
     const unrelated = await planner.planAndAdmit({
       sessionId: "session-unrelated",
@@ -343,7 +315,7 @@ describe("turn intelligence", () => {
     expect(unrelated.renderedSystemPrompt).not.toContain("NARROW RESEARCH PROMPT");
   });
 
-  test("keeps the protected genesis baseline in the prompt", async () => {
+  test("admits a turn once without any Capability or working adjustment in the prompt", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-turn-plan-general-"));
     const workspace = await createWorkspaceStore(root);
     const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
@@ -354,42 +326,6 @@ describe("turn intelligence", () => {
       "capabilities/general-router.json",
       "{}",
     );
-    const capability: Capability = Object.freeze({
-      capabilityId: "general",
-      name: "General",
-      scope: "general",
-      intent: "baseline",
-    });
-    const revision: CapabilityRevision = Object.freeze({
-      capabilityRevisionId: "general-v1",
-      capabilityId: capability.capabilityId,
-      promptModules: Object.freeze([]),
-      skills: Object.freeze([]),
-      tools: Object.freeze([]),
-      toolset: Object.freeze({
-        toolRevisionIds: Object.freeze([]),
-        routerRevision,
-        strategyId: "fixture",
-      }),
-      activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: capability.scope }),
-      permissionManifest: Object.freeze({
-        effects: Object.freeze([]),
-        resourcePatterns: Object.freeze([]),
-        credentialRefs: Object.freeze([]),
-      }),
-      evidenceRefs: Object.freeze([]),
-      sourceEvaluationDefinitions: Object.freeze([]),
-      requestedPermissionDelta: Object.freeze({
-        addedEffects: Object.freeze([]),
-        widenedResources: Object.freeze([]),
-        addedCredentialRefs: Object.freeze([]),
-      }),
-    });
-    const reference = capabilityRevisionRef(revision);
-    await protectedRuntime.activations.bootstrapGenesis({
-      capabilityRevision: reference,
-      activeDefinitions: Object.freeze({ router: routerRevision }),
-    });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const session = (sessionId: string) =>
       Object.freeze({
@@ -411,9 +347,8 @@ describe("turn intelligence", () => {
       protectedRuntime,
       project: PROJECT,
       capabilities: Object.freeze({
-        resolveCapability: async () => capability,
-        resolveRevision: async () => revision,
-        resolveBaseline: async () => Object.freeze({ kind: "genesis" as const }),
+        resolveCapability: async () => undefined,
+        resolveRevision: async () => undefined,
       }),
     });
     await sourcePlanner.planAndAdmit({
@@ -456,11 +391,11 @@ describe("turn intelligence", () => {
     let admissionAttempts = 0;
     const observingProtectedRuntime = Object.freeze({
       ...protectedRuntime,
-      activations: Object.freeze({
-        ...protectedRuntime.activations,
-        admitTurnPlan: async (plan: Parameters<typeof protectedRuntime.activations.admitTurnPlan>[0]) => {
+      turnPlans: Object.freeze({
+        ...protectedRuntime.turnPlans,
+        admit: async (plan: Parameters<typeof protectedRuntime.turnPlans.admit>[0]) => {
           admissionAttempts += 1;
-          return await protectedRuntime.activations.admitTurnPlan(plan);
+          return await protectedRuntime.turnPlans.admit(plan);
         },
       }),
     });
@@ -470,9 +405,8 @@ describe("turn intelligence", () => {
       protectedRuntime: observingProtectedRuntime,
       project: PROJECT,
       capabilities: Object.freeze({
-        resolveCapability: async () => capability,
-        resolveRevision: async () => revision,
-        resolveBaseline: async () => Object.freeze({ kind: "genesis" as const }),
+        resolveCapability: async () => undefined,
+        resolveRevision: async () => undefined,
       }),
     });
 
@@ -487,11 +421,10 @@ describe("turn intelligence", () => {
     });
 
     expect(admissionAttempts).toBe(1);
-    expect(plan.selectedCapabilities.map((item) => item.capabilityId)).toEqual(["general"]);
+    expect(plan.selectedCapabilities).toEqual([]);
     expect(plan.project).toEqual(PROJECT);
-    expect(plan.workingAdjustmentId).toBeUndefined();
-    expect(plan.renderedSystemPrompt).not.toContain("project-working-adjustment-v1");
+    expect(plan.renderedSystemPrompt).toBe("BASE");
     expect(plan.routing.strategyId).toBe("capability-skill-index-v1");
-    expect(plan.selectedCapabilities.map((item) => item.delivery)).toEqual(["prompt"]);
+    expect(await protectedRuntime.turnPlans.admit(plan)).toEqual(plan);
   });
 });
