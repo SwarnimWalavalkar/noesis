@@ -430,7 +430,7 @@ Built:
 - Phase 7. A session review runs 30 minutes after a session's last turn. It uses a prepared packet of the session's requests, matching earlier sessions, and all Capabilities with their track records, and it publishes at most three decisions through the same publisher.
 - Phase 8, first half. `noesis learning report [--days N]` prints the measures listed above. Reflection and session-review jobs now store their model's token usage, so the report includes cost. "Corrections after learning" is the share of judged uses that the reflector marked hurt.
 - `always` guidance is limited to 2,000 characters per Capability, and all `always` guidance shares a 6,000 character allowance per turn. A Capability past the allowance is listed on demand for that turn.
-- A session review's published change is announced on the next turn that settles after it, in whichever session the user is in, labelled as a review of an earlier session. A review usually finishes after the user has left the session it covers.
+- A session review's published change is announced once in each session the user works in, on that session's first turn after the review completed, labelled as a review of an earlier session. A review usually finishes after the user has left the session it covers. `/learning` keeps the full record.
 
 Changed from the plan:
 

@@ -72,7 +72,8 @@ export function parseCapabilityDocument(text: string): CapabilityDocumentParseRe
   for (const line of normalized.slice(4, close).split("\n")) {
     if (line.trim().length === 0) continue;
     const separator = line.indexOf(":");
-    if (separator < 0) return { ok: false, error: `Frontmatter line "${line.trim()}" needs a colon after its field name` };
+    if (separator < 0)
+      return { ok: false, error: `Frontmatter line "${line.trim()}" needs a colon after its field name` };
     const key = line.slice(0, separator).trim();
     const field = FIELDS.find((candidate) => candidate === key);
     if (!field)

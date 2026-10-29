@@ -123,6 +123,9 @@ describe("Capability coordinator", () => {
       metadata: Object.freeze({ turnId: "turn-idle" }),
     });
     let reflectCalls = 0;
+    // The authority checks grant expiry against the system clock, so it follows this test's timeline.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(start);
     const coordinator = createCapabilityCoordinator({
       workspace,
       authority: createWorkspaceRuntimeInternals(workspace).authority,
@@ -162,8 +165,7 @@ describe("Capability coordinator", () => {
       // The user returns more than a day later; the held reflection still has its grant. The
       // authority checks grant expiry against the system clock, so move that clock too.
       current = new Date(start.getTime() + 25 * 60 * 60_000);
-      vi.useFakeTimers({ toFake: ["Date"] });
-      vi.setSystemTime(new Date(Date.now() + 25 * 60 * 60_000));
+      vi.setSystemTime(current);
       await coordinator.runAvailable();
       vi.useRealTimers();
       expect(reflectCalls).toBe(1);

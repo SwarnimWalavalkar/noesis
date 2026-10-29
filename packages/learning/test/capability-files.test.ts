@@ -288,7 +288,7 @@ describe("Capability files", () => {
       .replace("Run pnpm, not npm.", "Run pnpm, not npm. Prefer pnpm dlx.");
     await writeFile(file, userEdit);
     // Reflection publishes a revision before the edit scan has run.
-    await publisher.publish(
+    const ambient = await publisher.publish(
       {
         decision: "revise",
         capabilityId: created.capabilityId,
@@ -298,6 +298,7 @@ describe("Capability files", () => {
       { ...context, actor: Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" as const }) },
       new AbortController().signal,
     );
+    expect(ambient).toMatchObject({ status: "revised", capabilityId: created.capabilityId });
     expect(
       new TextDecoder().decode(
         await workspace.reads.readWorkingFile(capabilityWorkingDocumentPath(first.document)),
