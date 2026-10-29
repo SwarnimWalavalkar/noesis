@@ -811,7 +811,7 @@ describe("apps/noesis production control-plane composition", () => {
       trail.trailId,
       "user",
       "imported question",
-      "2026-07-01T00:00:01.000Z",
+      "2026-07-01T00:00:02.000Z",
       legacy,
     );
     message.run(

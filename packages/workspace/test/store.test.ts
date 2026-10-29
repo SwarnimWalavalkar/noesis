@@ -2866,7 +2866,7 @@ describe("WorkspaceStore", () => {
     const message = database.prepare(`INSERT INTO messages(
         message_id, session_id, role, content, created_at, metadata_json
       ) VALUES (?, 'session-imported', ?, ?, ?, ?)`);
-    message.run("m-user", "user", "hello", at(1), '{"legacyEventId":"evt-done"}');
+    message.run("m-user", "user", "hello", at(2), '{"legacyEventId":"evt-done"}');
     message.run("m-assistant", "assistant", "hi", at(2), '{"legacyEventId":"evt-done"}');
     message.run("m-failed", "user", "broken", at(3), '{"legacyEventId":"evt-failed"}');
     message.run("m-modern", "user", "later", at(5), '{"turnId":"turn-modern"}');
@@ -2876,7 +2876,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     const rows = upgraded
-      .prepare("SELECT message_id, metadata_json FROM messages ORDER BY created_at")
+      .prepare("SELECT message_id, metadata_json FROM messages ORDER BY created_at, role DESC")
       .all()
       .map((row) => ({ id: row["message_id"], metadata: JSON.parse(String(row["metadata_json"])) }));
     upgraded.close();

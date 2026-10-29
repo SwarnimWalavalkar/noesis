@@ -1,7 +1,8 @@
 -- Conversations brought in by the removed JSONL importer kept their turns under legacyEventId,
 -- with no foreground turn rows. Rewrite those messages into the self-describing history shape a
 -- forked session uses, so resumed sessions keep replaying them without a legacy reader. The
--- importer marked a completed exchange with an outcome whose status is unknown.
+-- importer marked a completed exchange with an outcome whose status is unknown, and gave both of
+-- its messages the same timestamp, so the question is ordered before its answer explicitly.
 
 WITH imported AS (
   SELECT
@@ -9,7 +10,8 @@ WITH imported AS (
     message.session_id,
     json_extract(message.metadata_json, '$.legacyEventId') AS event_id,
     ROW_NUMBER() OVER (
-      PARTITION BY message.session_id ORDER BY message.created_at, message.message_id
+      PARTITION BY message.session_id
+      ORDER BY message.created_at, CASE message.role WHEN 'user' THEN 0 ELSE 1 END, message.message_id
     ) - 1 AS sequence
   FROM messages AS message
   WHERE message.role IN ('user', 'assistant')
