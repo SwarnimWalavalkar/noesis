@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capabilityEffects, createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import {
+  sha256,
   CAPABILITY_NOTES_MARKER,
   capabilityGuidance,
   capabilityRevisionRef,
@@ -313,6 +314,19 @@ describe("Capability files", () => {
     expect(
       capabilityGuidance(new TextDecoder().decode(await workspace.reads.readRevision(latest.document))),
     ).toBe("Run pnpm, not npm. Prefer pnpm dlx.");
+
+    // A newer save made while an edit was being applied is never replaced by the older edit.
+    const newerSave = `${userEdit}\nNewer save.\n`;
+    await writeFile(file, newerSave);
+    await publisher.syncWorkingDocument(created.capabilityId, context, {
+      userChoseRevision: true,
+      onlyReplacingDigest: sha256(userEdit),
+    });
+    expect(
+      new TextDecoder().decode(
+        await workspace.reads.readWorkingFile(capabilityWorkingDocumentPath(first.document)),
+      ),
+    ).toBe(newerSave);
   });
 
   test("imports an earlier file the user restored from a backup as an edit", async () => {

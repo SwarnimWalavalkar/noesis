@@ -197,6 +197,8 @@ export interface CapabilityPublisher {
     options?: {
       /** The user restored or approved this revision, so it replaces unapplied file edits. */
       readonly userChoseRevision?: boolean;
+      /** Replace an unapplied edit only while the file still holds these exact bytes. */
+      readonly onlyReplacingDigest?: string;
     },
   ) => Promise<void>;
   /**
@@ -988,7 +990,10 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     const previous = syncQueues.get(capabilityId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(async () => await syncNow(capabilityId, options_?.userChoseRevision === true));
+      .then(
+        async () =>
+          await syncNow(capabilityId, options_?.userChoseRevision === true, options_?.onlyReplacingDigest),
+      );
     syncQueues.set(capabilityId, next);
     try {
       await next;
@@ -996,7 +1001,11 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       if (syncQueues.get(capabilityId) === next) syncQueues.delete(capabilityId);
     }
   };
-  const syncNow = async (capabilityId: string, userChoseRevision: boolean): Promise<void> => {
+  const syncNow = async (
+    capabilityId: string,
+    userChoseRevision: boolean,
+    onlyReplacingDigest: string | undefined,
+  ): Promise<void> => {
     const binding = await options.store.getBinding(capabilityId);
     if (!binding) return;
     const lifecycle = await options.store.getRevision(binding.revision);
@@ -1031,6 +1040,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       // scan applies the user's edit on top of this revision. The user's own restore or approval
       // replaces it, after keeping its bytes as a revision so nothing is lost.
       if (!userChoseRevision) return;
+      if (onlyReplacingDigest !== undefined && sha256(working) !== onlyReplacingDigest) return;
       await options.workspace.recordDirectEdit(
         path,
         userActor,
@@ -1213,9 +1223,18 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         continue;
       }
       const result = outcome.result;
-      // The edit is now the current revision, so write its normalized file over the user's bytes.
-      if (result.status === "revised")
-        await syncWorkingDocument(binding.capabilityId, context, { userChoseRevision: true });
+      // The edit is now the current revision, so write its normalized file over the user's bytes,
+      // unless the user saved again meanwhile; the next scan imports that newer save.
+      if (result.status === "revised") {
+        const synced = await syncWorkingDocument(binding.capabilityId, context, {
+          userChoseRevision: true,
+          onlyReplacingDigest: sha256(working),
+        }).then(
+          () => undefined,
+          (cause: Error) => cause.message,
+        );
+        if (synced !== undefined) problems.push({ capabilityId: binding.capabilityId, path, error: synced });
+      }
       if (result.status === "revised")
         recorded.push({ capabilityId: binding.capabilityId, name: parsed.content.name });
     }
