@@ -156,12 +156,18 @@ export async function settledTurnPresentation(
   // previous turn's reflection, so its result belongs with this turn.
   const releasedByThisTurn = (activity: TuiLearningActivitySummary): boolean =>
     activity.reactionTurnId === request.turnId;
-  const focusActivity = learning.activities.find(
+  const notable = learning.activities.filter(
     (activity) =>
       (releasedByThisTurn(activity) || activity.turnId === request.turnId) &&
       workingAdjustmentNotice(activity) !== undefined,
   );
-  const learningNotice = focusActivity ? workingAdjustmentNotice(focusActivity) : undefined;
+  const focusActivity = notable[0];
+  // One notice per turn: the first change, plus how many others /learning holds.
+  const firstNotice = focusActivity ? workingAdjustmentNotice(focusActivity) : undefined;
+  const learningNotice =
+    firstNotice && notable.length > 1
+      ? `${firstNotice} · ${String(notable.length - 1)} more in /learning`
+      : firstNotice;
   if (focusActivity && learningNotice)
     actions.push({
       type: "notification-shown",

@@ -32,6 +32,7 @@ test("announces a session review's published change on the next turn after it co
         review("job-published", "2026-10-29T11:00:00.000Z", [
           { status: "no_change", reason: "Nothing here." },
           { status: "activated", capabilityId: "capability-notes", message: "Release notes by area" },
+          { status: "paused", capabilityId: "capability-old", message: "Paused overlapping notes" },
         ]),
         review("job-quiet", "2026-10-29T11:00:00.000Z", [{ status: "no_change", reason: "Nothing." }]),
         review("job-later", "2026-10-29T12:00:00.000Z", [{ status: "paused", capabilityId: "capability-x" }]),
@@ -43,7 +44,7 @@ test("announces a session review's published change on the next turn after it co
       jobId: "job-published",
       stage: "reflection",
       status: "activated",
-      summary: "Session review · Release notes by area",
+      summary: "Session review · Release notes by area · Paused overlapping notes",
       updatedAt: "2026-10-29T11:00:00.000Z",
       reactionTurnId: "turn-after",
       capabilityId: "capability-notes",

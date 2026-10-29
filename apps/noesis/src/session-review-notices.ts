@@ -1,25 +1,12 @@
 import { createConditionalObject, type DurableJobRecord } from "@noesis/domain";
 import type { TuiLearningActivitySummary } from "@noesis/tui";
+import { CapabilityPublicationResultSchema } from "@noesis/learning";
 import { z } from "zod";
 
-const PublicationSchema = z.looseObject({
-  status: z.enum([
-    "no_change",
-    "activated",
-    "revised",
-    "pending",
-    "paused",
-    "restored",
-    "binding_changed",
-    "stale",
-  ]),
-  message: z.string().optional(),
-  capabilityId: z.string().optional(),
-});
 const SessionReviewResultSchema = z.looseObject({
   status: z.literal("reviewed"),
   summary: z.string(),
-  results: z.array(PublicationSchema),
+  results: z.array(CapabilityPublicationResultSchema),
 });
 
 /**
@@ -35,23 +22,27 @@ export function sessionReviewNotices(
       if (job.status !== "completed") return [];
       const result = SessionReviewResultSchema.safeParse(job.result);
       if (!result.success) return [];
-      const published = result.data.results.find(
+      const published = result.data.results.filter(
         (item) => item.status !== "no_change" && item.status !== "stale",
       );
       const completedAt = job.completedAt ?? job.updatedAt;
       const reactionTurn = userTurns.find((turn) => turn.createdAt > completedAt);
-      if (!published || !reactionTurn) return [];
+      const first = published[0];
+      if (!first || !reactionTurn) return [];
       return [
         Object.freeze(
           createConditionalObject({
             jobId: job.jobId,
             stage: "reflection" as const,
-            status: published.status,
-            summary: `Session review · ${published.message ?? result.data.summary}`,
+            status: first.status,
+            // One notice names every change the review made.
+            summary: `Session review · ${published
+              .map((item) => ("message" in item ? item.message : result.data.summary))
+              .join(" · ")}`,
             updatedAt: job.updatedAt,
             reactionTurnId: reactionTurn.turnId,
           } as const)
-            .addOptional(published.capabilityId ? { capabilityId: published.capabilityId } : undefined)
+            .addOptional("capabilityId" in first ? { capabilityId: first.capabilityId } : undefined)
             .finish(),
         ),
       ];

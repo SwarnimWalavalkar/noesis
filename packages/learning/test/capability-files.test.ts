@@ -181,6 +181,27 @@ describe("Capability files", () => {
       applicability: "Package and script commands.",
     });
 
+    // History lists the newest change first.
+    const afterText = new TextDecoder().decode(await workspace.reads.readRevision(after.document));
+    const history = afterText.slice(afterText.indexOf("## History"));
+    expect(history.indexOf("Edited directly in its Capability file.")).toBeLessThan(
+      history.indexOf("Use pnpm."),
+    );
+
+    // A file left at an earlier revision, e.g. after Noesis stopped mid-publication, is brought up to
+    // date instead of being imported as the user's edit.
+    await writeFile(file, new TextDecoder().decode(await workspace.reads.readRevision(before.document)));
+    await expect(publisher.recordDocumentEdits(context, new AbortController().signal)).resolves.toEqual({
+      recorded: [],
+      problems: [],
+    });
+    expect((await current(workspace, created.capabilityId)).binding.revision).toEqual(after.binding.revision);
+    expect(
+      new TextDecoder().decode(
+        await workspace.reads.readWorkingFile(capabilityWorkingDocumentPath(after.document)),
+      ),
+    ).toBe(afterText);
+
     await writeFile(file, "no frontmatter here");
     const report = await publisher.recordDocumentEdits(context, new AbortController().signal);
     expect(report.recorded).toEqual([]);
@@ -218,7 +239,7 @@ describe("Capability files", () => {
   });
 
   test("keeps always-active guidance short", async () => {
-    const { publisher, context } = await setup();
+    const { workspace, publisher, context } = await setup();
     const proposal = {
       name: "Long rules",
       description: "Many rules.",
@@ -246,6 +267,38 @@ describe("Capability files", () => {
     await expect(publisher.assertCurrentGuidanceFitsAlways(relevant.capabilityId)).rejects.toThrow(
       "at most 2000 characters",
     );
+
+    // A pending always-active revision cannot be amended into guidance that is too long.
+    const gated = await publisher.publish(
+      {
+        decision: "create",
+        proposal: {
+          ...proposal,
+          name: "Gated rules",
+          effects: [{ kind: "instruction", content: "Short guidance." }],
+          activationMode: "always",
+          consequence: "recovery_control",
+          consequenceDescription: "Changes recovery control.",
+        },
+      },
+      context,
+      new AbortController().signal,
+    );
+    if (gated.status !== "pending") throw new Error("Expected a pending gate");
+    const [gate] = await workspace.capabilities.listPendingGates();
+    if (!gate) throw new Error("Expected the pending gate");
+    await expect(
+      publisher.replacePendingGate(
+        {
+          gateRequestId: gate.gateRequestId,
+          proposal: { ...proposal, name: "Gated rules", consequence: "recovery_control" },
+          instruction: "Add every rule.",
+        },
+        { actor: context.actor, project: context.project },
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow("at most 2000 characters");
+    await expect(publisher.assertGateFitsAlways(gate.gateRequestId)).resolves.toBeUndefined();
   });
 
   test("moves a Capability made before Capability files into a file", async () => {
@@ -253,7 +306,8 @@ describe("Capability files", () => {
     const actor = Object.freeze({ actorId: "test", kind: "noesis" as const });
     const material = await workspace.definitions.recordWorkingDefinition({
       workingPath: "capabilities/capability-old/revision-old/instruction-1.md",
-      bytes: new TextEncoder().encode("Cite the primary source.\n"),
+      // Longer than new always-active guidance may be; the move keeps it as it was.
+      bytes: new TextEncoder().encode(`Cite the primary source.${" Keep citations exact.".repeat(120)}\n`),
       actor,
     });
     const router = await workspace.definitions.recordWorkingDefinition({
@@ -305,7 +359,7 @@ describe("Capability files", () => {
         capabilityId: "capability-old",
         revision: capabilityRevisionRef(revision),
         scope: { kind: "global" },
-        activationMode: "relevant",
+        activationMode: "always",
         state: "paused",
       },
     });
@@ -316,7 +370,8 @@ describe("Capability files", () => {
     expect(capabilityEffects(moved.lifecycle.revision).map((effect) => effect.kind)).toEqual(["instruction"]);
     expect(
       capabilityGuidance(new TextDecoder().decode(await workspace.reads.readRevision(moved.document))),
-    ).toBe("Cite the primary source.");
+    ).toMatch(/^Cite the primary source\. Keep citations exact\./u);
+    expect(moved.binding.activationMode).toBe("always");
     // A second run finds nothing left to move.
     await expect(publisher.moveToDocuments(context, new AbortController().signal)).resolves.toBe(0);
   });

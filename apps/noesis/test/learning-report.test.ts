@@ -89,12 +89,45 @@ test("counts each Capability's judged outcomes and evidence", async () => {
       })),
     );
 
+    // A later revision from a correction does not change why the Capability was created.
+    await publisher.publish(
+      {
+        decision: "revise",
+        capabilityId: published.capabilityId,
+        expectedBindingRevision: binding.revisionNumber,
+        proposal: {
+          name: "Use pnpm",
+          description: "Use pnpm for package commands.",
+          applicability: "Package commands in this repository.",
+          summary: "Also use pnpm dlx.",
+          rationale: "The user corrected npx usage.",
+          anticipatedEffect: "Package runners use pnpm dlx.",
+          effects: [{ kind: "instruction", content: "Use pnpm and pnpm dlx." }],
+          consequence: "ordinary",
+          consequenceDescription: "Only model instructions change.",
+          evidence: {
+            kind: "user_correction",
+            quote: "Use pnpm dlx, not npx.",
+            wouldOtherwise: "The user would correct npx usage again.",
+          },
+        },
+      },
+      {
+        project: Object.freeze({ projectId: "project-report", root }),
+        sessionId: "session-report",
+        evidenceRefs: [message],
+        actor: Object.freeze({ actorId: "test", kind: "noesis" as const }),
+      },
+      new AbortController().signal,
+    );
     const report = await computeLearningReport(workspace);
     expect(report.capabilities).toEqual([
       expect.objectContaining({
         name: "Use pnpm",
         state: "active",
-        evidenceKind: "explicit_request",
+        // The current revision came from a correction; creation evidence is counted separately.
+        evidenceKind: "user_correction",
+        revisions: 2,
         helped: 2,
         hurt: 1,
         unclear: 0,

@@ -1795,10 +1795,9 @@ export async function createApplicationRuntimeComposition(
     programs: capabilityPrograms,
   });
   // Capabilities made before Capability files get a readable file once, as a new revision.
-  await capabilityPublisher.moveToDocuments(
-    Object.freeze({ project, sessionId: "capability-files" }),
-    new AbortController().signal,
-  );
+  await capabilityPublisher
+    .moveToDocuments(Object.freeze({ project, sessionId: "capability-files" }), new AbortController().signal)
+    .catch(() => 0);
   /** Records the user's direct edits to Capability files before Noesis reads them. */
   const recordCapabilityFileEdits = async (sessionId: string) => {
     try {

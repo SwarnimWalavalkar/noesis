@@ -134,7 +134,8 @@ export async function computeLearningReport(
             workspace.capabilities.listFeedback(definition.capabilityId),
             workspace.capabilities.listOutcomes(definition.capabilityId, OUTCOME_LIMIT),
           ]);
-          const first = revisions.at(-1);
+          // listRevisions without a limit returns the oldest revision first.
+          const first = revisions[0];
           if (within(definition.createdAt, since)) {
             const kind = first?.evidence?.kind ?? "not recorded";
             evidenceKinds[kind] = (evidenceKinds[kind] ?? 0) + 1;
@@ -154,8 +155,12 @@ export async function computeLearningReport(
             hurt: windowed.filter((outcome) => outcome.result === "hurt").length,
             unclear: windowed.filter((outcome) => outcome.result === "unclear").length,
             usedWithin30Days: outcomes.some((outcome) => outcome.createdAt <= adoptionEnd),
-            automaticPauses: feedback.filter((item) => item.disposition === "regression").length,
-            restores: feedback.filter((item) => item.disposition === "restore_request").length,
+            automaticPauses: feedback.filter(
+              (item) => item.disposition === "regression" && within(item.createdAt, since),
+            ).length,
+            restores: feedback.filter(
+              (item) => item.disposition === "restore_request" && within(item.createdAt, since),
+            ).length,
           };
           return current?.evidence ? { ...report, evidenceKind: current.evidence.kind } : report;
         })(),
@@ -215,8 +220,9 @@ export function formatLearningReport(report: LearningReport, now: Date = new Dat
     `  ${String(report.reflections.total)} recorded, ${String(report.reflections.waitingForReply)} waiting for a reply, ${String(report.reflections.failed)} failed`,
     `  ${String(noChange)} no change (${percent(noChange, completed)}), ${String(created)} created, ${String(revised)} revised`,
     `  Capabilities created per 100 completed reflections: ${perUnit(created * 100, completed, 1)}`,
-    `  Tokens per reflection: ${perUnit(report.reflections.tokens, completed, 0)} · per creation: ${perUnit(report.reflections.tokens, created, 0)} · estimated cost ${report.reflections.estimatedCost.toFixed(4)}`,
-    `  Session reviews: ${String(report.sessionReviews.completed)} completed, ${String(report.sessionReviews.publications)} changes, ${String(report.sessionReviews.tokens)} tokens`,
+    `  Tokens per reflection: ${perUnit(report.reflections.tokens, completed, 0)} · per creation: ${perUnit(report.reflections.tokens, created, 0)}`,
+    `  Estimated cost: ${report.reflections.estimatedCost.toFixed(4)} total · ${perUnit(report.reflections.estimatedCost, completed, 4)} per reflection · ${perUnit(report.reflections.estimatedCost, created, 4)} per creation`,
+    `  Session reviews: ${String(report.sessionReviews.completed)} completed, ${String(report.sessionReviews.publications)} changes, ${String(report.sessionReviews.tokens)} tokens, estimated cost ${report.sessionReviews.estimatedCost.toFixed(4)}`,
     "",
     "Evidence for Capabilities created in this period",
     ...Object.entries(report.evidenceKinds).map(([kind, count]) => `  ${kind}: ${String(count)}`),

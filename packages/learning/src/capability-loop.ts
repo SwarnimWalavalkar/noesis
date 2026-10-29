@@ -1340,6 +1340,7 @@ export function createCapabilityLearningModule(
   const manage: CapabilityLearningModule["manage"] = async (intent, signal) => {
     signal.throwIfAborted();
     if (intent.type === "approve" || intent.type === "deny") {
+      if (intent.type === "approve") await publisher.assertGateFitsAlways(intent.gateRequestId);
       const gate = await options.store.getGate(intent.gateRequestId);
       if (!gate) throw new Error(`Unknown capability gate ${intent.gateRequestId}`);
       if (gate.status !== "pending")

@@ -173,6 +173,11 @@ export interface CapabilityPublicationContext {
   readonly interpretation?: string;
   /** Foreground turns may pin program effects to the exact saved definitions visible at admission. */
   readonly programResolver?: Pick<CapabilityProgramLibrary, "resolve">;
+  /**
+   * Set only by the startup move into Capability files. It keeps an existing long always-active
+   * Capability as it was; the per-turn allowance still bounds what reaches the prompt.
+   */
+  readonly preservingExistingGuidance?: true;
 }
 
 export interface CapabilityPublisher {
@@ -184,6 +189,8 @@ export interface CapabilityPublisher {
   /** Rewrites a Capability's working file to match its current revision after a restore or approval. */
   /** Rejects an always-active mode when the current guidance is too long for every prompt. */
   readonly assertCurrentGuidanceFitsAlways: (capabilityId: string) => Promise<void>;
+  /** Rejects approving a pending always-active revision whose guidance is too long. */
+  readonly assertGateFitsAlways: (gateRequestId: string) => Promise<void>;
   readonly syncWorkingDocument: (
     capabilityId: string,
     context?: Pick<CapabilityPublicationContext, "project" | "sessionId">,
@@ -295,13 +302,6 @@ function capabilityDocumentPath(capabilityId: string, name: string): string {
 /** The editable working file for a Capability file revision, outside the candidate area. */
 export function capabilityWorkingDocumentPath(document: FileRevisionRef): string {
   return document.workingPath.replace(/^definitions\/candidates\//u, "definitions/");
-}
-
-function capabilityDocumentRevisionOrThrow(revision: CapabilityLifecycleRevision): FileRevisionRef {
-  const document = capabilityDocumentRevision(revision);
-  if (!document)
-    throw new Error(`Revision ${revision.reference.capabilityRevisionId} has no Capability file`);
-  return document;
 }
 
 /** The Capability file a revision pins, or undefined for revisions made before Capability files. */
@@ -433,8 +433,9 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     if (guidance.length === 0 && programDrafts.length === 0)
       throw new Error("A Capability needs guidance or a saved Program");
     const predecessorDocument = input.predecessor ? capabilityDocumentRevision(input.predecessor) : undefined;
+    // listRevisions without a limit returns the oldest first; the file lists the newest first.
     const history = input.predecessor
-      ? (await options.store.listRevisions(input.capabilityId)).map((revision) => ({
+      ? (await options.store.listRevisions(input.capabilityId)).toReversed().map((revision) => ({
           date: revision.createdAt.slice(0, 10),
           summary: revision.summary,
         }))
@@ -698,14 +699,8 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     const requiresGate = hostRequiresActivationGate(authored.revision) || proposal.consequence !== "ordinary";
     const nextScope = proposedScope(proposal, context, binding?.scope);
     const nextActivationMode = proposedActivationMode(proposal, binding?.activationMode);
-    if (nextActivationMode === "always")
-      assertAlwaysGuidanceFits(
-        capabilityGuidance(
-          new TextDecoder().decode(
-            await options.workspace.reads.readRevision(capabilityDocumentRevisionOrThrow(authored.revision)),
-          ),
-        ),
-      );
+    if (nextActivationMode === "always" && !context.preservingExistingGuidance)
+      await assertRevisionGuidanceFitsAlways(authored.revision);
 
     if (!binding) {
       const gate = requiresGate
@@ -827,6 +822,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         .addOptional(context.project ? { project: context.project } : undefined)
         .finish(),
     );
+    if (gate.proposedActivationMode === "always") await assertRevisionGuidanceFitsAlways(authored.revision);
     signal.throwIfAborted();
     const staged = await options.store.stageGatedRevision({
       revision: authored.revision,
@@ -866,14 +862,23 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     });
   };
 
-  const assertCurrentGuidanceFitsAlways = async (capabilityId: string): Promise<void> => {
-    const binding = await options.store.getBinding(capabilityId);
-    const lifecycle = binding ? await options.store.getRevision(binding.revision) : undefined;
-    const document = lifecycle ? capabilityDocumentRevision(lifecycle) : undefined;
+  async function assertRevisionGuidanceFitsAlways(revision: CapabilityLifecycleRevision): Promise<void> {
+    const document = capabilityDocumentRevision(revision);
     if (!document) return;
     assertAlwaysGuidanceFits(
       capabilityGuidance(new TextDecoder().decode(await options.workspace.reads.readRevision(document))),
     );
+  }
+  const assertCurrentGuidanceFitsAlways = async (capabilityId: string): Promise<void> => {
+    const binding = await options.store.getBinding(capabilityId);
+    const lifecycle = binding ? await options.store.getRevision(binding.revision) : undefined;
+    if (lifecycle) await assertRevisionGuidanceFitsAlways(lifecycle);
+  };
+  const assertGateFitsAlways = async (gateRequestId: string): Promise<void> => {
+    const gate = await options.store.getGate(gateRequestId);
+    if (gate?.proposedActivationMode !== "always") return;
+    const lifecycle = await options.store.getRevision(gate.revision);
+    if (lifecycle) await assertRevisionGuidanceFitsAlways(lifecycle);
   };
   const systemActor: ActorRef = Object.freeze({ actorId: "capability-files", kind: "system" });
   const userActor: ActorRef = Object.freeze({ actorId: "workspace-user", kind: "user" });
@@ -933,7 +938,23 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       .finish();
   };
 
+  // Syncs for one Capability run one at a time. Each reads the binding when it starts, so the last
+  // sync always writes the current revision even when publications race.
+  const syncQueues = new Map<string, Promise<void>>();
   const syncWorkingDocument: CapabilityPublisher["syncWorkingDocument"] = async (capabilityId, context) => {
+    const previous = syncQueues.get(capabilityId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(async () => await syncNow(capabilityId, context));
+    syncQueues.set(capabilityId, next);
+    try {
+      await next;
+    } finally {
+      if (syncQueues.get(capabilityId) === next) syncQueues.delete(capabilityId);
+    }
+  };
+  const syncNow = async (
+    capabilityId: string,
+    context: Pick<CapabilityPublicationContext, "project" | "sessionId"> | undefined,
+  ): Promise<void> => {
     const binding = await options.store.getBinding(capabilityId);
     if (!binding) return;
     const lifecycle = await options.store.getRevision(binding.revision);
@@ -968,6 +989,10 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     const path = capabilityWorkingDocumentPath(document);
     const working = await options.workspace.reads.readWorkingFile(path);
     if (working && sha256(working) === document.contentDigest) return;
+    // The store skips a write whose bytes match the path's latest record. Record the out-of-date
+    // file first, so the current revision is always written back to disk.
+    if (working)
+      await options.workspace.recordDirectEdit(path, systemActor, "Out-of-date Capability file before sync");
     await options.workspace.definitions.recordWorkingDefinition({
       workingPath: path,
       bytes,
@@ -1022,6 +1047,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         actor: systemActor,
         interpretation: "Moved into a readable Capability file",
         programResolver: current.resolver,
+        preservingExistingGuidance: true,
       },
       signal,
     );
@@ -1041,7 +1067,12 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       // A pending gate expects the binding as it is, so leave this Capability until it is decided.
       if ((await options.store.listGates(binding.capabilityId)).some((gate) => gate.status === "pending"))
         continue;
-      if (await moveOne(binding, lifecycle, context, signal)) moved += 1;
+      // One Capability that cannot move must not keep the others, or Noesis, from starting.
+      const result = await moveOne(binding, lifecycle, context, signal).then(
+        (done) => done,
+        () => false,
+      );
+      if (result) moved += 1;
     }
     return moved;
   };
@@ -1061,6 +1092,16 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       const path = capabilityWorkingDocumentPath(document);
       const working = await options.workspace.reads.readWorkingFile(path);
       if (!working || sha256(working) === document.contentDigest) continue;
+      // A file that matches an earlier recorded revision was never brought up to date, e.g. Noesis
+      // stopped right after publishing. It is not the user's edit, so bring it up to date instead.
+      const workingDigest = sha256(working);
+      const earlier = (await options.store.listRevisions(binding.capabilityId)).some(
+        (revision) => capabilityDocumentRevision(revision)?.contentDigest === workingDigest,
+      );
+      if (earlier) {
+        await syncWorkingDocument(binding.capabilityId, context);
+        continue;
+      }
       const parsed = parseCapabilityDocument(new TextDecoder().decode(working));
       if (!parsed.ok) {
         problems.push({ capabilityId: binding.capabilityId, path, error: parsed.error });
@@ -1129,6 +1170,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     publish,
     replacePendingGate,
     assertCurrentGuidanceFitsAlways,
+    assertGateFitsAlways,
     syncWorkingDocument,
     recordDocumentEdits,
     moveToDocuments,
