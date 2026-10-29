@@ -90,9 +90,6 @@ importers:
       '@noesis/agent-types':
         specifier: workspace:*
         version: link:../../packages/agent-types
-      '@noesis/capabilities':
-        specifier: workspace:*
-        version: link:../../packages/capabilities
       '@noesis/codemode':
         specifier: workspace:*
         version: link:../../packages/codemode
@@ -144,19 +141,6 @@ importers:
       zod:
         specifier: 4.6.7
         version: 4.6.7
-
-  packages/capabilities:
-    dependencies:
-      '@noesis/domain':
-        specifier: workspace:*
-        version: link:../domain
-      zod:
-        specifier: 4.6.7
-        version: 4.6.7
-    devDependencies:
-      '@noesis/workspace':
-        specifier: workspace:*
-        version: link:../workspace
 
   packages/codemode:
     dependencies:
@@ -218,9 +202,6 @@ importers:
       '@noesis/agent-types':
         specifier: workspace:*
         version: link:../agent-types
-      '@noesis/capabilities':
-        specifier: workspace:*
-        version: link:../capabilities
       '@noesis/config':
         specifier: workspace:*
         version: link:../config
@@ -263,9 +244,6 @@ importers:
       '@noesis/agent-types':
         specifier: workspace:*
         version: link:../agent-types
-      '@noesis/capabilities':
-        specifier: workspace:*
-        version: link:../capabilities
       '@noesis/context':
         specifier: workspace:*
         version: link:../context

@@ -1,16 +1,12 @@
 import {
-  type AtomicCapabilityRegistry,
-  capabilityEffects,
-  validateCapabilityEffects,
-} from "@noesis/capabilities";
-import {
   type ActorRef,
-  type Capability,
   type CapabilityActivationMode,
+  type CapabilityBinding,
   type CapabilityDefinition,
   type CapabilityEffect,
   type CapabilityFeedback,
   type CapabilityLifecycleRevision,
+  type CapabilityRevision,
   type CapabilityScope,
   CapabilityEvidenceClaimSchema,
   capabilityEvidenceLabel,
@@ -21,10 +17,12 @@ import {
   type FileRevisionRef,
   type ProjectRef,
   capabilityGuidance,
+  capabilityRevisionRef,
   learnedCapabilitySkillName,
   parseCapabilityDocument,
   renderCapabilityDocument,
   sha256,
+  validateCapabilityEffects,
 } from "@noesis/domain";
 import type { CapabilityLifecycleStore, NoesisWorkspaceStore } from "@noesis/workspace";
 import { z } from "zod";
@@ -42,12 +40,6 @@ export const CapabilityEffectDraftSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("instruction"),
     content: z.string().trim().min(1).max(12_000),
-  }),
-  z.strictObject({
-    kind: z.literal("skill"),
-    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-    description: z.string().trim().min(1).max(2_048),
-    instructions: z.string().trim().min(1).max(32_000),
   }),
   z.strictObject({
     kind: z.literal("program"),
@@ -173,11 +165,6 @@ export interface CapabilityPublicationContext {
   readonly interpretation?: string;
   /** Foreground turns may pin program effects to the exact saved definitions visible at admission. */
   readonly programResolver?: Pick<CapabilityProgramLibrary, "resolve">;
-  /**
-   * Set only by the startup move into Capability files. It keeps an existing long always-active
-   * Capability as it was; the per-turn allowance still bounds what reaches the prompt.
-   */
-  readonly preservingExistingGuidance?: true;
 }
 
 export interface CapabilityPublisher {
@@ -186,14 +173,13 @@ export interface CapabilityPublisher {
     context: CapabilityPublicationContext,
     signal: AbortSignal,
   ) => Promise<CapabilityPublicationResult>;
-  /** Rewrites a Capability's working file to match its current revision after a restore or approval. */
   /** Rejects an always-active mode when the current guidance is too long for every prompt. */
   readonly assertCurrentGuidanceFitsAlways: (capabilityId: string) => Promise<void>;
   /** Rejects approving a pending always-active revision whose guidance is too long. */
   readonly assertGateFitsAlways: (gateRequestId: string) => Promise<void>;
+  /** Rewrites a Capability's working file to match its current revision after a restore or approval. */
   readonly syncWorkingDocument: (
     capabilityId: string,
-    context?: Pick<CapabilityPublicationContext, "project" | "sessionId">,
     options?: {
       /** The user restored or approved this revision, so it replaces unapplied file edits. */
       readonly userChoseRevision?: boolean;
@@ -209,11 +195,6 @@ export interface CapabilityPublisher {
     context: Pick<CapabilityPublicationContext, "project" | "sessionId">,
     signal: AbortSignal,
   ) => Promise<CapabilityDocumentEditReport>;
-  /** Gives every Capability made before Capability files a readable file, as a new revision. */
-  readonly moveToDocuments: (
-    context: Pick<CapabilityPublicationContext, "project" | "sessionId">,
-    signal: AbortSignal,
-  ) => Promise<number>;
   /** Replace one exact pending gated revision after a user-authored natural-language amendment. */
   readonly replacePendingGate: (
     input: {
@@ -241,7 +222,6 @@ export interface CapabilityDocumentEditReport {
 export interface CreateCapabilityPublisherOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly store: CapabilityLifecycleStore;
-  readonly registry: AtomicCapabilityRegistry;
   readonly programs?: CapabilityProgramLibrary;
   readonly now?: () => string;
   readonly nextId?: (prefix: string) => string;
@@ -300,8 +280,6 @@ function assertAlwaysGuidanceFits(guidance: string): void {
       `An always-active Capability's guidance must be at most ${String(ALWAYS_GUIDANCE_MAX_CHARACTERS)} characters; it has ${String(guidance.length)}. Keep it relevant, or shorten the guidance.`,
     );
 }
-const DOCUMENT_PATH = /^definitions\/(?:candidates\/)?capabilities\/[^/]+\.md$/u;
-
 /** The readable file for a new Capability. It keeps this path for every later revision. */
 function capabilityDocumentPath(capabilityId: string, name: string): string {
   return `capabilities/${learnedCapabilitySkillName(capabilityId, name).slice("learned-".length)}.md`;
@@ -312,49 +290,18 @@ export function capabilityWorkingDocumentPath(document: FileRevisionRef): string
   return document.workingPath.replace(/^definitions\/candidates\//u, "definitions/");
 }
 
-/** The Capability file a revision pins, or undefined for revisions made before Capability files. */
-export function capabilityDocumentRevision(
-  revision: CapabilityLifecycleRevision,
-): FileRevisionRef | undefined {
-  const first = capabilityEffects(revision.revision)[0];
-  return first?.kind === "instruction" && DOCUMENT_PATH.test(first.material.workingPath)
-    ? first.material
-    : undefined;
-}
-
-function registryCapability(capability: CapabilityDefinition): Capability {
-  return Object.freeze({
-    capabilityId: capability.capabilityId,
-    name: capability.name,
-    scope: "general",
-    intent: capability.applicability,
-  });
+/** The Capability file a revision pins: its first effect is always the instruction file. */
+export function capabilityDocumentRevision(revision: CapabilityLifecycleRevision): FileRevisionRef {
+  const first = revision.revision.effects[0];
+  if (first?.kind !== "instruction")
+    throw new Error(`Capability revision ${revision.reference.capabilityRevisionId} has no instruction file`);
+  return first.material;
 }
 
 function normalizedEvidence(references: readonly EvidenceRef[]): readonly EvidenceRef[] {
   const unique = new Map(references.map((reference) => [canonicalJson(reference), reference]));
   if (unique.size === 0) throw new Error("Capability publication requires authoritative evidence");
   return Object.freeze([...unique.values()]);
-}
-
-/** Model-authored consequence text may escalate a gate, but only host-owned authority may suppress one. */
-function hostRequiresActivationGate(revision: CapabilityLifecycleRevision): boolean {
-  const delta = revision.revision.requestedPermissionDelta;
-  if (
-    delta.addedCredentialRefs.length > 0 ||
-    delta.addedEffects.length > 0 ||
-    delta.widenedResources.length > 0
-  )
-    return true;
-  for (const effect of capabilityEffects(revision.revision)) {
-    // The current effect union only mounts exact guidance or a reference to an already-published
-    // project program. Activating either is reversible; any later protected execution still passes
-    // through that program's frozen Broker and AuthorityBoundary.
-    if (effect.kind === "instruction" || effect.kind === "skill" || effect.kind === "program") continue;
-    const unsupported: never = effect;
-    return unsupported;
-  }
-  return false;
 }
 
 export function createCapabilityPublisher(options: CreateCapabilityPublisherOptions): CapabilityPublisher {
@@ -366,32 +313,6 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       list: async () => Object.freeze([]),
       resolve: async () => undefined,
     });
-
-  const compatibilityRouter = async (evidenceRefs: readonly EvidenceRef[], actor: ActorRef) => {
-    const namespace = "capability_system";
-    const definitionId = "semantic-router-v1";
-    const current = await options.workspace.definitionMetadata.getCurrent(namespace, definitionId);
-    if (current) return current.definitionRevision;
-    const publication = await options.workspace.definitionPublications.publish({
-      namespace,
-      definitionId,
-      revision: 1,
-      workingPath: "capabilities/system/semantic-router.json",
-      bytes: new TextEncoder().encode(
-        `${canonicalJson({ strategyId: "semantic-capability-router-v1", scope: "central" })}\n`,
-      ),
-      provenanceRefs: evidenceRefs,
-      activity: Object.freeze({
-        kind: "capability.semantic_router_initialized",
-        actor,
-        reason: "Compatibility identity for the central semantic Capability router",
-      }),
-    });
-    if (publication.ok) return publication.value.definitionRevision;
-    const raced = await options.workspace.definitionMetadata.getCurrent(namespace, definitionId);
-    if (!raced) throw new Error(publication.error.message);
-    return raced.definitionRevision;
-  };
 
   const authorRevision = async (input: {
     readonly proposal: CapabilityProposal;
@@ -413,31 +334,16 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       throw new Error(`Capability ${input.capabilityId} has a revision but no definition`);
     // A revision may refine the name, description, and applicability. The Capability ID and its
     // creation time stay fixed, so lineage and restoration still refer to the same Capability.
-    const definition: CapabilityDefinition = Object.freeze(
-      createConditionalObject({
-        capabilityId: input.capabilityId,
-        name: input.proposal.name,
-      } as const)
-        .addOptional(existingDefinition?.kind ? { kind: existingDefinition.kind } : undefined)
-        .add({
-          description: input.proposal.description,
-          applicability: input.proposal.applicability,
-          createdAt: existingDefinition?.createdAt ?? now(),
-        } as const)
-        .finish(),
-    );
-    // A new Capability must be registered before its first revision is built. A revision of an
-    // existing one registers its new name only after the store accepts it.
-    if (!existingDefinition) options.registry.registerCapability(registryCapability(definition));
-    // Instruction and skill drafts become the guidance of one readable Capability file.
+    const definition: CapabilityDefinition = Object.freeze({
+      capabilityId: input.capabilityId,
+      name: input.proposal.name,
+      description: input.proposal.description,
+      applicability: input.proposal.applicability,
+      createdAt: existingDefinition?.createdAt ?? now(),
+    });
+    // Instruction drafts become the guidance of one readable Capability file.
     const guidance = input.proposal.effects
-      .flatMap((draft) =>
-        draft.kind === "instruction"
-          ? [draft.content.trim()]
-          : draft.kind === "skill"
-            ? [`## ${draft.name}\n\n${draft.description.trim()}\n\n${draft.instructions.trim()}`]
-            : [],
-      )
+      .flatMap((draft) => (draft.kind === "instruction" ? [draft.content.trim()] : []))
       .join("\n\n");
     const programDrafts = input.proposal.effects.filter((draft) => draft.kind === "program");
     if (guidance.length === 0 && programDrafts.length === 0)
@@ -511,11 +417,8 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       Object.freeze({ kind: "instruction" as const, material: document }),
       ...programEffects,
     ]);
-    const router = await compatibilityRouter(input.evidenceRefs, input.actor);
-    const executesPrograms = effects.some((effect) => effect.kind === "program");
-    const reference = options.registry.constructRevision(
+    const revision: CapabilityRevision = Object.freeze(
       createConditionalObject({
-        definitionState: "candidate",
         capabilityRevisionId,
         capabilityId: input.capabilityId,
       } as const)
@@ -524,41 +427,10 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
             ? { predecessorRevisionId: input.predecessor.revision.capabilityRevisionId }
             : undefined,
         )
-        .add({
-          effects,
-          promptModules: Object.freeze(
-            effects.flatMap((effect) => (effect.kind === "instruction" ? [effect.material] : [])),
-          ),
-          skills: Object.freeze([]),
-          tools: Object.freeze([]),
-          routerRevision: router,
-          routerStrategyId: "semantic-capability-router-v1",
-          activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
-          permissionManifest: Object.freeze({
-            effects: Object.freeze(executesPrograms ? ["execute"] : []),
-            resourcePatterns: Object.freeze(
-              effects.flatMap((effect) =>
-                effect.kind === "program"
-                  ? [
-                      `program:${effect.program.project.projectId}:${effect.program.mode}:${effect.program.name}:run`,
-                    ]
-                  : [],
-              ),
-            ),
-            credentialRefs: Object.freeze([]),
-          }),
-          evidenceRefs: input.evidenceRefs,
-          sourceEvaluationDefinitions: Object.freeze([]),
-          requestedPermissionDelta: Object.freeze({
-            addedEffects: Object.freeze([]),
-            widenedResources: Object.freeze([]),
-            addedCredentialRefs: Object.freeze([]),
-          }),
-        } as const)
+        .add({ effects, evidenceRefs: Object.freeze([...input.evidenceRefs]) } as const)
         .finish(),
     );
-    const revision = options.registry.getRevision(reference);
-    if (!revision) throw new Error(`Capability registry lost authored revision ${capabilityRevisionId}`);
+    const reference = capabilityRevisionRef(revision);
     return Object.freeze({
       definition,
       revision: Object.freeze(
@@ -582,7 +454,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       return Object.freeze({ status: "no_change" as const, reason: decision.reason });
     const evidenceRefs = normalizedEvidence(context.evidenceRefs);
     const decisionFeedback = (
-      binding: import("@noesis/domain").CapabilityBinding,
+      binding: CapabilityBinding,
       interpretation: string,
       disposition: CapabilityFeedback["disposition"],
     ): CapabilityFeedback =>
@@ -642,7 +514,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       });
       if (updated.status !== "stale")
         // Ambient reflection restoring a revision does not override the user's unapplied edits.
-        await syncWorkingDocument(binding.capabilityId, context, {
+        await syncWorkingDocument(binding.capabilityId, {
           userChoseRevision: context.actor.actorId !== AMBIENT_REFLECTION_ACTOR_ID,
         });
       return Object.freeze({
@@ -710,11 +582,12 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         .addOptional(predecessor ? { predecessor } : undefined)
         .finish(),
     );
-    const requiresGate = hostRequiresActivationGate(authored.revision) || proposal.consequence !== "ordinary";
+    // Ordinary revisions only mount guidance or an already-saved project Program, and any later
+    // execution still passes through that Program's frozen Broker and AuthorityBoundary.
+    const requiresGate = proposal.consequence !== "ordinary";
     const nextScope = proposedScope(proposal, context, binding?.scope);
     const nextActivationMode = proposedActivationMode(proposal, binding?.activationMode);
-    if (nextActivationMode === "always" && !context.preservingExistingGuidance)
-      await assertRevisionGuidanceFitsAlways(authored.revision);
+    if (nextActivationMode === "always") await assertRevisionGuidanceFitsAlways(authored.revision);
 
     if (!binding) {
       const gate = requiresGate
@@ -746,7 +619,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
           .addOptional(gate ? { gate } : undefined)
           .finish(),
       );
-      await syncWorkingDocument(capabilityId, context);
+      await syncWorkingDocument(capabilityId);
       return Object.freeze({
         status: requiresGate ? ("pending" as const) : ("activated" as const),
         capabilityId,
@@ -803,10 +676,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       scope: nextScope,
       activationMode: nextActivationMode,
     });
-    if (updated.status !== "stale") {
-      options.registry.registerCapability(registryCapability(authored.definition));
-      await syncWorkingDocument(capabilityId, context);
-    }
+    if (updated.status !== "stale") await syncWorkingDocument(capabilityId);
     return Object.freeze({
       status: updated.status === "stale" ? ("stale" as const) : ("revised" as const),
       capabilityId,
@@ -881,13 +751,9 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
 
   async function assertRevisionGuidanceFitsAlways(revision: CapabilityLifecycleRevision): Promise<void> {
     const document = capabilityDocumentRevision(revision);
-    // Revisions from before Capability files keep their guidance in separate materials.
-    const guidance = document
-      ? capabilityGuidance(new TextDecoder().decode(await options.workspace.reads.readRevision(document)))
-      : (await currentDrafts(revision)).drafts
-          .flatMap((draft) => (draft.kind === "instruction" ? [draft.content] : []))
-          .join("\n\n");
-    assertAlwaysGuidanceFits(guidance);
+    assertAlwaysGuidanceFits(
+      capabilityGuidance(new TextDecoder().decode(await options.workspace.reads.readRevision(document))),
+    );
   }
   const assertCurrentGuidanceFitsAlways = async (capabilityId: string): Promise<void> => {
     const binding = await options.store.getBinding(capabilityId);
@@ -915,51 +781,23 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     );
   };
 
-  /** Guidance and Program drafts that reproduce a revision's current effects exactly. */
-  const currentDrafts = async (
+  /** The exact Program a revision attaches, kept when an edit replaces only its guidance. */
+  const currentProgram = (
     lifecycle: CapabilityLifecycleRevision,
-  ): Promise<{
+  ): {
     readonly drafts: readonly CapabilityProposal["effects"][number][];
     readonly resolver: Pick<CapabilityProgramLibrary, "resolve">;
     readonly project?: ProjectRef;
-  }> => {
-    const decoder = new TextDecoder("utf8", { fatal: true });
-    const effects = capabilityEffects(lifecycle.revision);
-    const texts =
-      effects.length > 0
-        ? await Promise.all(
-            effects.flatMap((effect) =>
-              effect.kind === "instruction"
-                ? [
-                    (async () =>
-                      capabilityGuidance(
-                        decoder.decode(await options.workspace.reads.readRevision(effect.material)),
-                      ))(),
-                  ]
-                : effect.kind === "skill"
-                  ? [
-                      (async () =>
-                        `## ${effect.name}\n\n${effect.description}\n\n${decoder.decode(await options.workspace.reads.readRevision(effect.material)).trim()}`)(),
-                    ]
-                  : [],
-            ),
-          )
-        : await Promise.all(
-            [...lifecycle.revision.promptModules, ...lifecycle.revision.skills].map(async (material) =>
-              decoder.decode(await options.workspace.reads.readRevision(material)).trim(),
-            ),
-          );
-    const programs = effects.filter((effect) => effect.kind === "program");
-    const guidance = texts.filter((text) => text.length > 0).join("\n\n");
+  } => {
+    const programs = lifecycle.revision.effects.filter((effect) => effect.kind === "program");
     return createConditionalObject({
-      drafts: Object.freeze<CapabilityProposal["effects"][number][]>([
-        ...(guidance.length > 0 ? [{ kind: "instruction" as const, content: guidance }] : []),
-        ...programs.map((effect) => ({
+      drafts: Object.freeze(
+        programs.map((effect) => ({
           kind: "program" as const,
           mode: effect.program.mode,
           name: effect.program.name,
         })),
-      ]),
+      ),
       // Keep the exact pinned Program revisions instead of resolving the live library.
       resolver: Object.freeze({
         resolve: async (mode: "script" | "workflow", name: string) =>
@@ -973,20 +811,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
   // Syncs for one Capability run one at a time. Each reads the binding when it starts, so the last
   // sync always writes the current revision even when publications race.
   const syncQueues = new Map<string, Promise<void>>();
-  const syncWorkingDocument: CapabilityPublisher["syncWorkingDocument"] = async (
-    capabilityId,
-    context,
-    options_,
-  ) => {
-    // A restored revision from before Capability files gets a file as a new revision. That move
-    // publishes, and publishing syncs again, so it runs outside the queue to avoid waiting on itself.
-    // Without a project context, the next startup moves it instead.
-    const binding = await options.store.getBinding(capabilityId);
-    const lifecycle = binding ? await options.store.getRevision(binding.revision) : undefined;
-    if (binding && lifecycle && !capabilityDocumentRevision(lifecycle)) {
-      if (context) await moveOne(binding, lifecycle, context, new AbortController().signal);
-      return;
-    }
+  const syncWorkingDocument: CapabilityPublisher["syncWorkingDocument"] = async (capabilityId, options_) => {
     const previous = syncQueues.get(capabilityId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
@@ -1011,7 +836,6 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     const lifecycle = await options.store.getRevision(binding.revision);
     if (!lifecycle) return;
     const document = capabilityDocumentRevision(lifecycle);
-    if (!document) return;
     // A restore or approval may select a revision with an older name or "when" text.
     const bytes = await options.workspace.reads.readRevision(document);
     const parsed = parseCapabilityDocument(new TextDecoder().decode(bytes));
@@ -1030,7 +854,6 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         description: parsed.content.description,
       });
       await options.store.updateDefinition(updated);
-      options.registry.registerCapability(registryCapability(updated));
     }
     const path = capabilityWorkingDocumentPath(document);
     const working = await options.workspace.reads.readWorkingFile(path);
@@ -1056,81 +879,6 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     });
   };
 
-  const moveOne = async (
-    binding: import("@noesis/domain").CapabilityBinding,
-    lifecycle: CapabilityLifecycleRevision,
-    context: Pick<CapabilityPublicationContext, "project" | "sessionId">,
-    signal: AbortSignal,
-  ): Promise<boolean> => {
-    const definition = await options.store.getDefinition(binding.capabilityId);
-    if (!definition) return false;
-    const current = await currentDrafts(lifecycle);
-    if (current.drafts.length === 0) return false;
-    const result = await publish(
-      {
-        decision: "revise",
-        capabilityId: binding.capabilityId,
-        expectedBindingRevision: binding.revisionNumber,
-        proposal: createConditionalObject({
-          name: definition.name,
-          description: definition.description,
-          applicability: definition.applicability,
-          summary: "Moved into a readable Capability file.",
-          rationale: lifecycle.rationale,
-          anticipatedEffect: lifecycle.anticipatedEffect,
-          effects: Array.from(current.drafts),
-          consequence: "ordinary" as const,
-          consequenceDescription: "The guidance is unchanged. Only its storage changes.",
-        } as const)
-          .addOptional(lifecycle.evidence ? { evidence: lifecycle.evidence } : undefined)
-          .finish(),
-      },
-      {
-        project: current.project ?? context.project,
-        sessionId: context.sessionId,
-        // Older revisions may carry no evidence rows; their recorded material is then the evidence.
-        evidenceRefs:
-          lifecycle.revision.evidenceRefs.length > 0
-            ? lifecycle.revision.evidenceRefs
-            : [
-                ...capabilityEffects(lifecycle.revision).flatMap((effect) =>
-                  effect.kind === "program" ? [] : [effect.material],
-                ),
-                ...lifecycle.revision.promptModules,
-              ].slice(0, 1),
-        actor: systemActor,
-        interpretation: "Moved into a readable Capability file",
-        programResolver: current.resolver,
-        preservingExistingGuidance: true,
-      },
-      signal,
-    );
-    return result.status === "revised";
-  };
-
-  const moveToDocuments: CapabilityPublisher["moveToDocuments"] = async (context, signal) => {
-    const definitions = await options.store.listDefinitions();
-    const bindings = await options.store.getBindings(
-      definitions.map((definition) => definition.capabilityId),
-    );
-    let moved = 0;
-    for (const binding of bindings) {
-      signal.throwIfAborted();
-      const lifecycle = await options.store.getRevision(binding.revision);
-      if (!lifecycle || capabilityDocumentRevision(lifecycle)) continue;
-      // A pending gate expects the binding as it is, so leave this Capability until it is decided.
-      if ((await options.store.listGates(binding.capabilityId)).some((gate) => gate.status === "pending"))
-        continue;
-      // One Capability that cannot move must not keep the others, or Noesis, from starting.
-      const result = await moveOne(binding, lifecycle, context, signal).then(
-        (done) => done,
-        () => false,
-      );
-      if (result) moved += 1;
-    }
-    return moved;
-  };
-
   const recordDocumentEdits: CapabilityPublisher["recordDocumentEdits"] = async (context, signal) => {
     const definitions = await options.store.listDefinitions();
     const bindings = await options.store.getBindings(
@@ -1141,8 +889,8 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     for (const binding of bindings) {
       signal.throwIfAborted();
       const lifecycle = await options.store.getRevision(binding.revision);
-      const document = lifecycle ? capabilityDocumentRevision(lifecycle) : undefined;
-      if (!lifecycle || !document) continue;
+      if (!lifecycle) continue;
+      const document = capabilityDocumentRevision(lifecycle);
       const path = capabilityWorkingDocumentPath(document);
       const working = await options.workspace.reads.readWorkingFile(path);
       if (!working || sha256(working) === document.contentDigest) continue;
@@ -1150,7 +898,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       // publishing, is synced instead of imported as the user's edit.
       const writtenByNoesis = await isUnchangedNoesisWrite(path, working);
       if (writtenByNoesis) {
-        await syncWorkingDocument(binding.capabilityId, context);
+        await syncWorkingDocument(binding.capabilityId);
         continue;
       }
       const parsed = parseCapabilityDocument(new TextDecoder().decode(working));
@@ -1158,7 +906,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         problems.push({ capabilityId: binding.capabilityId, path, error: parsed.error });
         continue;
       }
-      const current = await currentDrafts(lifecycle);
+      const current = currentProgram(lifecycle);
       if (current.project && current.project.projectId !== context.project.projectId) continue;
       // An edit gets the same limits as any authored Capability, e.g. name and guidance length.
       const proposal = CapabilityProposalSchema.safeParse({
@@ -1226,7 +974,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       // The edit is now the current revision, so write its normalized file over the user's bytes,
       // unless the user saved again meanwhile; the next scan imports that newer save.
       if (result.status === "revised") {
-        const synced = await syncWorkingDocument(binding.capabilityId, context, {
+        const synced = await syncWorkingDocument(binding.capabilityId, {
           userChoseRevision: true,
           onlyReplacingDigest: sha256(working),
         }).then(
@@ -1248,6 +996,5 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     assertGateFitsAlways,
     syncWorkingDocument,
     recordDocumentEdits,
-    moveToDocuments,
   });
 }

@@ -10,7 +10,7 @@ Noesis follows one broad loop, but it does not force every session through every
 4. Settle a durable turn trace with the messages, actions, outcome, and exact revisions involved.
 5. Reflect on that trace without interrupting the conversation.
 6. Record `no_change`, or create, revise, pause, restore, or retarget one exact Capability.
-7. Activate ordinary Capability revisions immediately. A revision may contribute instructions, progressively loaded skills, or an exact saved Program revision.
+7. Activate ordinary Capability revisions immediately. A revision contributes its instructions and may attach one exact saved Program revision.
 8. Pause only credential export, recovery or audit control, and irreversible external actions without foreground user intent for an explicit decision.
 9. Select globally eligible Capabilities by semantic relevance on later turns, unless the user has made one always active. Keep every reason and exact revision inspectable.
 

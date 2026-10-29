@@ -109,8 +109,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        resolveRevision: async () => undefined,
-        resolveCapability: () => undefined,
         project: Object.freeze({ projectId: "project-a", root: "/workspace/a" }),
       },
       "session-project-a",
@@ -197,8 +195,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        resolveRevision: async () => undefined,
-        resolveCapability: () => undefined,
         project,
       },
       "session-readable",
@@ -304,50 +300,21 @@ describe("learning audit read model", () => {
     });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const actor = Object.freeze({ actorId: "learning-audit-test", kind: "system" as const });
-    const [prompt, router] = await Promise.all([
-      workspace.definitions.recordWorkingDefinition({
-        workingPath: "capabilities/adaptation-path/instructions.md",
-        bytes: new TextEncoder().encode(
-          "Use the existing adaptation path for self-extension requests instead of editing protected files.",
-        ),
-        actor,
-        reason: "Capability audit fixture",
-        provenanceRefs: Object.freeze([evidence]),
-      }),
-      workspace.definitions.recordWorkingDefinition({
-        workingPath: "capabilities/adaptation-path/router.json",
-        bytes: new TextEncoder().encode('{"appliesWhen":"self-extension requests"}'),
-        actor,
-        reason: "Capability audit fixture",
-        provenanceRefs: Object.freeze([evidence]),
-      }),
-    ]);
+    const prompt = await workspace.definitions.recordWorkingDefinition({
+      workingPath: "capabilities/adaptation-path/instructions.md",
+      bytes: new TextEncoder().encode(
+        "Use the existing adaptation path for self-extension requests instead of editing protected files.",
+      ),
+      actor,
+      reason: "Capability audit fixture",
+      provenanceRefs: Object.freeze([evidence]),
+    });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const exactRevision: CapabilityRevision = Object.freeze({
       capabilityRevisionId: "capability-adaptation-path-r1",
       capabilityId: "capability-adaptation-path",
       effects: Object.freeze([Object.freeze({ kind: "instruction" as const, material: prompt })]),
-      promptModules: Object.freeze([prompt]),
-      skills: Object.freeze([]),
-      tools: Object.freeze([]),
-      toolset: Object.freeze({
-        toolRevisionIds: Object.freeze([]),
-        routerRevision: router,
-        strategyId: "semantic-capability-router-v1",
-      }),
-      activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
-      permissionManifest: Object.freeze({
-        effects: Object.freeze([]),
-        resourcePatterns: Object.freeze([]),
-        credentialRefs: Object.freeze([]),
-      }),
       evidenceRefs: Object.freeze([evidence]),
-      sourceEvaluationDefinitions: Object.freeze([]),
-      requestedPermissionDelta: Object.freeze({
-        addedEffects: Object.freeze([]),
-        widenedResources: Object.freeze([]),
-        addedCredentialRefs: Object.freeze([]),
-      }),
     });
     const lifecycleRevision: CapabilityLifecycleRevision = Object.freeze({
       revision: exactRevision,
@@ -379,8 +346,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        resolveRevision: async () => undefined,
-        resolveCapability: () => undefined,
         project,
       },
       "session-capability",
@@ -526,8 +491,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        resolveRevision: async () => undefined,
-        resolveCapability: () => undefined,
         project,
       },
       "session-sensitive",

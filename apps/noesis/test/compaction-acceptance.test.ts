@@ -42,8 +42,7 @@ test.each([undefined, true, false])(
       await createApplicationRuntimeComposition({
         config: await resolveNoesisConfig({ home, env: {} }),
         resolveModelContext: () => ({ contextWindow: 200_000, maxOutputTokens: 1_000 }),
-        createAgent: (_tools, codeExecution) =>
-          createPiAgentRuntime(home, controlled.models, { codeExecution }),
+        createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
         createRoleRunner: (configurations) =>
           createPiAgentRoleRunner(home, controlled.models, configurations),
       });

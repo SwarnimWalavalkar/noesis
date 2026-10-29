@@ -1,18 +1,11 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  type Capability,
-  type CapabilityRevision,
-  type CapabilityRevisionRef,
-  capabilityRevisionRef,
-  type FileRevisionRef,
-  sha256,
-} from "@noesis/domain";
+import { type CapabilityRevision, capabilityRevisionRef, type FileRevisionRef, sha256 } from "@noesis/domain";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
-import { createTurnIntelligencePlanner, type TurnCapabilityResolver } from "../src/index.ts";
+import { createTurnIntelligencePlanner } from "../src/index.ts";
 
 const homes: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
 const encoder = new TextEncoder();
@@ -54,60 +47,18 @@ describe("turn intelligence", () => {
     const workspace = await createWorkspaceStore(root);
     const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
     homes.push({ root, workspace });
-    const capabilities = new Map<string, Capability>();
-    const revisions = new Map<string, CapabilityRevision>();
-    const makeRevision = async (
-      capability: Capability,
-      promptContent: string,
-    ): Promise<CapabilityRevision> => {
-      const [prompt, skill, router] = await Promise.all([
-        definition(
-          workspace,
-          `${capability.capabilityId}-prompt`,
-          `prompts/${capability.capabilityId}.md`,
-          promptContent,
-        ),
-        definition(
-          workspace,
-          `${capability.capabilityId}-skill`,
-          `skills/${capability.capabilityId}.md`,
-          `# ${capability.name}`,
-        ),
-        definition(
-          workspace,
-          `${capability.capabilityId}-router`,
-          `capabilities/${capability.capabilityId}-router.json`,
-          "{}",
-        ),
-      ]);
-      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const makeRevision = async (capabilityId: string, promptContent: string): Promise<CapabilityRevision> => {
+      const prompt = await definition(
+        workspace,
+        `${capabilityId}-prompt`,
+        `capabilities/${capabilityId}.md`,
+        promptContent,
+      );
       return Object.freeze({
-        capabilityRevisionId: `${capability.capabilityId}-v1`,
-        capabilityId: capability.capabilityId,
-        promptModules: Object.freeze([prompt]),
-        skills: Object.freeze([skill]),
-        tools: Object.freeze([]),
-        toolset: Object.freeze({
-          toolRevisionIds: Object.freeze([]),
-          routerRevision: router,
-          strategyId: "fixture",
-        }),
-        activationPolicy: Object.freeze({
-          mode: "automatic_low_risk" as const,
-          scope: capability.scope,
-        }),
-        permissionManifest: Object.freeze({
-          effects: Object.freeze([]),
-          resourcePatterns: Object.freeze([]),
-          credentialRefs: Object.freeze([]),
-        }),
+        capabilityRevisionId: `${capabilityId}-v1`,
+        capabilityId,
+        effects: Object.freeze([Object.freeze({ kind: "instruction" as const, material: prompt })]),
         evidenceRefs: Object.freeze([]),
-        sourceEvaluationDefinitions: Object.freeze([]),
-        requestedPermissionDelta: Object.freeze({
-          addedEffects: Object.freeze([]),
-          widenedResources: Object.freeze([]),
-          addedCredentialRefs: Object.freeze([]),
-        }),
       });
     };
     const general = Object.freeze({
@@ -126,16 +77,13 @@ describe("turn intelligence", () => {
       [general, "GENERAL PROMPT"],
       [research, "NARROW RESEARCH PROMPT"],
     ] as const) {
-      const revision = await makeRevision(capability, prompt);
+      const revision = await makeRevision(capability.capabilityId, prompt);
       const reference = capabilityRevisionRef(revision);
-      capabilities.set(capability.capabilityId, capability);
-      revisions.set(reference.capabilityRevisionId, revision);
       // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
       await workspace.capabilities.create({
         definition: Object.freeze({
           capabilityId: capability.capabilityId,
           name: capability.name,
-          kind: "instruction",
           description: capability.intent,
           applicability: capability.scope,
           createdAt: "2026-07-24T00:00:00.000Z",
@@ -157,16 +105,10 @@ describe("turn intelligence", () => {
         }),
       });
     }
-    const resolver: TurnCapabilityResolver = Object.freeze({
-      resolveCapability: async (capabilityId: string) => capabilities.get(capabilityId),
-      resolveRevision: async (reference: CapabilityRevisionRef) =>
-        revisions.get(reference.capabilityRevisionId),
-    });
     const planner = createTurnIntelligencePlanner({
       workspace,
       protectedRuntime,
       project: PROJECT,
-      capabilities: resolver,
       basePermissionManifest: Object.freeze({
         effects: Object.freeze(["read", "execute"]),
         resourcePatterns: Object.freeze(["*"]),
@@ -238,7 +180,6 @@ describe("turn intelligence", () => {
       "research-brief",
     ]);
     expect(related.selectedCapabilities.map((item) => item.delivery)).toEqual(["prompt", "on_demand"]);
-    expect(related.routing.strategyId).toBe("capability-skill-index-v1");
     // The model loads an on-demand Capability as a skill, so its text stays out of the prompt.
     expect(related.renderedSystemPrompt).toContain("GENERAL PROMPT");
     expect(related.renderedSystemPrompt).not.toContain("NARROW RESEARCH PROMPT");
@@ -350,10 +291,6 @@ describe("turn intelligence", () => {
       workspace,
       protectedRuntime: observingProtectedRuntime,
       project: PROJECT,
-      capabilities: Object.freeze({
-        resolveCapability: async () => undefined,
-        resolveRevision: async () => undefined,
-      }),
     });
 
     const plan = await planner.planAndAdmit({
@@ -370,7 +307,6 @@ describe("turn intelligence", () => {
     expect(plan.selectedCapabilities).toEqual([]);
     expect(plan.project).toEqual(PROJECT);
     expect(plan.renderedSystemPrompt).toBe("BASE");
-    expect(plan.routing.strategyId).toBe("capability-skill-index-v1");
     expect(await protectedRuntime.turnPlans.admit(plan)).toEqual(plan);
   });
 });

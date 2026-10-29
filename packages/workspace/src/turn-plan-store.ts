@@ -79,12 +79,9 @@ export function createProtectedTurnPlanStore(
       return existing;
     }
     for (const selection of plan.selectedCapabilities) {
-      for (const material of [
-        ...selection.promptModules,
-        ...selection.skills,
-        ...selection.tools,
-        selection.router,
-      ]) {
+      for (const material of selection.effects.map((effect) =>
+        effect.kind === "instruction" ? effect.material : effect.definition,
+      )) {
         options.assertStoredReference(material.revision);
         if (sha256(material.content) !== material.revision.contentDigest)
           throw new Error(
@@ -98,11 +95,12 @@ export function createProtectedTurnPlanStore(
       db.prepare(
         `INSERT INTO frozen_turn_plans(
           plan_id, session_id, turn_id, schema_version, plan_json, canonical_digest, created_at
-        ) VALUES (?, ?, ?, 1, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         plan.planId,
         plan.sessionId,
         plan.turnId,
+        plan.schemaVersion,
         JSON.stringify(plan),
         plan.canonicalDigest,
         plan.createdAt,

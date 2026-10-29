@@ -240,7 +240,6 @@ describe("first-party architecture boundaries", () => {
   test("keeps the TUI behind its narrow runtime port", async () => {
     const tuiRoot = resolve(repositoryRoot, "packages/tui");
     const forbiddenModules = new Set([
-      "@noesis/capabilities",
       "@noesis/ledger",
       "@noesis/learning",
       "@noesis/policy",

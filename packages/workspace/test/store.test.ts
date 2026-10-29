@@ -62,7 +62,7 @@ const publishWorkflowProgram = async (store: NoesisWorkspaceStore, projectId: st
 };
 const runningTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: `plan-${turnId}`,
     sessionId,
     turnId,
@@ -73,7 +73,6 @@ const runningTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
     thinkingLevel: "off",
     permissionSnapshot: { effects: [], resourcePatterns: [], credentialRefs: [] },
     retrievalCitations: [],
-    routing: { strategyId: "baseline", reason: "Recovery fixture" },
     createdAt: "2026-07-26T00:00:00.000Z",
   };
   return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
@@ -1888,7 +1887,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 55 });
+    ).toEqual({ version: 56 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -2518,7 +2517,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 55,
+      version: 56,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2553,7 +2552,7 @@ describe("WorkspaceStore", () => {
     ).toEqual([]);
     upgraded.close();
   });
-  test("migration 55 removes research state and keeps current reflection jobs decodable", async () => {
+  test("migration 55 removes research state and strips retired reflection payload fields", async () => {
     const root = await temporary("remove-research");
     const { database } = await seedWorkspaceThroughMigration(root, 54);
     const at = "2026-07-26T00:00:00.000Z";
@@ -2611,19 +2610,19 @@ describe("WorkspaceStore", () => {
     database.close();
 
     const store = await createWorkspaceStore(root);
-    const pending = await store.jobs.get("reflection-pending");
-    expect(pending?.payload).toEqual({
+    expect((await store.jobs.get("reflection-done"))?.payload).toEqual({
       schemaVersion: 1,
       turn: { sessionId: "session-1", turnId: "turn-1", scope: "global" },
     });
-    expect((await store.jobs.get("reflection-done"))?.payload).toEqual(pending?.payload);
-    expect(await store.jobs.get("review-pending")).toBeDefined();
+    // Migration 56 then removes unfinished reflections and reviews with the Capability reset.
+    expect(await store.jobs.get("reflection-pending")).toBeUndefined();
+    expect(await store.jobs.get("review-pending")).toBeUndefined();
     expect(await store.jobs.get("legacy-reflection")).toBeUndefined();
     expect(await store.jobs.get("legacy-author")).toBeUndefined();
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 55,
+      version: 56,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2639,6 +2638,127 @@ describe("WorkspaceStore", () => {
     ).toEqual([]);
     expect(upgraded.prepare("SELECT COUNT(*) AS count FROM search_documents").get()).toEqual({ count: 0 });
     expect(upgraded.prepare("SELECT COUNT(*) AS count FROM search_fts").get()).toEqual({ count: 0 });
+    upgraded.close();
+  });
+  test("migration 56 resets Capabilities, unfinished learning jobs, and subagent history", async () => {
+    const root = await temporary("capability-files-only");
+    const { database } = await seedWorkspaceThroughMigration(root, 55);
+    const at = "2026-07-26T00:00:00.000Z";
+    const reference = JSON.stringify({
+      kind: "capability_revision",
+      capabilityId: "capability-old",
+      capabilityRevisionId: "revision-old",
+      bundleDigest: digest("c"),
+    });
+    database
+      .prepare("INSERT INTO capabilities(capability_id, definition_json, created_at) VALUES (?, '{}', ?)")
+      .run("capability-old", at);
+    database
+      .prepare(`INSERT INTO capability_revisions(
+          capability_revision_id, capability_id, predecessor_revision_id, revision_json, created_at
+        ) VALUES ('revision-old', 'capability-old', NULL, '{}', ?)`)
+      .run(at);
+    database
+      .prepare(`INSERT INTO capability_bindings(
+          capability_id, revision_json, scope_json, activation_mode, state, binding_revision, updated_at
+        ) VALUES ('capability-old', ?, '{"kind":"global"}', 'relevant', 'active', 1, ?)`)
+      .run(reference, at);
+    database
+      .prepare(`INSERT INTO capability_feedback(
+          feedback_id, capability_id, revision_json, feedback_json, created_at
+        ) VALUES ('feedback-old', 'capability-old', ?, '{}', ?)`)
+      .run(reference, at);
+    database
+      .prepare(`INSERT INTO capability_gate_requests(
+          gate_request_id, capability_id, revision_json, request_json, status, created_at, settled_at
+        ) VALUES ('gate-old', 'capability-old', ?, '{}', 'pending', ?, NULL)`)
+      .run(reference, at);
+    database
+      .prepare(`INSERT INTO capability_outcomes(
+          outcome_id, capability_id, capability_revision_id, session_id, turn_id, result, reason,
+          evidence_json, created_at
+        ) VALUES ('outcome-old', 'capability-old', 'revision-old', 'session-1', 'turn-1', 'helped', 'ok', '[]', ?)`)
+      .run(at);
+    const insertJob = database.prepare(`INSERT INTO jobs(
+        job_id, kind, payload_json, status, attempt, budget_remaining, created_at, updated_at,
+        operation_id, idempotency_key, not_before
+      ) VALUES (?, ?, '{}', ?, 0, 0, ?, ?, ?, ?, ?)`);
+    for (const [jobId, kind, status] of [
+      ["reflection-pending", "runtime.reflect_capability", "scheduled"],
+      ["reflection-done", "runtime.reflect_capability", "completed"],
+      ["review-pending", "runtime.review_session", "scheduled"],
+      ["review-done", "runtime.review_session", "completed"],
+    ] as const)
+      insertJob.run(jobId, kind, status, at, at, `operation:${jobId}`, `idempotency:${jobId}`, at);
+    database
+      .prepare(`INSERT INTO sessions(
+          session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+        ) VALUES ('session-1', 'Old', 'idle', 'controlled', 'controlled', 'pi', ?, ?, '{}')`)
+      .run(at, at);
+    database
+      .prepare(`INSERT INTO frozen_turn_plans(
+          plan_id, session_id, turn_id, schema_version, plan_json, canonical_digest, created_at
+        ) VALUES ('plan-old', 'session-1', 'turn-1', 1, '{}', ?, ?)`)
+      .run(digest("b"), at);
+    database
+      .prepare(`INSERT INTO foreground_turns(
+          turn_id, session_id, plan_id, status, outcome_id, admitted_at, settled_at
+        ) VALUES ('turn-1', 'session-1', 'plan-old', 'completed', NULL, ?, ?)`)
+      .run(at, at);
+    database
+      .prepare(`INSERT INTO agent_messages(
+          message_id, project_id, sender_kind, sender_id, recipient_kind, recipient_id,
+          content, sensitivity, status, sequence, task_id, created_at
+        ) VALUES ('message-old', 'project', 'foreground', 'session-1', 'foreground', 'session-1',
+          'hello', 'normal', 'accepted', 1, NULL, ?)`)
+      .run(at);
+    database.close();
+
+    const store = await createWorkspaceStore(root);
+    expect(await store.jobs.get("reflection-pending")).toBeUndefined();
+    expect(await store.jobs.get("review-pending")).toBeUndefined();
+    expect(await store.jobs.get("reflection-done")).toBeDefined();
+    expect(await store.jobs.get("review-done")).toBeDefined();
+    store.close();
+    const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"));
+    expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
+      version: 56,
+    });
+    expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    for (const table of [
+      "capabilities",
+      "capability_revisions",
+      "capability_bindings",
+      "capability_feedback",
+      "capability_gate_requests",
+      "capability_outcomes",
+      "agent_messages",
+    ])
+      expect(upgraded.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 });
+    expect(upgraded.prepare("SELECT plan_id, schema_version FROM frozen_turn_plans").all()).toEqual([
+      { plan_id: "plan-old", schema_version: 1 },
+    ]);
+    // Capability revisions stay immutable after the reset.
+    upgraded
+      .prepare("INSERT INTO capabilities(capability_id, definition_json, created_at) VALUES (?, '{}', ?)")
+      .run("capability-new", at);
+    upgraded
+      .prepare(`INSERT INTO capability_revisions(
+          capability_revision_id, capability_id, predecessor_revision_id, revision_json, created_at
+        ) VALUES ('revision-new', 'capability-new', NULL, '{}', ?)`)
+      .run(at);
+    expect(() =>
+      upgraded
+        .prepare("DELETE FROM capability_revisions WHERE capability_revision_id = 'revision-new'")
+        .run(),
+    ).toThrow(/immutable/u);
+    expect(() =>
+      upgraded
+        .prepare(
+          "UPDATE capability_revisions SET revision_json = '[]' WHERE capability_revision_id = 'revision-new'",
+        )
+        .run(),
+    ).toThrow(/immutable/u);
     upgraded.close();
   });
   test("upgrades an old version-20 workspace through corrected execution lineage contracts", async () => {
@@ -2724,7 +2844,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(55);
+    expect(versions.at(-1)).toBe(56);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

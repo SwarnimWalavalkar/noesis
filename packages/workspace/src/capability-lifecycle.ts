@@ -80,22 +80,9 @@ function normalizeLifecycleRevision(value: unknown): CapabilityLifecycleRevision
             }
           : undefined,
       )
-      .addOptional(!(bundle.effects === undefined) ? { effects: Object.freeze(bundle.effects) } : undefined)
       .add({
-        promptModules: Object.freeze(bundle.promptModules),
-        skills: Object.freeze(bundle.skills),
-        tools: Object.freeze(bundle.tools),
-        toolset: Object.freeze(bundle.toolset),
-        activationPolicy: Object.freeze(bundle.activationPolicy),
-      } as const)
-      .addOptional(
-        !(bundle.dependencyLock === undefined) ? { dependencyLock: bundle.dependencyLock } : undefined,
-      )
-      .add({
-        permissionManifest: Object.freeze(bundle.permissionManifest),
+        effects: Object.freeze(bundle.effects),
         evidenceRefs: Object.freeze(bundle.evidenceRefs),
-        sourceEvaluationDefinitions: Object.freeze(bundle.sourceEvaluationDefinitions),
-        requestedPermissionDelta: Object.freeze(bundle.requestedPermissionDelta),
       } as const)
       .finish(),
   );
@@ -135,7 +122,7 @@ function normalizeGate(value: unknown): CapabilityGateRequest {
   );
 }
 function assertRevisionSupportsScope(revision: CapabilityLifecycleRevision, scope: CapabilityScope): void {
-  for (const effect of revision.revision.effects ?? []) {
+  for (const effect of revision.revision.effects) {
     if (effect.kind !== "program") continue;
     const { program } = effect;
     if (
@@ -209,17 +196,9 @@ export function createCapabilityLifecycleStore(
     if (!sameCapabilityRevisionRef(expected, parsed.reference))
       throw new Error("Capability revision reference does not match its exact bundle");
     for (const reference of [
-      ...(parsed.revision.effects ?? []).map((effect) =>
-        effect.kind === "instruction" || effect.kind === "skill"
-          ? effect.material
-          : effect.program.definitionRevision,
+      ...parsed.revision.effects.map((effect) =>
+        effect.kind === "instruction" ? effect.material : effect.program.definitionRevision,
       ),
-      ...parsed.revision.promptModules,
-      ...parsed.revision.skills,
-      ...parsed.revision.tools,
-      parsed.revision.toolset.routerRevision,
-      ...(parsed.revision.dependencyLock ? [parsed.revision.dependencyLock] : []),
-      ...parsed.revision.sourceEvaluationDefinitions,
       ...parsed.revision.evidenceRefs,
     ])
       options.assertStoredReference(reference);

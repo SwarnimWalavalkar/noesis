@@ -162,9 +162,9 @@ function titleCase(value: string): string {
 }
 
 function capabilityFacetLabel(record: TuiLearningPrimitive): string | undefined {
-  if (record.capabilityFacets && record.capabilityFacets.length > 0)
-    return record.capabilityFacets.map(titleCase).join(" + ");
-  return record.capabilityKind ? `Legacy ${titleCase(record.capabilityKind)}` : undefined;
+  return record.capabilityFacets && record.capabilityFacets.length > 0
+    ? record.capabilityFacets.map(titleCase).join(" + ")
+    : undefined;
 }
 
 export function detailPaneLabel(record: TuiLearningPrimitive | undefined): string {

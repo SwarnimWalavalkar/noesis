@@ -100,14 +100,18 @@ export function researchLoopControlledResponse(
         capabilityId: activeCapability.capabilityId,
         proposal: {
           name: "Evidence-grounded research briefs",
-          kind: "instruction",
           description: "Separate cited evidence from inference in research briefs.",
           applicability: "Research briefs and evidence-grounded source synthesis.",
           summary: "Research briefs now label uncertainty as well as inference.",
           rationale: "The user requested a more precise version of the active Capability.",
           anticipatedEffect: "Research briefs expose uncertainty more consistently.",
-          instruction:
-            "Produce concise research briefs with explicit sections for cited evidence, inference, and uncertainty.",
+          effects: [
+            {
+              kind: "instruction",
+              content:
+                "Produce concise research briefs with explicit sections for cited evidence, inference, and uncertainty.",
+            },
+          ],
           scope: "global",
           activationMode: "relevant",
           consequence: "ordinary",
@@ -129,13 +133,17 @@ export function researchLoopControlledResponse(
       decision: "create",
       proposal: {
         name: "Evidence-grounded research briefs",
-        kind: "instruction",
         description: "Separate cited evidence from inference in research briefs.",
         applicability: "Research briefs and evidence-grounded source synthesis.",
         summary: "Research briefs now distinguish cited evidence from inference.",
         rationale: "The user explicitly corrected how research briefs should present evidence.",
         anticipatedEffect: "Future research briefs are easier to audit and trust.",
-        instruction: "Produce concise research briefs with explicit evidence, inference, and uncertainty.",
+        effects: [
+          {
+            kind: "instruction",
+            content: "Produce concise research briefs with explicit evidence, inference, and uncertainty.",
+          },
+        ],
         scope: "global",
         activationMode: "relevant",
         consequence: "ordinary",

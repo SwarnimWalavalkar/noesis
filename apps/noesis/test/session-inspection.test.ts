@@ -46,7 +46,7 @@ test("Pi codemode inspects the running session route, context, compaction, and p
   const runtime = await createApplicationRuntimeComposition({
     config: await resolveNoesisConfig({ home, env: {} }),
     resolveModelContext: () => ({ contextWindow: 200_000, maxOutputTokens: 1_000 }),
-    createAgent: (_, codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
+    createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
     createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
   });
   try {
@@ -155,7 +155,7 @@ test("Pi codemode changes the session's reasoning level and title, effective fro
         allowsCustomModelIds: false,
       },
     ],
-    createAgent: (_, codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
+    createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
     createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
   });
   try {

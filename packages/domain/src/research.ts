@@ -98,62 +98,21 @@ export interface PermissionManifest {
   readonly credentialRefs: readonly string[];
 }
 
-export interface PermissionDelta {
-  readonly addedEffects: readonly string[];
-  readonly widenedResources: readonly string[];
-  readonly addedCredentialRefs: readonly string[];
-}
-
-export interface ToolsetAndRouter {
-  readonly toolRevisionIds: readonly string[];
-  readonly routerRevision: FileRevisionRef;
-  readonly strategyId: string;
-}
-
-export interface ActivationPolicy {
-  readonly mode: "automatic_low_risk" | "approval_required";
-  readonly scope: string;
-}
-
-export interface Capability {
-  readonly capabilityId: string;
-  readonly name: string;
-  readonly scope: string;
-  readonly intent: string;
-}
-
+/**
+ * One exact Capability revision. Its first effect is always the instruction file revision; it may
+ * also attach one exact project Program revision.
+ */
 export interface CapabilityRevision {
   readonly capabilityRevisionId: string;
   readonly capabilityId: string;
   readonly predecessorRevisionId?: string;
-  /**
-   * Exact, behavior-bearing materials mounted by the current Capability runtime.
-   * Absent only on revisions written by the legacy prompt/toolset bundle model.
-   */
-  readonly effects?: readonly CapabilityEffect[] | undefined;
-  readonly promptModules: readonly FileRevisionRef[];
-  readonly skills: readonly FileRevisionRef[];
-  readonly tools: readonly FileRevisionRef[];
-  readonly toolset: ToolsetAndRouter;
-  readonly activationPolicy: ActivationPolicy;
-  readonly dependencyLock?: FileRevisionRef;
-  readonly permissionManifest: PermissionManifest;
+  readonly effects: readonly CapabilityEffect[];
   readonly evidenceRefs: readonly EvidenceRef[];
-  readonly sourceEvaluationDefinitions: readonly FileRevisionRef[];
-  readonly requestedPermissionDelta: PermissionDelta;
 }
 
 /** One exact instruction layer injected into the selected turn's system prompt. */
 export interface CapabilityInstructionEffect {
   readonly kind: "instruction";
-  readonly material: FileRevisionRef;
-}
-
-/** One progressively disclosed skill. Its body is loaded only when the model asks for it. */
-export interface CapabilitySkillEffect {
-  readonly kind: "skill";
-  readonly name: string;
-  readonly description: string;
   readonly material: FileRevisionRef;
 }
 
@@ -172,13 +131,9 @@ export interface CapabilityProgramEffect {
   readonly program: ProgramRevisionRef;
 }
 
-export type CapabilityEffect = CapabilityInstructionEffect | CapabilitySkillEffect | CapabilityProgramEffect;
+export type CapabilityEffect = CapabilityInstructionEffect | CapabilityProgramEffect;
 
-// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-export const CAPABILITY_EFFECT_KINDS = ["instruction", "skill", "program"] as const;
-export type CapabilityEffectKind = (typeof CAPABILITY_EFFECT_KINDS)[number];
-
-/** Immutable identity for the complete Capability revision, including current effects or its legacy bundle. */
+/** Immutable identity for the complete Capability revision. */
 export interface CapabilityRevisionRef {
   readonly kind: "capability_revision";
   readonly capabilityId: string;
@@ -186,32 +141,16 @@ export interface CapabilityRevisionRef {
   readonly bundleDigest: string;
 }
 
-// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-export const CAPABILITY_KINDS = [
-  "instruction",
-  "skill",
-  "tool",
-  "workflow",
-  "router",
-  "model_configuration",
-  "harness_configuration",
-  "core_update",
-  "composite",
-] as const;
-export type CapabilityKind = (typeof CAPABILITY_KINDS)[number];
-
 /** Stable, user-facing identity for one thing Noesis can do better. */
 export interface CapabilityDefinition {
   readonly capabilityId: string;
   readonly name: string;
-  /** Legacy authoring label. Current presentation derives facets from revision effects. */
-  readonly kind?: CapabilityKind | undefined;
   readonly description: string;
   readonly applicability: string;
   readonly createdAt: string;
 }
 
-/** Immutable lifecycle metadata around the exact executable bundle already understood by Noesis. */
+/** Immutable lifecycle metadata around one exact Capability revision. */
 export interface CapabilityLifecycleRevision {
   readonly revision: CapabilityRevision;
   readonly reference: CapabilityRevisionRef;
@@ -303,13 +242,6 @@ export interface CapabilityGateRequest {
   readonly settledAt?: string;
 }
 
-/** Derived from the SQLite activation pointer; neither immutable definition owns current state. */
-export interface CapabilityActivationReadModel {
-  readonly capability: Capability;
-  readonly activeRevision: CapabilityRevisionRef | null;
-  readonly activationPointer: DatabaseRowRef<"activation_pointers"> | null;
-}
-
 export function sameCapabilityRevisionRef(
   left: CapabilityRevisionRef,
   right: CapabilityRevisionRef,
@@ -325,4 +257,41 @@ export interface ExperimentVariantRef {
   readonly variantId: string;
   readonly axis: "role" | "retrieval" | "routing" | "evaluation" | "tool_runtime" | "activation";
   readonly configurationRefs: readonly FileRevisionRef[];
+}
+
+/**
+ * A Capability revision carries exactly one instruction effect first and may attach one Program.
+ * Throws when the effects break that shape.
+ */
+export function validateCapabilityEffects(effects: readonly CapabilityEffect[]): readonly CapabilityEffect[] {
+  const [first, ...rest] = effects;
+  if (first?.kind !== "instruction")
+    throw new Error("A Capability revision must start with its instruction effect");
+  if (rest.length > 1 || rest.some((effect) => effect.kind !== "program"))
+    throw new Error("A Capability revision may attach at most one Program after its instruction");
+  return Object.freeze([...effects]);
+}
+
+/**
+ * Project Programs keep their existing project authority, so a Capability that attaches one must
+ * be bound to that same project.
+ */
+export function assertCapabilityEffectsEligible(input: {
+  readonly effects: readonly CapabilityEffect[];
+  readonly scope: CapabilityScope;
+  readonly project: ProjectRef;
+}): void {
+  for (const effect of input.effects) {
+    if (effect.kind !== "program") continue;
+    const { program } = effect;
+    if (program.project.projectId !== input.project.projectId || program.project.root !== input.project.root)
+      throw new Error(`Capability Program ${program.name} belongs to another project`);
+    if (input.scope.kind !== "project")
+      throw new Error(`Capability Program ${program.name} requires a project-scoped binding`);
+    if (
+      input.scope.project.projectId !== program.project.projectId ||
+      input.scope.project.root !== program.project.root
+    )
+      throw new Error(`Capability Program ${program.name} does not match its binding project`);
+  }
 }

@@ -432,12 +432,6 @@ export type FrozenCapabilityEffect =
       readonly material: FrozenRevisionMaterial;
     }
   | {
-      readonly kind: "skill";
-      readonly name: string;
-      readonly description: string;
-      readonly material: FrozenRevisionMaterial;
-    }
-  | {
       readonly kind: "program";
       readonly mode: "script" | "workflow";
       readonly name: string;
@@ -449,22 +443,15 @@ export interface FrozenCapabilitySelection {
   readonly name: string;
   readonly description: string;
   readonly applicability: string;
-  readonly scope: string;
   readonly selectionReason: string;
   /**
    * How the turn delivers this Capability. `prompt` puts its instructions in the system prompt.
-   * `on_demand` lists it as a skill that the model loads when relevant. Older plans omit it and
-   * used `prompt`.
+   * `on_demand` lists it as a skill that the model loads when relevant.
    */
-  readonly delivery?: "prompt" | "on_demand" | undefined;
+  readonly delivery: "prompt" | "on_demand";
   readonly revision: CapabilityRevisionRef;
-  /** Present on effects-first revisions. Legacy frozen plans omit it. */
-  readonly effects?: readonly FrozenCapabilityEffect[] | undefined;
-  readonly promptModules: readonly FrozenRevisionMaterial[];
-  readonly skills: readonly FrozenRevisionMaterial[];
-  readonly tools: readonly FrozenRevisionMaterial[];
-  readonly router: FrozenRevisionMaterial;
-  readonly permissionManifest: PermissionManifest;
+  /** The instruction effect first, then at most one Program. */
+  readonly effects: readonly FrozenCapabilityEffect[];
 }
 export interface FrozenConversationHistoryEntry {
   readonly attachmentText?: string | undefined;
@@ -584,7 +571,7 @@ export function estimateInputTokens(text: string): number {
 }
 /** The complete SQLite-authoritative input to one foreground execution. */
 export interface FrozenTurnPlan {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 2;
   readonly planId: string;
   readonly sessionId: string;
   readonly turnId: string;
@@ -621,14 +608,6 @@ export interface FrozenTurnPlan {
   };
   readonly permissionSnapshot: PermissionManifest;
   readonly retrievalCitations: readonly EvidenceRef[];
-  readonly routing: {
-    readonly strategyId: string;
-    readonly reason: string;
-    readonly learningAttribution?: {
-      readonly capabilityId: string;
-      readonly reason: string;
-    };
-  };
   readonly createdAt: string;
   readonly canonicalDigest: string;
 }
@@ -647,12 +626,6 @@ const FrozenCapabilityEffectSchema = z.discriminatedUnion("kind", [
     material: FrozenRevisionMaterialSchema,
   }),
   z.strictObject({
-    kind: z.literal("skill"),
-    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-    description: z.string().min(1).max(2048),
-    material: FrozenRevisionMaterialSchema,
-  }),
-  z.strictObject({
     kind: z.literal("program"),
     mode: z.enum(["script", "workflow"]),
     name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
@@ -665,16 +638,18 @@ const FrozenCapabilitySelectionSchema = z.strictObject({
   name: z.string().min(1),
   description: z.string().min(1),
   applicability: z.string().min(1),
-  scope: z.string().min(1),
   selectionReason: z.string().min(1),
-  delivery: z.enum(["prompt", "on_demand"]).optional(),
+  delivery: z.enum(["prompt", "on_demand"]),
   revision: CapabilityRevisionRefSchema,
-  effects: z.array(FrozenCapabilityEffectSchema).min(1).max(32).optional(),
-  promptModules: z.array(FrozenRevisionMaterialSchema),
-  skills: z.array(FrozenRevisionMaterialSchema),
-  tools: z.array(FrozenRevisionMaterialSchema),
-  router: FrozenRevisionMaterialSchema,
-  permissionManifest: PermissionManifestSchema,
+  effects: z
+    .array(FrozenCapabilityEffectSchema)
+    .min(1)
+    .max(2)
+    .refine(
+      ([first, ...rest]) =>
+        first?.kind === "instruction" && rest.every((effect) => effect.kind === "program"),
+      "A frozen Capability starts with its instruction and may attach one Program",
+    ),
 });
 const FrozenConversationHistoryEntrySchema = z
   .strictObject({
@@ -747,7 +722,7 @@ const FrozenContextDocumentSchema = z.strictObject({
   contentDigest: z.string().regex(/^[a-f0-9]{64}$/u),
 });
 export const FrozenTurnPlanSchema = z.strictObject({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   planId: z.string().min(1),
   sessionId: z.string().min(1),
   turnId: z.string().min(1),
@@ -783,16 +758,6 @@ export const FrozenTurnPlanSchema = z.strictObject({
     .optional(),
   permissionSnapshot: PermissionManifestSchema,
   retrievalCitations: z.array(EvidenceRefSchema),
-  routing: z.strictObject({
-    strategyId: z.string().min(1),
-    reason: z.string().min(1),
-    learningAttribution: z
-      .strictObject({
-        capabilityId: z.string().min(1),
-        reason: z.string().min(1),
-      })
-      .optional(),
-  }),
   createdAt: z.string().min(1),
   canonicalDigest: z.string().regex(/^[a-f0-9]{64}$/u),
 });
@@ -810,10 +775,8 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     project,
     subAgentDefaults,
     subAgentActor,
-    routing,
     ...base
   } = decoded;
-  const { learningAttribution, ...routingBase } = routing;
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const normalizedConversationHistory = conversationHistory?.map(({ turnStatus, ...entry }) =>
     Object.freeze(
@@ -900,28 +863,12 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
             }
           : undefined,
       )
-      .add({
-        routing: Object.freeze(
-          createConditionalObject({
-            ...routingBase,
-          } as const)
-            .addOptional(!(learningAttribution === undefined) ? { learningAttribution } : undefined)
-            .finish(),
-        ),
-      } as const)
       .finish(),
   ) satisfies FrozenTurnPlan;
   for (const selection of plan.selectedCapabilities) {
-    const effectMaterials = (selection.effects ?? []).map((effect) =>
-      effect.kind === "instruction" || effect.kind === "skill" ? effect.material : effect.definition,
+    const materials = selection.effects.map((effect) =>
+      effect.kind === "instruction" ? effect.material : effect.definition,
     );
-    const materials = [
-      ...selection.promptModules,
-      ...selection.skills,
-      ...selection.tools,
-      selection.router,
-      ...effectMaterials,
-    ];
     for (const material of materials) {
       if (sha256(material.content) !== material.revision.contentDigest)
         throw new Error(
@@ -1015,14 +962,6 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
     plan.contextTokenBudget >= plan.requestTokenBudget
   )
     throw new Error(`Frozen turn plan ${plan.planId} does not reserve non-history request capacity`);
-  const attribution = plan.routing.learningAttribution;
-  if (
-    attribution !== undefined &&
-    !plan.selectedCapabilities.some((selection) => selection.capabilityId === attribution.capabilityId)
-  )
-    throw new Error(
-      `Frozen turn plan ${plan.planId} attributes learning to unselected capability ${attribution.capabilityId}`,
-    );
   const { canonicalDigest, ...unsigned } = plan;
   if (frozenTurnPlanDigest(unsigned) !== canonicalDigest)
     throw new Error(`Frozen turn plan ${plan.planId} failed canonical digest verification`);

@@ -1,4 +1,3 @@
-import { createConditionalObject } from "@noesis/domain";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,16 +31,11 @@ function turnPlan(
   selections: readonly {
     readonly capabilityId: string;
     readonly name: string;
-    readonly scope: string;
   }[],
-  learningAttribution?: {
-    readonly capabilityId: string;
-    readonly reason: string;
-  },
 ): FrozenTurnPlan {
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   return Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: `plan-${turnId}`,
     sessionId,
     turnId,
@@ -53,25 +47,23 @@ function turnPlan(
           description: `Fixture Capability ${selection.name}`,
           applicability: `When ${selection.name} applies.`,
           selectionReason: "fixture",
+          delivery: "prompt" as const,
           revision: revisionRef(selection.capabilityId),
-          promptModules: Object.freeze([]),
-          skills: Object.freeze([]),
-          tools: Object.freeze([]),
-          router: Object.freeze({
-            revision: Object.freeze({
-              kind: "file_revision" as const,
-              revisionId: `router-${selection.capabilityId}`,
-              workingPath: `definitions/capabilities/${selection.capabilityId}.json`,
-              snapshotPath: `revisions/${selection.capabilityId}`,
-              contentDigest: "c".repeat(64),
+          effects: Object.freeze([
+            Object.freeze({
+              kind: "instruction" as const,
+              material: Object.freeze({
+                revision: Object.freeze({
+                  kind: "file_revision" as const,
+                  revisionId: `instruction-${selection.capabilityId}`,
+                  workingPath: `definitions/capabilities/${selection.capabilityId}.md`,
+                  snapshotPath: `revisions/${selection.capabilityId}`,
+                  contentDigest: "c".repeat(64),
+                }),
+                content: "Fixture guidance.",
+              }),
             }),
-            content: "{}",
-          }),
-          permissionManifest: Object.freeze({
-            effects: Object.freeze([]),
-            resourcePatterns: Object.freeze([]),
-            credentialRefs: Object.freeze([]),
-          }),
+          ]),
         }),
       ),
     ),
@@ -85,16 +77,6 @@ function turnPlan(
       credentialRefs: Object.freeze([]),
     }),
     retrievalCitations: Object.freeze([]),
-    routing: Object.freeze(
-      createConditionalObject({
-        strategyId: "semantic-capability-router-v1",
-        reason: "fixture",
-      } as const)
-        .addOptional(
-          learningAttribution ? { learningAttribution: Object.freeze(learningAttribution) } : undefined,
-        )
-        .finish(),
-    ),
     createdAt: "2026-07-25T00:00:00.000Z",
     canonicalDigest: "d".repeat(64),
   });
@@ -149,27 +131,17 @@ describe("turn settlement", () => {
       },
     });
     const context = compileContext([], {}, { maxTokens: 8, maxFragmentTokens: 8 });
-    const plan = turnPlan(
-      "session-1",
-      "turn-accepted",
-      [
-        { capabilityId: "general", name: "General", scope: "general" },
-        {
-          capabilityId: "noesis-research",
-          name: "Noesis research",
-          scope: "project/noesis/research",
-        },
-        {
-          capabilityId: "review-style",
-          name: "Review style",
-          scope: "project/noesis/research/review-only-writing-style",
-        },
-      ],
+    const plan = turnPlan("session-1", "turn-accepted", [
+      { capabilityId: "general", name: "General" },
       {
         capabilityId: "noesis-research",
-        reason: "The semantic router chose research as the primary learning context",
+        name: "Noesis research",
       },
-    );
+      {
+        capabilityId: "review-style",
+        name: "Review style",
+      },
+    ]);
     seedForegroundTurn(workspace, "session-1", "turn-accepted", plan.planId);
     seedForegroundTurn(workspace, "session-1", "turn-unrelated", "plan-turn-unrelated");
     await workspace.operational.toolCalls.put({
@@ -252,9 +224,7 @@ describe("turn settlement", () => {
       turnId: "turn-accepted",
       sourceIntentId: "intent-accepted",
     });
-    const abortedPlan = turnPlan("session-1", "turn-aborted", [
-      { capabilityId: "general", name: "General", scope: "general" },
-    ]);
+    const abortedPlan = turnPlan("session-1", "turn-aborted", [{ capabilityId: "general", name: "General" }]);
     seedForegroundTurn(workspace, "session-1", "turn-aborted", abortedPlan.planId);
     await expect(
       settlement.run({
@@ -298,7 +268,7 @@ describe("turn settlement", () => {
     // A turn that failed before the model produced anything is never reflected on.
     expect(observedLearningTurns).toHaveLength(2);
     const correctedPlan = turnPlan("session-1", "turn-corrected", [
-      { capabilityId: "general", name: "General", scope: "general" },
+      { capabilityId: "general", name: "General" },
     ]);
     seedForegroundTurn(workspace, "session-1", "turn-corrected", correctedPlan.planId);
     await expect(

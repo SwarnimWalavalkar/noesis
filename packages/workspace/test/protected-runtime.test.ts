@@ -29,7 +29,7 @@ afterEach(async () => {
 
 function turnPlan(sessionId: string, turnId: string): FrozenTurnPlan {
   const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: `plan-${turnId}`,
     sessionId,
     turnId,
@@ -40,7 +40,6 @@ function turnPlan(sessionId: string, turnId: string): FrozenTurnPlan {
     thinkingLevel: "off",
     permissionSnapshot: { effects: [], resourcePatterns: [], credentialRefs: [] },
     retrievalCitations: [],
-    routing: { strategyId: "fixture", reason: "No Capability" },
     createdAt: "2026-07-25T00:00:00.000Z",
   };
   return { ...body, canonicalDigest: frozenTurnPlanDigest(body) };

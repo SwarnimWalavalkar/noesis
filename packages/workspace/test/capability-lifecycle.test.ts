@@ -23,7 +23,6 @@ afterEach(async () => {
 function lifecycleRevision(
   capabilityRevisionId: string,
   prompt: FileRevisionRef,
-  router: FileRevisionRef,
   predecessorRevisionId?: string,
   capabilityId = "capability_concise_research",
 ): CapabilityLifecycleRevision {
@@ -35,27 +34,8 @@ function lifecycleRevision(
     } as const)
       .addOptional(predecessorRevisionId ? { predecessorRevisionId } : undefined)
       .add({
-        promptModules: Object.freeze([prompt]),
-        skills: Object.freeze([]),
-        tools: Object.freeze([]),
-        toolset: Object.freeze({
-          toolRevisionIds: Object.freeze([]),
-          routerRevision: router,
-          strategyId: "semantic-capability-router-v1",
-        }),
-        activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
-        permissionManifest: Object.freeze({
-          effects: Object.freeze([]),
-          resourcePatterns: Object.freeze([]),
-          credentialRefs: Object.freeze([]),
-        }),
+        effects: Object.freeze([Object.freeze({ kind: "instruction" as const, material: prompt })]),
         evidenceRefs: Object.freeze([]),
-        sourceEvaluationDefinitions: Object.freeze([]),
-        requestedPermissionDelta: Object.freeze({
-          addedEffects: Object.freeze([]),
-          widenedResources: Object.freeze([]),
-          addedCredentialRefs: Object.freeze([]),
-        }),
       } as const)
       .finish(),
   );
@@ -79,13 +59,12 @@ describe("Capability lifecycle store", () => {
     const project = Object.freeze({ projectId: "project-a", root: "/a" });
     const materials: readonly (readonly [string, string])[] = Object.freeze([
       ["capabilities/program/instructions.md", "instructions"],
-      ["capabilities/program/router.json", '{"strategy":"central"}'],
       [
         "programs/projects/project-a/workflow/evidence-synthesis/program.json",
         '{"name":"evidence-synthesis"}',
       ],
     ]);
-    const [prompt, router, workflow] = await Promise.all(
+    const [prompt, workflow] = await Promise.all(
       materials.map(
         async ([workingPath, content]) =>
           await workspace.definitions.recordWorkingDefinition({
@@ -97,12 +76,13 @@ describe("Capability lifecycle store", () => {
           }),
       ),
     );
-    if (!prompt || !router || !workflow) throw new Error("Capability fixture revisions are missing");
-    const base = lifecycleRevision("revision-program", prompt, router);
+    if (!prompt || !workflow) throw new Error("Capability fixture revisions are missing");
+    const base = lifecycleRevision("revision-program", prompt);
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const revision: CapabilityRevision = Object.freeze({
       ...base.revision,
       effects: Object.freeze([
+        ...base.revision.effects,
         Object.freeze({
           kind: "program" as const,
           program: Object.freeze({
@@ -185,30 +165,20 @@ describe("Capability lifecycle store", () => {
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const actor = Object.freeze({ actorId: "capability-test", kind: "system" as const });
     const recordMaterial = async (revisionId: string) =>
-      await Promise.all([
-        workspace.definitions.recordWorkingDefinition({
-          workingPath: `capabilities/${revisionId}/instructions.md`,
-          bytes: new TextEncoder().encode(`instructions for ${revisionId}`),
-          actor,
-          reason: "Capability lifecycle test fixture",
-          provenanceRefs: Object.freeze([]),
-        }),
-        workspace.definitions.recordWorkingDefinition({
-          workingPath: `capabilities/${revisionId}/router.json`,
-          bytes: new TextEncoder().encode(`{"revision":"${revisionId}"}`),
-          actor,
-          reason: "Capability lifecycle test fixture",
-          provenanceRefs: Object.freeze([]),
-        }),
-      ]);
+      await workspace.definitions.recordWorkingDefinition({
+        workingPath: `capabilities/${revisionId}/instructions.md`,
+        bytes: new TextEncoder().encode(`instructions for ${revisionId}`),
+        actor,
+        reason: "Capability lifecycle test fixture",
+        provenanceRefs: Object.freeze([]),
+      });
     const firstMaterial = await recordMaterial("revision-1");
-    const first = lifecycleRevision("revision-1", firstMaterial[0], firstMaterial[1]);
+    const first = lifecycleRevision("revision-1", firstMaterial);
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const binding = await workspace.capabilities.create({
       definition: Object.freeze({
         capabilityId: first.reference.capabilityId,
         name: "Concise research",
-        kind: "instruction",
         description: "Answer research questions concisely.",
         applicability: "Research and source synthesis requests.",
         createdAt: first.createdAt,
@@ -229,12 +199,7 @@ describe("Capability lifecycle store", () => {
       }),
     ).toEqual([binding]);
     const secondMaterial = await recordMaterial("revision-2");
-    const second = lifecycleRevision(
-      "revision-2",
-      secondMaterial[0],
-      secondMaterial[1],
-      first.reference.capabilityRevisionId,
-    );
+    const second = lifecycleRevision("revision-2", secondMaterial, first.reference.capabilityRevisionId);
     await workspace.capabilities.addRevision(second);
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const updated = await workspace.capabilities.updateBinding({
@@ -336,19 +301,12 @@ describe("Capability lifecycle store", () => {
       await workspace.capabilities.getBinding(binding.capabilityId),
     ]);
     const otherMaterial = await recordMaterial("other-revision-1");
-    const other = lifecycleRevision(
-      "other-revision-1",
-      otherMaterial[0],
-      otherMaterial[1],
-      undefined,
-      "capability_other",
-    );
+    const other = lifecycleRevision("other-revision-1", otherMaterial, undefined, "capability_other");
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await workspace.capabilities.create({
       definition: Object.freeze({
         capabilityId: other.reference.capabilityId,
         name: "Other capability",
-        kind: "instruction",
         description: "Another capability for gate isolation.",
         applicability: "Other work.",
         createdAt: other.createdAt,
@@ -374,12 +332,7 @@ describe("Capability lifecycle store", () => {
       }),
     });
     const thirdMaterial = await recordMaterial("revision-3");
-    const third = lifecycleRevision(
-      "revision-3",
-      thirdMaterial[0],
-      thirdMaterial[1],
-      second.reference.capabilityRevisionId,
-    );
+    const third = lifecycleRevision("revision-3", thirdMaterial, second.reference.capabilityRevisionId);
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await expect(
       workspace.capabilities.stageGatedRevision({

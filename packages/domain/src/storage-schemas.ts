@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Capability, ProjectRef } from "./research.ts";
+import type { ProjectRef } from "./research.ts";
 import { DATABASE_TABLES } from "./research.ts";
 
 const ContentDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -88,36 +88,11 @@ export const CapabilityRevisionRefSchema = z.strictObject({
   bundleDigest: ContentDigestSchema,
 });
 
-const PermissionManifestSchema = z.strictObject({
-  effects: z.array(z.string()),
-  resourcePatterns: z.array(z.string()),
-  credentialRefs: z.array(z.string()),
-});
-
-const PermissionDeltaSchema = z.strictObject({
-  addedEffects: z.array(z.string()),
-  widenedResources: z.array(z.string()),
-  addedCredentialRefs: z.array(z.string()),
-});
-
-export const CapabilitySchema = z.strictObject({
-  capabilityId: z.string().min(1),
-  name: z.string().min(1),
-  scope: z.string().min(1),
-  intent: z.string().min(1),
-}) satisfies z.ZodType<Capability>;
-
 const CapabilityProgramNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u);
 
 export const CapabilityEffectSchema = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("instruction"),
-    material: FileRevisionRefSchema,
-  }),
-  z.strictObject({
-    kind: z.literal("skill"),
-    name: CapabilityProgramNameSchema,
-    description: z.string().min(1).max(2_048),
     material: FileRevisionRefSchema,
   }),
   z.strictObject({
@@ -135,42 +110,21 @@ export const CapabilityRevisionSchema = z.strictObject({
   capabilityRevisionId: z.string().min(1),
   capabilityId: z.string().min(1),
   predecessorRevisionId: z.string().min(1).optional(),
-  effects: z.array(CapabilityEffectSchema).min(1).max(32).optional(),
-  promptModules: z.array(FileRevisionRefSchema),
-  skills: z.array(FileRevisionRefSchema),
-  tools: z.array(FileRevisionRefSchema),
-  toolset: z.strictObject({
-    toolRevisionIds: z.array(z.string().min(1)),
-    routerRevision: FileRevisionRefSchema,
-    strategyId: z.string().min(1),
-  }),
-  activationPolicy: z.strictObject({
-    mode: z.enum(["automatic_low_risk", "approval_required"]),
-    scope: z.string().min(1),
-  }),
-  dependencyLock: FileRevisionRefSchema.optional(),
-  permissionManifest: PermissionManifestSchema,
+  effects: z
+    .array(CapabilityEffectSchema)
+    .min(1)
+    .max(2)
+    .refine(
+      ([first, ...rest]) =>
+        first?.kind === "instruction" && rest.every((effect) => effect.kind === "program"),
+      "A Capability revision starts with its instruction and may attach one Program",
+    ),
   evidenceRefs: z.array(EvidenceRefSchema),
-  sourceEvaluationDefinitions: z.array(FileRevisionRefSchema),
-  requestedPermissionDelta: PermissionDeltaSchema,
 });
-
-export const CapabilityKindSchema = z.enum([
-  "instruction",
-  "skill",
-  "tool",
-  "workflow",
-  "router",
-  "model_configuration",
-  "harness_configuration",
-  "core_update",
-  "composite",
-]);
 
 export const CapabilityDefinitionSchema = z.strictObject({
   capabilityId: z.string().min(1),
   name: z.string().min(1),
-  kind: CapabilityKindSchema.optional(),
   description: z.string().min(1),
   applicability: z.string().min(1),
   createdAt: z.string().datetime(),

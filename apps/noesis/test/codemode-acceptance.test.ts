@@ -77,7 +77,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       skills,
-      createAgent: (_sessionTools, codeExecution, skillLibrary) => {
+      createAgent: (codeExecution, skillLibrary) => {
         if (!skillLibrary) throw new Error("Expected the production skill library");
         return createPiAgentRuntime(process.cwd(), controlled.models, {
           codeExecution,
@@ -150,7 +150,7 @@ describe("production codemode journey", () => {
           return await taskRunner.run(request);
         },
       }),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -256,7 +256,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -344,7 +344,7 @@ describe("production codemode journey", () => {
     const otherRuntime = await createApplicationRuntimeComposition({
       config,
       project: otherProject,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(otherProject.root, controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -421,7 +421,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -545,7 +545,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -674,7 +674,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -767,7 +767,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -881,7 +881,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -974,7 +974,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1042,7 +1042,7 @@ describe("production codemode journey", () => {
       await createApplicationRuntimeComposition({
         config,
         subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-        createAgent: (_sessionTools, codeExecution) =>
+        createAgent: (codeExecution) =>
           createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
         createRoleRunner: (configurations) =>
           createScriptedAgentRoleRunner({
@@ -1168,7 +1168,7 @@ describe("production codemode journey", () => {
           return await taskRunner.run(request);
         },
       }),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1243,7 +1243,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1300,7 +1300,7 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1344,7 +1344,7 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1403,7 +1403,7 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1472,7 +1472,7 @@ describe("production codemode journey", () => {
 
     const reopened = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1514,7 +1514,7 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1579,7 +1579,7 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1709,7 +1709,7 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1857,7 +1857,7 @@ describe("production codemode journey", () => {
     const otherRuntime = await createApplicationRuntimeComposition({
       config,
       project: otherProject,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(otherProject.root, controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -1968,7 +1968,7 @@ describe("production codemode journey", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -2116,7 +2116,7 @@ describe("production codemode journey", () => {
     const otherRuntime = await createApplicationRuntimeComposition({
       config,
       project: otherProject,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(otherProject.root, controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -2190,7 +2190,7 @@ describe("production codemode journey", () => {
     const createRuntime = async () =>
       await createApplicationRuntimeComposition({
         config,
-        createAgent: (_sessionTools, codeExecution) =>
+        createAgent: (codeExecution) =>
           createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
         createRoleRunner: (configurations) =>
           createScriptedAgentRoleRunner({
@@ -2307,7 +2307,7 @@ describe("production codemode journey", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({

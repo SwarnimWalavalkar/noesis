@@ -142,7 +142,7 @@ async function createRuntime(
         .addOptional(mcp ? { mcp } : undefined)
         .add({
           recoverInterruptedOperations: options.recoverInterruptedOperations,
-          createAgent: (_sessionTools, codeExecution, skillLibrary) =>
+          createAgent: (codeExecution, skillLibrary) =>
             createPiAgentRuntime(
               project.root,
               services.models,

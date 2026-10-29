@@ -42,7 +42,7 @@ const request: AgentRuntimeRequest = {
 };
 function plan(): FrozenTurnPlan {
   const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: "image-plan",
     sessionId: request.trailId,
     turnId: "image-turn",
@@ -53,7 +53,6 @@ function plan(): FrozenTurnPlan {
     thinkingLevel: request.thinkingLevel,
     permissionSnapshot: { effects: [], resourcePatterns: [], credentialRefs: [] },
     retrievalCitations: [],
-    routing: { strategyId: "baseline", reason: "test" },
     createdAt: "2026-01-01T00:00:00.000Z",
     conversationHistory: [
       {

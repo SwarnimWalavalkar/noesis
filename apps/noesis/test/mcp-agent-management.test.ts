@@ -112,7 +112,7 @@ test("Pi codemode configures, awaits private credentials, and calls a new MCP to
   const runtime = await createApplicationRuntimeComposition({
     config,
     mcp: integration,
-    createAgent: (_, codeExecution) => createPiAgentRuntime(root, controlled.models, { codeExecution }),
+    createAgent: (codeExecution) => createPiAgentRuntime(root, controlled.models, { codeExecution }),
     createRoleRunner: (configurations) => createPiAgentRoleRunner(root, controlled.models, configurations),
   });
   try {

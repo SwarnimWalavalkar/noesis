@@ -1,10 +1,7 @@
-import { capabilityEffectKinds, capabilityEffects } from "@noesis/capabilities";
 import {
   createConditionalObject,
-  type CapabilityDefinition,
   type CapabilityLifecycleRevision,
   type CapabilityRevision,
-  type CapabilityRevisionRef,
   type CapabilityScope,
   canonicalJson,
   capabilityEvidenceLabel,
@@ -44,15 +41,6 @@ interface LearningAuditSource {
   readonly home?: string;
   /** Why an edited Capability file could not be applied, by Capability ID. */
   readonly editProblems?: ReadonlyMap<string, string>;
-  readonly resolveRevision: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
-  readonly resolveCapability: (capabilityId: string) =>
-    | Readonly<{
-        readonly capabilityId: string;
-        readonly name: string;
-        readonly scope: string;
-        readonly intent: string;
-      }>
-    | undefined;
   readonly project: ProjectRef;
   readonly now?: () => Date;
 }
@@ -283,11 +271,10 @@ function capabilitySelectionLabel(mode: "relevant" | "always"): string {
   return mode === "always" ? "Always active" : "Selected when semantically relevant";
 }
 function capabilityFacets(revision: CapabilityRevision | undefined): readonly TuiCapabilityFacet[] {
-  return revision ? capabilityEffectKinds(revision) : Object.freeze([]);
+  return revision ? Object.freeze(revision.effects.map((effect) => effect.kind)) : Object.freeze([]);
 }
 function facetCountLabel(revision: CapabilityRevision): string {
-  const effects = capabilityEffects(revision);
-  if (effects.length === 0) return "Legacy bundle";
+  const effects = revision.effects;
   const counts = new Map<TuiCapabilityFacet, number>();
   for (const effect of effects) counts.set(effect.kind, (counts.get(effect.kind) ?? 0) + 1);
   return [...counts.entries()]
@@ -315,70 +302,26 @@ async function materialEntry(
 }
 async function capabilityMaterialEntries(
   workspace: NoesisWorkspaceStore,
-  definition: CapabilityDefinition | undefined,
   lifecycle: CapabilityLifecycleRevision | undefined,
 ): Promise<readonly (ReturnType<typeof detailEntry> | undefined)[]> {
-  if (!lifecycle)
-    return Object.freeze([
-      detailEntry(
-        "effects",
-        definition?.kind ? `Legacy ${definition.kind.replaceAll("_", " ")} capability` : undefined,
-      ),
-    ]);
+  if (!lifecycle) return Object.freeze([]);
   const revision = lifecycle.revision;
-  const effects = capabilityEffects(revision);
-  if (effects.length > 0) {
-    const kindCounts = new Map<string, number>();
-    const effectTotals = new Map<string, number>();
-    for (const effect of effects) effectTotals.set(effect.kind, (effectTotals.get(effect.kind) ?? 0) + 1);
-    const effectEntries = await Promise.all(
-      effects.map(async (effect) => {
-        const count = (kindCounts.get(effect.kind) ?? 0) + 1;
-        kindCounts.set(effect.kind, count);
-        const suffix = (effectTotals.get(effect.kind) ?? 0) > 1 ? ` ${String(count)}` : "";
-        if (effect.kind === "instruction")
-          return await materialEntry(workspace, `instruction${suffix}`, effect.material);
-        if (effect.kind === "skill") {
-          const entry = await materialEntry(workspace, `skill · ${effect.name}`, effect.material);
-          return entry ? detailEntry(entry.label, `${effect.description}\n${entry.value}`) : entry;
-        }
-        return await materialEntry(
-          workspace,
-          `program (${effect.program.mode}) · ${effect.program.name}`,
-          effect.program.definitionRevision,
-        );
-      }),
-    );
-    return Object.freeze([
-      detailEntry("effects", capabilityEffectKinds(revision).join(" + ")),
-      detailEntry("change", lifecycle.summary),
-      ...effectEntries,
-      detailEntry("materials", facetCountLabel(revision)),
-    ]);
-  }
-  const materialEntries = await Promise.all([
-    ...revision.promptModules.map(
-      async (reference, index) =>
-        await materialEntry(
-          workspace,
-          definition?.kind === "instruction" && index === 0 ? "instruction" : `prompt ${String(index + 1)}`,
-          reference,
-        ),
+  const effectEntries = await Promise.all(
+    revision.effects.map(async (effect) =>
+      effect.kind === "instruction"
+        ? await materialEntry(workspace, "instruction", effect.material)
+        : await materialEntry(
+            workspace,
+            `program (${effect.program.mode}) · ${effect.program.name}`,
+            effect.program.definitionRevision,
+          ),
     ),
-    ...revision.skills.map(
-      async (reference, index) => await materialEntry(workspace, `skill ${String(index + 1)}`, reference),
-    ),
-    ...revision.tools.map(
-      async (reference, index) => await materialEntry(workspace, `tool ${String(index + 1)}`, reference),
-    ),
-  ]);
+  );
   return Object.freeze([
-    detailEntry(
-      "effects",
-      definition?.kind ? `Legacy ${definition.kind.replaceAll("_", " ")} bundle` : "Legacy capability bundle",
-    ),
+    detailEntry("effects", capabilityFacets(revision).join(" + ")),
     detailEntry("change", lifecycle.summary),
-    ...materialEntries,
+    ...effectEntries,
+    detailEntry("materials", facetCountLabel(revision)),
   ]);
 }
 function reflectionStatusLabel(status: string): string {
@@ -601,11 +544,7 @@ export async function loadLearningAuditSnapshot(
     const sourceSessionId = sourceReflection ? jobSessionId(sourceReflection) : undefined;
     const consideredEvidence =
       sourceReflection && jobSensitivity(sourceReflection) === "normal" ? sourceReflection.payloadRefs : [];
-    const currentMaterialEntries = await capabilityMaterialEntries(
-      source.workspace,
-      definition,
-      currentRevision,
-    );
+    const currentMaterialEntries = await capabilityMaterialEntries(source.workspace, currentRevision);
     const currentFacets = capabilityFacets(currentRevision?.revision);
     const document = currentRevision ? capabilityDocumentRevision(currentRevision) : undefined;
     const workingDocumentPath = document ? capabilityWorkingDocumentPath(document) : undefined;
@@ -641,7 +580,6 @@ export async function loadLearningAuditSnapshot(
             capabilityBindingRevision: binding.revisionNumber,
           } as const)
           .addOptional(currentFacets.length > 0 ? { capabilityFacets: currentFacets } : undefined)
-          .addOptional(definition?.kind ? { capabilityKind: definition.kind } : undefined)
           .add({
             capabilityState: binding.state,
             capabilityActivationMode: binding.activationMode,
@@ -733,7 +671,7 @@ export async function loadLearningAuditSnapshot(
     );
     for (const revision of revisions) {
       const revisionFacets = capabilityFacets(revision.revision);
-      const revisionMaterialEntries = await capabilityMaterialEntries(source.workspace, definition, revision);
+      const revisionMaterialEntries = await capabilityMaterialEntries(source.workspace, revision);
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       primitives.push(
         primitive(
@@ -758,7 +696,6 @@ export async function loadLearningAuditSnapshot(
             capabilityBindingRevision: binding.revisionNumber,
           } as const)
             .addOptional(revisionFacets.length > 0 ? { capabilityFacets: revisionFacets } : undefined)
-            .addOptional(definition?.kind ? { capabilityKind: definition.kind } : undefined)
             .add({
               capabilityState: binding.state,
               capabilityActivationMode: binding.activationMode,

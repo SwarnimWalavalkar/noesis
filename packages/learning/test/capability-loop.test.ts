@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import type { EvidenceRef, FileRevisionRef, ProjectRef } from "@noesis/domain";
 import { learnedCapabilitySkillName, sha256 } from "@noesis/domain";
 import type { HistoryPort } from "@noesis/intelligence";
@@ -53,7 +52,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       history: emptyHistory,
       inference,
       reflector: Object.freeze({
@@ -170,10 +168,8 @@ describe("Capability learning loop", () => {
                   content: "Prefer concise synthesis.",
                 }),
                 Object.freeze({
-                  kind: "skill",
-                  name: "concise-evidence-synthesis",
-                  description: "Synthesize primary evidence into a concise answer.",
-                  instructions: "Load primary evidence, retain exact citations, then compress the prose.",
+                  kind: "instruction",
+                  content: "Load primary evidence, retain exact citations, then compress the prose.",
                 }),
               ]),
               scope: "global",
@@ -244,7 +240,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       history: emptyHistory,
       inference,
       reflector: Object.freeze({
@@ -619,7 +614,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       history: emptyHistory,
       inference,
       reflector: Object.freeze({
@@ -771,7 +765,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       history: emptyHistory,
       inference,
       reflector: Object.freeze({
@@ -839,7 +832,6 @@ describe("Capability learning loop", () => {
     const workspace = await createWorkspaceStore(root);
     opened.push({ root, workspace });
     const project: ProjectRef = Object.freeze({ projectId: "project-outcomes", root });
-    const registry = createAtomicCapabilityRegistry();
     await workspace.operational.sessions.put({
       sessionId: "session-outcomes",
       title: "Outcomes",
@@ -874,7 +866,6 @@ describe("Capability learning loop", () => {
     const publisher = createCapabilityPublisher({
       workspace,
       store: workspace.capabilities,
-      registry,
       now: () => "2026-10-29T10:00:01.000Z",
       nextId,
     });
@@ -921,7 +912,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry,
       history: emptyHistory,
       inference,
       publisher,

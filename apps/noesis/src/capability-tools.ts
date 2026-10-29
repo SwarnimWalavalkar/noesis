@@ -1,5 +1,4 @@
 import type { FrozenTurnPlan } from "@noesis/agent-types";
-import { capabilityEffects } from "@noesis/capabilities";
 import {
   CapabilityBindingSchema,
   CapabilityRevisionRefSchema,
@@ -57,15 +56,14 @@ const CapabilityRevisionSummarySchema = z.strictObject({
   summary: z.string(),
   rationale: z.string(),
   anticipatedEffect: z.string(),
-  effectKinds: z.array(z.enum(["instruction", "skill", "program"])),
+  effectKinds: z.array(z.enum(["instruction", "program"])),
   createdAt: z.string(),
 });
 
 const CapabilityEffectInspectionSchema = z.strictObject({
   effectIndex: z.number().int().nonnegative(),
-  kind: z.enum(["instruction", "skill", "program"]),
+  kind: z.enum(["instruction", "program"]),
   name: z.string().nullable(),
-  description: z.string().nullable(),
   project: ProjectRefSchema.nullable(),
   mode: z.enum(["script", "workflow"]).nullable(),
   revision: FileRevisionRefSchema,
@@ -116,7 +114,6 @@ const CapabilityGateInspectionSchema = z.strictObject({
 const CapabilityDefinitionInspectionSchema = z.strictObject({
   capabilityId: z.string(),
   name: z.string(),
-  kind: z.string().nullable(),
   description: z.string(),
   applicability: z.string(),
   createdAt: z.string(),
@@ -225,9 +222,8 @@ const CapabilityInspectOutputSchema = z.discriminatedUnion("view", [
         capabilityId: z.string(),
         capabilityRevisionId: z.string(),
         effectIndex: z.number().int().nonnegative(),
-        kind: z.enum(["instruction", "skill", "program"]),
+        kind: z.enum(["instruction", "program"]),
         name: z.string().nullable(),
-        description: z.string().nullable(),
         mode: z.enum(["script", "workflow"]).nullable(),
         revision: FileRevisionRefSchema,
         content: z.string(),
@@ -256,7 +252,6 @@ function definitionInspection(definition: CapabilityDefinition) {
   return Object.freeze({
     capabilityId: definition.capabilityId,
     name: definition.name,
-    kind: definition.kind ?? null,
     description: definition.description,
     applicability: definition.applicability,
     createdAt: definition.createdAt,
@@ -267,15 +262,10 @@ function effectInspection(effect: CapabilityEffect, effectIndex: number) {
   return Object.freeze({
     effectIndex,
     kind: effect.kind,
-    name:
-      effect.kind === "instruction" ? null : effect.kind === "program" ? effect.program.name : effect.name,
-    description: effect.kind === "skill" ? effect.description : null,
+    name: effect.kind === "program" ? effect.program.name : null,
     project: effect.kind === "program" ? effect.program.project : null,
     mode: effect.kind === "program" ? effect.program.mode : null,
-    revision:
-      effect.kind === "instruction" || effect.kind === "skill"
-        ? effect.material
-        : effect.program.definitionRevision,
+    revision: effect.kind === "instruction" ? effect.material : effect.program.definitionRevision,
   });
 }
 
@@ -286,7 +276,7 @@ function revisionInspection(revision: CapabilityLifecycleRevision) {
     summary: revision.summary,
     rationale: revision.rationale,
     anticipatedEffect: revision.anticipatedEffect,
-    effects: capabilityEffects(revision.revision).map(effectInspection),
+    effects: revision.revision.effects.map(effectInspection),
     evidenceRefs: revision.revision.evidenceRefs,
     createdAt: revision.createdAt,
   });
@@ -333,7 +323,7 @@ function revisionSummary(revision: CapabilityLifecycleRevision | undefined) {
         summary: revision.summary,
         rationale: revision.rationale,
         anticipatedEffect: revision.anticipatedEffect,
-        effectKinds: capabilityEffects(revision.revision).map((effect) => effect.kind),
+        effectKinds: revision.revision.effects.map((effect) => effect.kind),
         createdAt: revision.createdAt,
       })
     : null;
@@ -342,9 +332,8 @@ function revisionSummary(revision: CapabilityLifecycleRevision | undefined) {
 /** The complete progressively disclosed Capability surface for one frozen foreground turn. */
 export function createCapabilityTools(options: CreateCapabilityToolsOptions): readonly ToolDefinition[] {
   const capabilityFile = (revision: CapabilityLifecycleRevision | undefined): string | null => {
-    const document = revision ? capabilityDocumentRevision(revision) : undefined;
-    if (!document) return null;
-    const path = capabilityWorkingDocumentPath(document);
+    if (!revision) return null;
+    const path = capabilityWorkingDocumentPath(capabilityDocumentRevision(revision));
     return options.home ? join(options.home, path) : path;
   };
   const inspect = defineTool({
@@ -490,13 +479,10 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
         input.capabilityId,
         input.capabilityRevisionId,
       );
-      const effect = lifecycle ? capabilityEffects(lifecycle.revision)[input.effectIndex] : undefined;
+      const effect = lifecycle?.revision.effects[input.effectIndex];
       if (!lifecycle || !effect)
         return CapabilityInspectOutputSchema.parse({ view: "material", material: null });
-      const revision =
-        effect.kind === "instruction" || effect.kind === "skill"
-          ? effect.material
-          : effect.program.definitionRevision;
+      const revision = effect.kind === "instruction" ? effect.material : effect.program.definitionRevision;
       const content = decoder.decode(await options.workspace.reads.readRevision(revision));
       const start = Math.min(input.start ?? 0, content.length);
       const end = Math.min(start + (input.maxCharacters ?? DEFAULT_MATERIAL_CHARACTERS), content.length);
@@ -507,13 +493,7 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
           capabilityRevisionId: input.capabilityRevisionId,
           effectIndex: input.effectIndex,
           kind: effect.kind,
-          name:
-            effect.kind === "instruction"
-              ? null
-              : effect.kind === "program"
-                ? effect.program.name
-                : effect.name,
-          description: effect.kind === "skill" ? effect.description : null,
+          name: effect.kind === "program" ? effect.program.name : null,
           mode: effect.kind === "program" ? effect.program.mode : null,
           revision,
           content: content.slice(start, end),

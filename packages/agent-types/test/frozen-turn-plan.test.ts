@@ -69,7 +69,7 @@ describe("frozen context notebook", () => {
       omittedNoteCount: 0,
     });
     const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = Object.freeze({
-      schemaVersion: 1,
+      schemaVersion: 2,
       planId: "plan-1",
       sessionId: "session-1",
       turnId: "turn-1",
@@ -87,7 +87,6 @@ describe("frozen context notebook", () => {
         credentialRefs: Object.freeze([]),
       }),
       retrievalCitations: Object.freeze([]),
-      routing: Object.freeze({ strategyId: "baseline", reason: "test fixture" }),
       createdAt: "2026-09-04T12:00:01.000Z",
     });
     const valid = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });

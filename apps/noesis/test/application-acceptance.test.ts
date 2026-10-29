@@ -40,7 +40,7 @@ describe("credential-free Pi application acceptance", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
@@ -61,7 +61,6 @@ describe("credential-free Pi application acceptance", () => {
       expect(definition).toMatchObject({
         name: "Evidence-grounded research briefs",
       });
-      expect(definition.kind).toBeUndefined();
       const firstBinding = await runtime.debug.workspace.capabilities.getBinding(definition.capabilityId);
       expect(firstBinding).toMatchObject({
         scope: { kind: "global" },

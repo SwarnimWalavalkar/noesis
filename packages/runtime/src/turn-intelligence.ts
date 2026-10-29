@@ -13,15 +13,7 @@ import {
   MAX_FROZEN_CONVERSATION_HISTORY_TOTAL_CHARACTERS,
   validateFrozenTurnPlan,
 } from "@noesis/agent-types";
-import {
-  assertCapabilityEffectsEligible,
-  capabilityEffects,
-  validateCapabilityEffects,
-} from "@noesis/capabilities";
 import type {
-  Capability,
-  CapabilityRevision,
-  CapabilityRevisionRef,
   ComposerAttachment,
   EvidenceRef,
   FileRevisionRef,
@@ -29,21 +21,19 @@ import type {
   ProjectRef,
 } from "@noesis/domain";
 import {
+  assertCapabilityEffectsEligible,
   capabilityGuidance,
   ComposerAttachmentsSchema,
   createConditionalObject,
   canonicalJson,
   sha256,
   toJsonValue,
+  validateCapabilityEffects,
 } from "@noesis/domain";
 import { isCapabilityBindingAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 import { contextNotebookTokenBudget, resolveContextNotebook } from "./session-compaction.ts";
 const decoder = new TextDecoder("utf8", { fatal: true });
-export interface TurnCapabilityResolver {
-  readonly resolveCapability: (capabilityId: string) => Promise<Capability | undefined>;
-  readonly resolveRevision: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
-}
 export interface TurnPlanningRequest {
   readonly sessionId: string;
   readonly turnId: string;
@@ -328,7 +318,6 @@ export interface TurnRoutingHistoryMessage {
 export interface TurnIntelligencePlannerOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
-  readonly capabilities: TurnCapabilityResolver;
   /** Canonical host-derived active directory identity, resolved once at startup. */
   readonly project: ProjectRef;
   readonly basePermissionManifest?: PermissionManifest;
@@ -436,35 +425,11 @@ async function materialize(
   const bytes = await workspace.reads.readRevision(reference);
   return Object.freeze({ revision: reference, content: decoder.decode(bytes) });
 }
-function mergedPermissions(
-  selections: readonly FrozenCapabilitySelection[],
-  baseline: PermissionManifest = Object.freeze({
-    effects: Object.freeze([]),
-    resourcePatterns: Object.freeze([]),
-    credentialRefs: Object.freeze([]),
-  }),
-): FrozenTurnPlan["permissionSnapshot"] {
-  return Object.freeze({
-    effects: Object.freeze([
-      ...new Set([
-        ...baseline.effects,
-        ...selections.flatMap((selection) => selection.permissionManifest.effects),
-      ]),
-    ]),
-    resourcePatterns: Object.freeze([
-      ...new Set([
-        ...baseline.resourcePatterns,
-        ...selections.flatMap((selection) => selection.permissionManifest.resourcePatterns),
-      ]),
-    ]),
-    credentialRefs: Object.freeze([
-      ...new Set([
-        ...baseline.credentialRefs,
-        ...selections.flatMap((selection) => selection.permissionManifest.credentialRefs),
-      ]),
-    ]),
-  });
-}
+const NO_PERMISSIONS: PermissionManifest = Object.freeze({
+  effects: Object.freeze([]),
+  resourcePatterns: Object.freeze([]),
+  credentialRefs: Object.freeze([]),
+});
 export function createTurnIntelligencePlanner(
   options: TurnIntelligencePlannerOptions,
 ): TurnIntelligencePlanner {
@@ -487,113 +452,62 @@ export function createTurnIntelligencePlanner(
     ]);
     const resolved = await Promise.all(
       bindings.map(async (binding) => {
-        const reference = binding.revision;
-        const [capability, definition, revision] = await Promise.all([
-          options.capabilities.resolveCapability(reference.capabilityId),
-          options.workspace.capabilities.getDefinition(reference.capabilityId),
-          options.capabilities.resolveRevision(reference),
+        const [definition, lifecycle] = await Promise.all([
+          options.workspace.capabilities.getDefinition(binding.capabilityId),
+          options.workspace.capabilities.getRevision(binding.revision),
         ]);
-        if (!capability || !revision)
+        if (!definition || !lifecycle)
           throw new Error(
-            `Active capability ${reference.capabilityRevisionId} cannot be rehydrated from immutable state`,
+            `Active capability ${binding.revision.capabilityRevisionId} cannot be read from immutable state`,
           );
-        return Object.freeze(
-          createConditionalObject({ binding, reference, capability, revision } as const)
-            .addOptional(definition ? { definition } : undefined)
-            .finish(),
-        );
+        return Object.freeze({ binding, definition, revision: lifecycle.revision });
       }),
     );
     // `always` Capabilities go in the prompt. `relevant` Capabilities are listed by name and "when"
     // text, the same way skills are. The foreground model chooses which to load, so planning makes
     // no separate routing model call.
-    const selectedResolved = [
-      ...resolved
-        .filter((item) => item.binding.activationMode === "always")
-        .map((item) =>
-          Object.freeze({ ...item, selectionReason: "always active", delivery: "prompt" as const }),
-        ),
-      ...resolved
-        .filter((item) => item.binding.activationMode === "relevant")
-        .map((item) =>
-          Object.freeze({
-            ...item,
-            selectionReason: "listed for the model to load when relevant",
-            delivery: "on_demand" as const,
-          }),
-        ),
+    const ordered = [
+      ...resolved.filter((item) => item.binding.activationMode === "always"),
+      ...resolved.filter((item) => item.binding.activationMode === "relevant"),
     ];
-    const selections: FrozenCapabilitySelection[] = [];
-    for (const {
-      binding,
-      reference,
-      capability,
-      definition,
-      revision,
-      selectionReason,
-      delivery,
-    } of selectedResolved) {
-      const currentEffects = capabilityEffects(revision);
-      if (currentEffects.length > 0) {
-        validateCapabilityEffects(currentEffects);
-        assertCapabilityEffectsEligible({
-          effects: currentEffects,
-          scope: binding.scope,
-          project: options.project,
+    const selections = await Promise.all(
+      ordered.map(async ({ binding, definition, revision }): Promise<FrozenCapabilitySelection> => {
+        const effects = validateCapabilityEffects(revision.effects);
+        assertCapabilityEffectsEligible({ effects, scope: binding.scope, project: options.project });
+        const frozenEffects = await Promise.all(
+          effects.map(async (effect) =>
+            effect.kind === "instruction"
+              ? Object.freeze({
+                  kind: "instruction" as const,
+                  material: await materialize(options.workspace, effect.material),
+                })
+              : Object.freeze({
+                  kind: "program" as const,
+                  mode: effect.program.mode,
+                  name: effect.program.name,
+                  project: Object.freeze({ ...effect.program.project }),
+                  definition: await materialize(options.workspace, effect.program.definitionRevision),
+                }),
+          ),
+        );
+        const always = binding.activationMode === "always";
+        return Object.freeze({
+          capabilityId: definition.capabilityId,
+          name: definition.name,
+          description: definition.description,
+          applicability: definition.applicability,
+          selectionReason: always ? "always active" : "listed for the model to load when relevant",
+          delivery: always ? ("prompt" as const) : ("on_demand" as const),
+          revision: binding.revision,
+          effects: Object.freeze(frozenEffects),
         });
-      }
-      const [promptModules, skills, tools, router] = await Promise.all([
-        Promise.all(revision.promptModules.map(async (item) => await materialize(options.workspace, item))),
-        Promise.all(revision.skills.map(async (item) => await materialize(options.workspace, item))),
-        Promise.all(revision.tools.map(async (item) => await materialize(options.workspace, item))),
-        materialize(options.workspace, revision.toolset.routerRevision),
-      ]);
-      const effects = await Promise.all(
-        currentEffects.map(async (effect) =>
-          effect.kind === "instruction" || effect.kind === "skill"
-            ? Object.freeze({
-                ...effect,
-                material: await materialize(options.workspace, effect.material),
-              })
-            : Object.freeze({
-                kind: "program" as const,
-                mode: effect.program.mode,
-                name: effect.program.name,
-                project: Object.freeze({ ...effect.program.project }),
-                definition: await materialize(options.workspace, effect.program.definitionRevision),
-              }),
-        ),
-      );
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      selections.push(
-        Object.freeze(
-          createConditionalObject({
-            capabilityId: capability.capabilityId,
-            name: capability.name,
-            description: definition?.description ?? capability.intent,
-            applicability: definition?.applicability ?? capability.intent,
-            scope: capability.scope,
-            selectionReason,
-            delivery,
-            revision: reference,
-          } as const)
-            .addOptional(!(effects.length === 0) ? { effects: Object.freeze(effects) } : undefined)
-            .add({
-              promptModules: Object.freeze(promptModules),
-              skills: Object.freeze(skills),
-              tools: Object.freeze(tools),
-              router,
-              permissionManifest: revision.permissionManifest,
-            } as const)
-            .finish(),
-        ),
-      );
-    }
+      }),
+    );
     // Always-active guidance shares one allowance. A Capability past it is listed on demand for
     // this turn instead of growing every prompt.
     let alwaysCharacters = 0;
     const deliveredSelections = selections.map((selection) => {
-      if (selection.delivery !== "prompt" || !selection.effects) return selection;
+      if (selection.delivery !== "prompt") return selection;
       const characters = selection.effects
         .flatMap((effect) =>
           effect.kind === "instruction" ? [capabilityGuidance(effect.material.content)] : [],
@@ -612,19 +526,14 @@ export function createTurnIntelligencePlanner(
     const promptLayers = deliveredSelections.flatMap((selection) =>
       selection.delivery === "on_demand"
         ? []
-        : selection.effects
-          ? selection.effects.flatMap((effect) =>
-              effect.kind === "instruction" ? [capabilityGuidance(effect.material.content).trim()] : [],
-            )
-          : [
-              ...selection.promptModules.map((material) => material.content.trim()),
-              ...selection.skills.map((material) => material.content.trim()),
-            ],
+        : selection.effects.flatMap((effect) =>
+            effect.kind === "instruction" ? [capabilityGuidance(effect.material.content).trim()] : [],
+          ),
     );
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const unsigned = Object.freeze(
       createConditionalObject({
-        schemaVersion: 1 as const,
+        schemaVersion: 2 as const,
         planId: createPlanId(request.turnId),
         sessionId: request.sessionId,
         turnId: request.turnId,
@@ -660,13 +569,8 @@ export function createTurnIntelligencePlanner(
           provider: request.provider,
           model: request.model,
           thinkingLevel: request.thinkingLevel,
-          permissionSnapshot: mergedPermissions(deliveredSelections, options.basePermissionManifest),
+          permissionSnapshot: options.basePermissionManifest ?? NO_PERMISSIONS,
           retrievalCitations: Object.freeze([...(request.retrievalCitations ?? [])]),
-          routing: Object.freeze({
-            strategyId: "capability-skill-index-v1",
-            reason:
-              "Relevant Capabilities are listed as skills; the foreground model loads them when they apply",
-          }),
           createdAt: now(),
         } as const)
         .finish(),

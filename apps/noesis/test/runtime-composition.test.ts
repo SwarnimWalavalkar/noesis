@@ -27,7 +27,6 @@ import {
   createPiSkillLibrary,
   createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
-  type FrozenSessionToolResolver,
   type PiFrozenToolCatalog,
   type RoleBackendRequest,
 } from "@noesis/runtime-pi";
@@ -139,7 +138,7 @@ function reflectImmediately(config: ResolvedNoesisConfig): ResolvedNoesisConfig 
 }
 const recoveryTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: `plan-${turnId}`,
     sessionId,
     turnId,
@@ -150,7 +149,6 @@ const recoveryTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => 
     thinkingLevel: "off",
     permissionSnapshot: { effects: [], resourcePatterns: [], credentialRefs: [] },
     retrievalCitations: [],
-    routing: { strategyId: "baseline", reason: "Recovery fixture" },
     createdAt: "2026-07-26T00:00:00.000Z",
   };
   return Object.freeze({ ...body, canonicalDigest: frozenTurnPlanDigest(body) });
@@ -622,7 +620,7 @@ describe("apps/noesis production control-plane composition", () => {
         config,
         project,
         mcp,
-        createAgent: (_sessionTools, codeExecution) =>
+        createAgent: (codeExecution) =>
           Object.freeze({
             name: "mcp-large-result-agent",
             run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
@@ -769,7 +767,7 @@ describe("apps/noesis production control-plane composition", () => {
     const controlled = createControlledPiModels();
     const first = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
@@ -791,7 +789,7 @@ describe("apps/noesis production control-plane composition", () => {
     await writeFile(join(home, "ledger", "events.jsonl"), "{ definitely not valid JSONL\n");
     const reopened = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
@@ -815,7 +813,7 @@ describe("apps/noesis production control-plane composition", () => {
     const create = () =>
       createApplicationRuntimeComposition({
         config,
-        createAgent: (_sessionTools, codeExecution) =>
+        createAgent: (codeExecution) =>
           createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
         createRoleRunner: (configurations) =>
           createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
@@ -857,7 +855,7 @@ describe("apps/noesis production control-plane composition", () => {
     const legacy = await writeLegacyCompletedTurn(home, runtimeIdentity);
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
@@ -1021,7 +1019,7 @@ describe("apps/noesis production control-plane composition", () => {
     seed.close();
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
@@ -1119,7 +1117,7 @@ describe("apps/noesis production control-plane composition", () => {
     seed.close();
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
@@ -1884,12 +1882,10 @@ describe("apps/noesis production control-plane composition", () => {
     const requests: AgentRuntimeRequest[] = [];
     const seenConfigurations: unknown[] = [];
     const preparedCatalogs: PiFrozenToolCatalog[] = [];
-    let frozenSessionTools: FrozenSessionToolResolver | undefined;
     const runtime = await createApplicationRuntimeComposition({
       config,
       skills,
-      createAgent: (sessionTools, codeExecution, skillLibrary) => {
-        frozenSessionTools = sessionTools;
+      createAgent: (codeExecution, skillLibrary) => {
         const capturingCodeExecution = Object.freeze({
           ...codeExecution,
           prepare: async (...arguments_: Parameters<typeof codeExecution.prepare>) => {
@@ -1939,15 +1935,6 @@ describe("apps/noesis production control-plane composition", () => {
     expect(preparedCatalogs[0]?.tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(sessionCatalogTools),
     );
-    if (!frozenSessionTools) throw new Error("Expected the application session-tool resolver");
-    const emptyCapabilityResolution = await frozenSessionTools.resolve(
-      recoveryTurnPlan("trail-empty-capabilities", "turn-empty-capabilities"),
-      new AbortController().signal,
-    );
-    expect(emptyCapabilityResolution.consumedMaterials).toEqual([]);
-    expect(emptyCapabilityResolution.definitions.map((definition) => definition.name)).toEqual(
-      sessionCatalogTools.map((name) => name.slice("history.".length)),
-    );
     expect(config.schemaVersion).toBe(1);
     expect(await runtime.debug.workspace.operational.sessions.get(trail.trailId)).toMatchObject({
       sessionId: trail.trailId,
@@ -1971,7 +1958,7 @@ describe("apps/noesis production control-plane composition", () => {
     expect(storedPlan?.permissionSnapshot.resourcePatterns).toContain("file-read:*");
     expect(storedPlan?.permissionSnapshot.resourcePatterns).not.toContain("file:*");
     expect(storedPlan).toMatchObject({
-      schemaVersion: 1,
+      schemaVersion: 2,
       sessionId: trail.trailId,
       turnId,
       selectedCapabilities: [],
@@ -2027,7 +2014,7 @@ describe("apps/noesis production control-plane composition", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       skills,
-      createAgent: (_sessionTools, codeExecution, skillLibrary) =>
+      createAgent: (codeExecution, skillLibrary) =>
         createPiAgentRuntime(
           process.cwd(),
           controlled.models,
@@ -2110,7 +2097,7 @@ describe("apps/noesis production control-plane composition", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       skills: observedSkills,
-      createAgent: (_sessionTools, codeExecution, skillLibrary) =>
+      createAgent: (codeExecution, skillLibrary) =>
         createPiAgentRuntime(
           process.cwd(),
           controlled.models,
@@ -2187,7 +2174,7 @@ describe("apps/noesis production control-plane composition", () => {
     const runtime = await createApplicationRuntimeComposition({
       config,
       skills,
-      createAgent: (_sessionTools, codeExecution, skillLibrary) =>
+      createAgent: (codeExecution, skillLibrary) =>
         createPiAgentRuntime(
           process.cwd(),
           controlled.models,
@@ -2235,7 +2222,7 @@ describe("apps/noesis production control-plane composition", () => {
     const reopened = await createApplicationRuntimeComposition({
       config,
       skills: reopenedSkills,
-      createAgent: (_sessionTools, codeExecution, skillLibrary) =>
+      createAgent: (codeExecution, skillLibrary) =>
         createPiAgentRuntime(
           process.cwd(),
           controlled.models,
@@ -2329,7 +2316,7 @@ describe("apps/noesis production control-plane composition", () => {
       await createApplicationRuntimeComposition({
         config,
         project: activeProject,
-        createAgent: (_sessionTools, codeExecution) =>
+        createAgent: (codeExecution) =>
           createPiAgentRuntime(activeProject.root, controlled.models, { codeExecution }),
         createRoleRunner: (configurations) =>
           createPiAgentRoleRunner(activeProject.root, controlled.models, configurations),
@@ -2344,7 +2331,6 @@ describe("apps/noesis production control-plane composition", () => {
       throw new Error(
         `Expected the source reflection to create a Capability: ${JSON.stringify(await first.debug.workspace.jobs.list({ limit: 10 }))}`,
       );
-    expect(definition.kind).toBeUndefined();
     const active = await first.debug.workspace.capabilities.getBinding(definition.capabilityId);
     expect(active).toMatchObject({
       scope: { kind: "global" },
@@ -2437,7 +2423,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
@@ -2473,7 +2459,7 @@ describe("apps/noesis production control-plane composition", () => {
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         Object.freeze({
           name: "history-rerank-cancellation-agent",
           run: async (request: AgentRuntimeRequest, emit: (event: AgentRuntimeEvent) => void) => {
@@ -2607,7 +2593,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -2679,7 +2665,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
@@ -2755,7 +2741,7 @@ describe("apps/noesis production control-plane composition", () => {
     });
     const runtime = await createApplicationRuntimeComposition({
       config,
-      createAgent: (_sessionTools, codeExecution) =>
+      createAgent: (codeExecution) =>
         createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
       createRoleRunner: (configurations) =>
         createScriptedAgentRoleRunner({
