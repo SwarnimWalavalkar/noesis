@@ -143,6 +143,25 @@ export function canonicalJson(value: unknown): string {
 
 export const sha256 = (value: string | Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
+/**
+ * The skill name under which a `relevant` Capability's instructions are offered to the model.
+ * The suffix comes from the stable Capability ID, so a renamed Capability still matches.
+ */
+export function learnedCapabilitySkillName(capabilityId: string, name: string): string {
+  const slug = name
+    .toLowerCase()
+    .normalize("NFKD")
+    .replaceAll(/[^a-z0-9]+/gu, "-")
+    .replaceAll(/^-+|-+$/gu, "")
+    .slice(0, 40)
+    .replace(/-+$/u, "");
+  return `learned-${slug.length > 0 ? `${slug}-` : ""}${learnedCapabilitySkillSuffix(capabilityId)}`;
+}
+
+/** The part of a learned Capability skill name that identifies its Capability. */
+export function learnedCapabilitySkillSuffix(capabilityId: string): string {
+  return sha256(capabilityId).slice(0, 6);
+}
 
 export function capabilityRevisionDigest(revision: CapabilityRevision): string {
   return sha256(canonicalJson(revision));
@@ -209,3 +228,4 @@ export * from "./workspace.ts";
 
 export * from "./attachments.ts";
 export * from "./json-schema-signature.ts";
+export * from "./capability-document.ts";

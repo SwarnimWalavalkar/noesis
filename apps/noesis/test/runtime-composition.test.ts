@@ -9,7 +9,7 @@ import {
   frozenTurnPlanDigest,
   type NoesisAgentRuntime,
 } from "@noesis/agent-types";
-import { resolveNoesisConfig } from "@noesis/config";
+import { resolveNoesisConfig, type ResolvedNoesisConfig } from "@noesis/config";
 import {
   createConditionalObject,
   EvidenceRevisionRefSchema,
@@ -22,7 +22,6 @@ import {
 } from "@noesis/domain";
 import { createMcpHostManager, type LoadedMcpConfig, type McpOAuthCredentialStore } from "@noesis/mcp";
 import {
-  applyRoleContextPolicy,
   createPiAgentRoleRunner,
   createPiAgentRuntime,
   createPiSkillLibrary,
@@ -47,182 +46,22 @@ import { createWorkspaceRuntimeInternals } from "../../../packages/workspace/src
 import { createApplicationMcpIntegration } from "../src/mcp-integration.ts";
 import {
   type ApplicationRuntimeCompositionOptions,
-  CAPABILITY_ROUTER_OUTPUT_CONTRACT,
-  capabilityRouterMessages,
   createApplicationRuntimeComposition,
   createModelHistoryRerankPort,
-  waitForReflectionBarrier,
 } from "../src/runtime-composition.ts";
 import { researchLoopControlledResponse } from "./support/research-loop-controlled-response.ts";
 const roots: string[] = [];
-test("capability routing reserves its current-turn and output-contract message slots", () => {
-  const priorConversation = Object.freeze(
-    Array.from({ length: 12 }, (_, index) => [
-      Object.freeze({
-        messageId: `history-user-${String(index).padStart(2, "0")}`,
-        role: "user" as const,
-        content: `User turn ${String(index)}`,
-        createdAt: `2026-08-25T00:${String(index).padStart(2, "0")}:00.000Z`,
-      }),
-      Object.freeze({
-        messageId: `history-assistant-${String(index).padStart(2, "0")}`,
-        role: "assistant" as const,
-        content: `Assistant turn ${String(index)}`,
-        createdAt: `2026-08-25T00:${String(index).padStart(2, "0")}:30.000Z`,
-      }),
-    ]).flat(),
-  );
-  const policy = createRestrictedRoleContextPolicy("capability_router", {
-    policyId: "noesis-capability_router-bounded-v1",
-    maxMessages: 24,
+function scriptedHistoryRerankResponse(request: RoleBackendRequest): {
+  readonly text: string;
+} {
+  const response = researchLoopControlledResponse({
+    systemPrompt: request.systemPrompt,
+    lastUserText: request.prompt,
+    context: { messages: [] },
   });
-  const messages = capabilityRouterMessages(
-    {
-      sessionId: "session-router-bound",
-      turnId: "turn-router-bound",
-      userInput: "Continue",
-      priorConversation,
-      candidates: Object.freeze([
-        Object.freeze({
-          capabilityId: "capability-router-bound",
-          name: "Bounded router fixture",
-          scope: "global",
-          intent: "Exercise a long conversation",
-        }),
-      ]),
-    },
-    policy,
-  );
-  const selectedHistory = messages
-    .filter((message) => message.name === "prior_conversation")
-    .map((message) => z.object({ messageId: z.string() }).parse(JSON.parse(message.content)).messageId);
-
-  expect(messages.length + 1).toBeLessThanOrEqual(policy.maxMessages);
-  expect(() =>
-    applyRoleContextPolicy(
-      {
-        runId: "capability-route-turn-router-bound",
-        role: "capability_router",
-        variant: {
-          variantId: "noesis-capability-router-v1",
-          axis: "role",
-          configurationRefs: Object.freeze([]),
-        },
-        messages: Object.freeze([
-          ...messages,
-          Object.freeze({
-            role: "user" as const,
-            name: "output_contract",
-            content: CAPABILITY_ROUTER_OUTPUT_CONTRACT,
-          }),
-        ]),
-        evidenceRefs: Object.freeze([]),
-        availableTools: Object.freeze([]),
-      },
-      policy,
-    ),
-  ).not.toThrow();
-  expect(selectedHistory).toHaveLength(22);
-  expect(selectedHistory[0]).toBe("history-user-01");
-  expect(selectedHistory.at(-1)).toBe("history-assistant-11");
-});
-test("capability routing bounds one oversized history message without losing its identity", () => {
-  const policy = createRestrictedRoleContextPolicy("capability_router", {
-    policyId: "noesis-capability_router-bounded-v1",
-    maxMessages: 24,
-    maxCharactersPerMessage: 16000,
-    maxTotalCharacters: 64000,
-  });
-  const messages = capabilityRouterMessages(
-    {
-      sessionId: "session-router-large-message",
-      turnId: "turn-router-large-message",
-      userInput: "Continue the current task",
-      priorConversation: Object.freeze([
-        Object.freeze({
-          messageId: "context-checkpoint:large-message",
-          role: "assistant" as const,
-          content: `checkpoint-start ${"x".repeat(50000)} checkpoint-end`,
-          createdAt: "2026-08-25T00:00:00.000Z",
-        }),
-      ]),
-      candidates: Object.freeze([]),
-    },
-    policy,
-  );
-  const checkpoint = messages.find((message) => message.name === "prior_conversation");
-  expect(checkpoint?.content.length).toBeLessThanOrEqual(policy.maxCharactersPerMessage);
-  expect(checkpoint?.content).toContain("context-checkpoint:large-message");
-  expect(checkpoint?.content).toContain("...[bounded for capability routing]...");
-  expect(() =>
-    applyRoleContextPolicy(
-      {
-        runId: "capability-route-turn-router-large-message",
-        role: "capability_router",
-        variant: {
-          variantId: "noesis-capability-router-v1",
-          axis: "role",
-          configurationRefs: Object.freeze([]),
-        },
-        messages: Object.freeze([
-          ...messages,
-          Object.freeze({
-            role: "user" as const,
-            name: "output_contract",
-            content: CAPABILITY_ROUTER_OUTPUT_CONTRACT,
-          }),
-        ]),
-        evidenceRefs: Object.freeze([]),
-        availableTools: Object.freeze([]),
-      },
-      policy,
-    ),
-  ).not.toThrow();
-});
-test("capability routing drops the oldest complete turns to fit its total character budget", () => {
-  const policy = createRestrictedRoleContextPolicy("capability_router", {
-    policyId: "noesis-capability_router-bounded-v1",
-    maxMessages: 24,
-    maxCharactersPerMessage: 16000,
-    maxTotalCharacters: 64000,
-  });
-  const priorConversation = Object.freeze(
-    Array.from({ length: 10 }, (_, index) => [
-      Object.freeze({
-        messageId: `large-user-${String(index)}`,
-        role: "user" as const,
-        content: `User ${String(index)} ${"u".repeat(11000)}`,
-        createdAt: `2026-08-25T00:${String(index).padStart(2, "0")}:00.000Z`,
-      }),
-      Object.freeze({
-        messageId: `large-assistant-${String(index)}`,
-        role: "assistant" as const,
-        content: `Assistant ${String(index)} ${"a".repeat(11000)}`,
-        createdAt: `2026-08-25T00:${String(index).padStart(2, "0")}:30.000Z`,
-      }),
-    ]).flat(),
-  );
-  const messages = capabilityRouterMessages(
-    {
-      sessionId: "session-router-total-bound",
-      turnId: "turn-router-total-bound",
-      userInput: "Continue",
-      priorConversation,
-      candidates: Object.freeze([]),
-    },
-    policy,
-  );
-  const selectedIds = messages
-    .filter((message) => message.name === "prior_conversation")
-    .map((message) => z.object({ messageId: z.string() }).parse(JSON.parse(message.content)).messageId);
-  const totalCharacters =
-    messages.reduce((total, message) => total + message.content.length, 0) +
-    CAPABILITY_ROUTER_OUTPUT_CONTRACT.length;
-  expect(totalCharacters).toBeLessThanOrEqual(policy.maxTotalCharacters);
-  expect(selectedIds[0]?.startsWith("large-user-")).toBe(true);
-  expect(selectedIds.at(-1)).toBe("large-assistant-9");
-  expect(selectedIds).not.toContain("large-user-0");
-});
+  if (typeof response !== "string") throw new Error("Controlled history reranker must return text");
+  return Object.freeze({ text: response });
+}
 function frozenHistoryForRequest(request: AgentRuntimeRequest): NonNullable<AgentRuntimeRequest["history"]> {
   if (!request.frozenTurnPlan) return Object.freeze([...(request.history ?? [])]);
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
@@ -240,17 +79,6 @@ function frozenHistoryForRequest(request: AgentRuntimeRequest): NonNullable<Agen
       Object.freeze({ role, content, createdAt }),
     ),
   ]);
-}
-function scriptedHistoryRerankResponse(request: RoleBackendRequest): {
-  readonly text: string;
-} {
-  const response = researchLoopControlledResponse({
-    systemPrompt: request.systemPrompt,
-    lastUserText: request.prompt,
-    context: { messages: [] },
-  });
-  if (typeof response !== "string") throw new Error("Controlled history reranker must return text");
-  return Object.freeze({ text: response });
 }
 test("model history reranking can select a candidate beyond the first fifty", async () => {
   const promptRevision: FileRevisionRef = Object.freeze({
@@ -305,18 +133,10 @@ test("model history reranking can select a candidate beyond the first fifty", as
     },
   ]);
 });
-test("a reflection barrier read failure cannot fail an already-settled turn", async () => {
-  await expect(
-    waitForReflectionBarrier(
-      {
-        waitForTerminal: async () => {
-          throw new Error("reflection read model unavailable");
-        },
-      },
-      "job-reflection-settled",
-    ),
-  ).resolves.toBeUndefined();
-});
+/** These tests check reflection itself, so they skip the wait for the user's reply. */
+function reflectImmediately(config: ResolvedNoesisConfig): ResolvedNoesisConfig {
+  return { ...config, reflection: { ...config.reflection, idleMinutes: 0 } };
+}
 const recoveryTurnPlan = (sessionId: string, turnId: string): FrozenTurnPlan => {
   const body: Omit<FrozenTurnPlan, "canonicalDigest"> = {
     schemaVersion: 1,
@@ -2498,29 +2318,20 @@ describe("apps/noesis production control-plane composition", () => {
     ]);
     const project = Object.freeze({ projectId: "project-p", root: projectRoot });
     const otherProject = Object.freeze({ projectId: "project-q", root: otherProjectRoot });
-    const config = await resolveNoesisConfig({
-      home,
-      env: Object.freeze({}),
-      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
-    });
+    const config = reflectImmediately(
+      await resolveNoesisConfig({
+        home,
+        env: Object.freeze({}),
+        cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      }),
+    );
     const reflectorContexts: string[] = [];
     let reflectorRuns = 0;
-    let createdCapabilityId: string | undefined;
     const strategy = "Verify the observable project state before reporting completion.";
     const controlled = createControlledPiModels({
       respond: (input) => {
         const { systemPrompt, lastUserText } = input;
         if (systemPrompt.includes("role: history_reranker")) return researchLoopControlledResponse(input);
-        if (systemPrompt.includes("role: capability_router"))
-          return JSON.stringify({
-            selections: createdCapabilityId
-              ? [{ capabilityId: createdCapabilityId, reason: "The verification Capability is relevant." }]
-              : [],
-            reason: createdCapabilityId ? "Selected the relevant Capability." : "No Capability exists yet.",
-            learningAttribution: createdCapabilityId
-              ? { capabilityId: createdCapabilityId, reason: "Primary behavior under observation." }
-              : null,
-          });
         if (!systemPrompt.includes("role: reflector")) return `Controlled completion for: ${lastUserText}`;
         reflectorContexts.push(lastUserText);
         reflectorRuns += 1;
@@ -2539,6 +2350,11 @@ describe("apps/noesis production control-plane composition", () => {
               activationMode: "relevant",
               consequence: "ordinary",
               consequenceDescription: "Only model instructions change.",
+              evidence: {
+                kind: "explicit_request",
+                quote: "The user stated how this work should be done from now on.",
+                wouldOtherwise: "The user would repeat the same correction in later sessions.",
+              },
               evidenceCitationIndexes: [0],
             },
           });
@@ -2568,7 +2384,6 @@ describe("apps/noesis production control-plane composition", () => {
         `Expected the source reflection to create a Capability: ${JSON.stringify(await first.debug.workspace.jobs.list({ limit: 10 }))}`,
       );
     expect(definition.kind).toBeUndefined();
-    createdCapabilityId = definition.capabilityId;
     const active = await first.debug.workspace.capabilities.getBinding(definition.capabilityId);
     expect(active).toMatchObject({
       scope: { kind: "global" },
@@ -2586,7 +2401,34 @@ describe("apps/noesis production control-plane composition", () => {
         (selection) => selection.capabilityId === definition.capabilityId,
       ),
     ).toBe(true);
-    expect(served.frozenTurnPlan?.renderedSystemPrompt).toContain(strategy);
+    // A relevant Capability is offered as a skill, so its instruction stays out of the prompt.
+    expect(
+      served.frozenTurnPlan?.selectedCapabilities.find(
+        (selection) => selection.capabilityId === definition.capabilityId,
+      )?.delivery,
+    ).toBe("on_demand");
+    expect(served.frozenTurnPlan?.renderedSystemPrompt).not.toContain(strategy);
+    // An always-active Capability puts its guidance, not its whole file, into the prompt.
+    const servedBinding = await resumed.debug.workspace.capabilities.getBinding(definition.capabilityId);
+    if (!servedBinding) throw new Error("Expected the served Capability binding");
+    await resumed.manageCapability?.({
+      type: "set-activation-mode",
+      capabilityId: definition.capabilityId,
+      mode: "always",
+      expectedBindingRevision: servedBinding.revisionNumber,
+    });
+    const always = await resumed.debug.runTurn(resumedTrail.trailId, "Report the project state.");
+    expect(always.output).toBe("Controlled completion for: Report the project state.");
+    expect(always.frozenTurnPlan?.renderedSystemPrompt).toContain(strategy);
+    expect(always.frozenTurnPlan?.renderedSystemPrompt).not.toContain("## History");
+    const alwaysBinding = await resumed.debug.workspace.capabilities.getBinding(definition.capabilityId);
+    if (!alwaysBinding) throw new Error("Expected the always-active Capability binding");
+    await resumed.manageCapability?.({
+      type: "set-activation-mode",
+      capabilityId: definition.capabilityId,
+      mode: "relevant",
+      expectedBindingRevision: alwaysBinding.revisionNumber,
+    });
     const next = await resumed.debug.runTurn(resumedTrail.trailId, "Check the prior result and continue.");
     expect(
       next.frozenTurnPlan?.selectedCapabilities.some(
@@ -2606,17 +2448,19 @@ describe("apps/noesis production control-plane composition", () => {
         (selection) => selection.capabilityId === definition.capabilityId,
       ),
     ).toBe(true);
-    expect(isolatedTurn.frozenTurnPlan?.renderedSystemPrompt).toContain(strategy);
+    expect(isolatedTurn.frozenTurnPlan?.renderedSystemPrompt).not.toContain(strategy);
     await isolated.shutdown();
   });
   test("a first-turn correction on a fresh home reflects against the immutable genesis baseline", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-genesis-correction-"));
     roots.push(home);
-    const config = await resolveNoesisConfig({
-      home,
-      env: Object.freeze({}),
-      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
-    });
+    const config = reflectImmediately(
+      await resolveNoesisConfig({
+        home,
+        env: Object.freeze({}),
+        cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      }),
+    );
     let reflectorRuns = 0;
     const controlled = createControlledPiModels({
       respond: (input) => {
@@ -2861,11 +2705,13 @@ describe("apps/noesis production control-plane composition", () => {
   test("bounds shutdown when ambient reflection ignores abort and leaves recovery to its durable lease", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-bounded-shutdown-"));
     roots.push(home);
-    const config = await resolveNoesisConfig({
-      home,
-      env: Object.freeze({}),
-      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
-    });
+    const config = reflectImmediately(
+      await resolveNoesisConfig({
+        home,
+        env: Object.freeze({}),
+        cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      }),
+    );
     const controlled = createControlledPiModels();
     let markReflectionStarted: (() => void) | undefined;
     const reflectionStarted = new Promise<void>((resolve) => {
@@ -2913,7 +2759,7 @@ describe("apps/noesis production control-plane composition", () => {
         }),
       ]);
       expect(outcome).toBe("settled");
-      const jobs = await runtime.debug.workspace.jobs.list({ limit: 10 });
+      const jobs = await runtime.debug.workspace.jobs.list({ kind: "runtime.reflect_capability", limit: 10 });
       expect(jobs).toMatchObject([
         {
           kind: "runtime.reflect_capability",
@@ -2931,11 +2777,13 @@ describe("apps/noesis production control-plane composition", () => {
   test("propagates shutdown cancellation through learning into an active ambient role run", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-cooperative-reflection-shutdown-"));
     roots.push(home);
-    const config = await resolveNoesisConfig({
-      home,
-      env: Object.freeze({}),
-      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
-    });
+    const config = reflectImmediately(
+      await resolveNoesisConfig({
+        home,
+        env: Object.freeze({}),
+        cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      }),
+    );
     const controlled = createControlledPiModels();
     let markReflectionStarted: (() => void) | undefined;
     const reflectionStarted = new Promise<void>((resolve) => {

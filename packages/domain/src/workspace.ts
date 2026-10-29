@@ -154,6 +154,10 @@ export interface WorkspaceReadPort {
     ref: DatabaseRowRef<Table>,
   ) => Promise<Readonly<Record<string, string | number | bigint | Uint8Array | null>> | undefined>;
   readonly readWorkingFile: (workingPath: string) => Promise<Uint8Array | undefined>;
+  /** The newest recorded revision of a working path and who recorded it. */
+  readonly latestWorkingRevision: (
+    workingPath: string,
+  ) => Promise<{ readonly revision: FileRevisionRef; readonly actor: ActorRef } | undefined>;
   readonly readRevision: (ref: FileRevisionRef) => Promise<Uint8Array>;
   readonly readEvidence: <Kind extends EvidenceKind>(ref: EvidenceRevisionRef<Kind>) => Promise<Uint8Array>;
   readonly readArtifact: (ref: ArtifactFileRef, maxBytes?: number) => Promise<Uint8Array>;
@@ -479,6 +483,8 @@ export interface DurableJobStorePort {
     readonly failure: DurableJobFailure;
   }) => Promise<DurableJobRecord>;
   readonly cancel: (jobId: string, now: string) => Promise<DurableJobRecord | undefined>;
+  /** Makes a scheduled job claimable now instead of at its later `notBefore` time. */
+  readonly release: (jobId: string, now: string) => Promise<DurableJobRecord | undefined>;
   readonly retry: (request: {
     readonly jobId: string;
     readonly now: string;

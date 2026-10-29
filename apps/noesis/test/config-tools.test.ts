@@ -116,3 +116,23 @@ test("title model fields fall back to the session route and reasoning to off", a
   });
   expect(changed.titles).toEqual({ provider: "small-provider", model: "small-model", thinkingLevel: "low" });
 });
+
+test("unset reflection fields follow the configured foreground route, not the current session", async () => {
+  const before = await configured();
+  const { reflection, reflectionBefore } = routesAfter(
+    before,
+    { reflection: { thinkingLevel: "minimal" } },
+    session,
+    FILE,
+  );
+  expect(reflectionBefore).toEqual({
+    provider: "stored-provider",
+    model: "stored-model",
+    thinkingLevel: "low",
+  });
+  expect(reflection).toEqual({
+    provider: "stored-provider",
+    model: "stored-model",
+    thinkingLevel: "minimal",
+  });
+});

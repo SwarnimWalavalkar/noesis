@@ -19,14 +19,6 @@ import type {
 
 export * from "./coordinator-contracts.ts";
 export * from "./capability-coordinator.ts";
-export * from "./coordinator.ts";
-export * from "./coordinator-composition.ts";
-export * from "./preflight-policy.ts";
-export * from "./atomic-activation.ts";
-export * from "./protected-activation.ts";
-export * from "./continuous-feedback.ts";
-export * from "./compounding-metrics.ts";
-export * from "./control-plane.ts";
 export * from "./turn-intelligence.ts";
 export * from "./turn-settlement.ts";
 export * from "./transcript.ts";

@@ -21,6 +21,14 @@ export type ContextConfig = Readonly<z.infer<typeof ContextConfigSchema>>;
 /** The model that names a session after its first message. Unset provider and model use the session's own. */
 export const TitlesConfigSchema = AgentConfigSchema.extend({ enabled: z.boolean().optional() });
 export type TitlesConfig = Readonly<z.infer<typeof TitlesConfigSchema>>;
+/**
+ * The model that reflects on each exchange after the user reacts. Unset provider and model use the
+ * foreground route. `idleMinutes` is how long a turn waits for the user's reply before reflection.
+ */
+export const ReflectionConfigSchema = AgentConfigSchema.extend({
+  idleMinutes: z.number().int().min(0).max(1440).optional(),
+});
+export type ReflectionConfig = Readonly<z.infer<typeof ReflectionConfigSchema>>;
 export const NoesisConfigSchema = z.strictObject({
   schemaVersion: z.literal(NOESIS_CONFIG_SCHEMA_VERSION),
   agent: AgentConfigSchema,
@@ -28,6 +36,7 @@ export const NoesisConfigSchema = z.strictObject({
   agents: AgentConfigSchema.optional(),
   context: ContextConfigSchema.optional(),
   titles: TitlesConfigSchema.optional(),
+  reflection: ReflectionConfigSchema.optional(),
 });
 /** Earlier builds accepted these sections but never applied them. Files containing them still load. */
 const StoredNoesisConfigSchema = NoesisConfigSchema.extend({
@@ -65,6 +74,14 @@ export const NoesisConfigPatchSchema = z.strictObject({
       thinkingLevel: ThinkingLevelSchema.nullable().optional(),
     })
     .optional(),
+  reflection: z
+    .strictObject({
+      provider: z.string().min(1).nullable().optional(),
+      model: z.string().min(1).nullable().optional(),
+      thinkingLevel: ThinkingLevelSchema.nullable().optional(),
+      idleMinutes: z.number().int().min(0).max(1440).nullable().optional(),
+    })
+    .optional(),
 });
 export type NoesisConfigPatch = Readonly<z.infer<typeof NoesisConfigPatchSchema>>;
 export type NoesisConfig = Readonly<z.infer<typeof NoesisConfigSchema>>;
@@ -80,6 +97,13 @@ export interface ResolvedTitlesConfig {
   readonly model?: string;
   readonly thinkingLevel: ThinkingLevel;
 }
+/** The exchange reflector. An absent provider or model means the foreground route. */
+export interface ResolvedReflectionConfig {
+  readonly provider?: string;
+  readonly model?: string;
+  readonly thinkingLevel: ThinkingLevel;
+  readonly idleMinutes: number;
+}
 export type ConfigSource = "cli" | "environment" | "config" | "default";
 export type AgentDefaultSource = "configured" | "foreground";
 export interface ResolvedNoesisConfig {
@@ -92,6 +116,7 @@ export interface ResolvedNoesisConfig {
   readonly agentsSources: Readonly<Record<keyof ResolvedAgentConfig, AgentDefaultSource>>;
   readonly context: Required<ContextConfig>;
   readonly titles: ResolvedTitlesConfig;
+  readonly reflection: ResolvedReflectionConfig;
   readonly sources: Readonly<Record<keyof ResolvedAgentConfig, ConfigSource>>;
 }
 export interface ConfigOverrides {
@@ -132,6 +157,11 @@ export const BUILT_IN_TITLES_DEFAULTS = {
   enabled: true,
   thinkingLevel: "off",
 } as const satisfies Pick<ResolvedTitlesConfig, "enabled" | "thinkingLevel">;
+/** Most exchanges teach nothing, so reflection runs with little reasoning unless configured. */
+export const BUILT_IN_REFLECTION_DEFAULTS = {
+  thinkingLevel: "low",
+  idleMinutes: 10,
+} as const satisfies Pick<ResolvedReflectionConfig, "thinkingLevel" | "idleMinutes">;
 export const DEFAULT_NOESIS_CONFIG: NoesisConfig = {
   schemaVersion: NOESIS_CONFIG_SCHEMA_VERSION,
   agent: { ...BUILT_IN_AGENT_DEFAULTS },
@@ -252,6 +282,7 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
   const configuredAgents = loaded.value.config?.agents ?? {};
   const context = loaded.value.config?.context ?? {};
   const titles = loaded.value.config?.titles ?? {};
+  const reflection = loaded.value.config?.reflection ?? {};
   const [provider, providerSource] = pick(
     path,
     "provider",
@@ -294,6 +325,13 @@ export async function resolveNoesisConfig(input: ResolveConfigInput): Promise<Re
     } as const)
       .addOptional(titles.provider !== undefined ? { provider: titles.provider } : undefined)
       .addOptional(titles.model !== undefined ? { model: titles.model } : undefined)
+      .finish(),
+    reflection: createConditionalObject({
+      thinkingLevel: reflection.thinkingLevel ?? BUILT_IN_REFLECTION_DEFAULTS.thinkingLevel,
+      idleMinutes: reflection.idleMinutes ?? BUILT_IN_REFLECTION_DEFAULTS.idleMinutes,
+    } as const)
+      .addOptional(reflection.provider !== undefined ? { provider: reflection.provider } : undefined)
+      .addOptional(reflection.model !== undefined ? { model: reflection.model } : undefined)
       .finish(),
     sources: {
       provider: providerSource,
@@ -445,13 +483,13 @@ export async function updateNoesisConfig(home: string, patch: unknown): Promise<
   }
   const changes = parsed.data;
   if (
-    [changes.agent, changes.agents, changes.context, changes.titles].every(
+    [changes.agent, changes.agents, changes.context, changes.titles, changes.reflection].every(
       (section) => section === undefined || Object.values(section).every((value) => value === undefined),
     )
   )
     throw new NoesisConfigError(
       path,
-      "config update requires at least one agent, agents, context, or titles field",
+      "config update requires at least one agent, agents, context, titles, or reflection field",
     );
   return await withConfigWriter(home, async () => {
     const loaded = await readNoesisConfig(home);
@@ -476,6 +514,12 @@ export async function updateNoesisConfig(home: string, patch: unknown): Promise<
       model: patched(current.titles?.model, changes.titles?.model),
       thinkingLevel: patched(current.titles?.thinkingLevel, changes.titles?.thinkingLevel),
     });
+    const reflection = nonEmpty({
+      provider: patched(current.reflection?.provider, changes.reflection?.provider),
+      model: patched(current.reflection?.model, changes.reflection?.model),
+      thinkingLevel: patched(current.reflection?.thinkingLevel, changes.reflection?.thinkingLevel),
+      idleMinutes: patched(current.reflection?.idleMinutes, changes.reflection?.idleMinutes),
+    });
     // JSON rendering drops fields left undefined by the patch.
     const decoded = decodeConfig(
       path,
@@ -490,6 +534,7 @@ export async function updateNoesisConfig(home: string, patch: unknown): Promise<
         .addOptional(agents ? { agents } : undefined)
         .addOptional(context ? { context } : undefined)
         .addOptional(titles ? { titles } : undefined)
+        .addOptional(reflection ? { reflection } : undefined)
         .finish(),
     );
     if (!decoded.ok) throw decoded.error;

@@ -30,6 +30,8 @@ export interface SettledTurnPresentationRequest {
 }
 export interface SettledTurnPresentation {
   readonly actions: readonly NoesisTuiAction[];
+  /** Learning changes for this turn that were already known when the turn settled. */
+  readonly settledNoticeCount: number;
   readonly pendingReflectionJobId?: string;
   readonly learningFocusId?: string;
   readonly learningActivityFailure?: Readonly<{
@@ -85,6 +87,8 @@ export function startLateLearningNoticeRefresh(
   request: Readonly<{
     trailId: string;
     jobId: string;
+    /** Changes for the same turn already announced, so the late notice can count them. */
+    earlierNotices?: number;
     onNotice: (notice: string, focusId: string, tone: "attention" | "learning") => void;
     onFailure: (cause: unknown) => void;
     onError: (cause: unknown) => void;
@@ -96,7 +100,13 @@ export function startLateLearningNoticeRefresh(
     .then((activity) => {
       if (!activity) return;
       const notice = workingAdjustmentNotice(activity);
-      if (notice) request.onNotice(notice, learningAuditFocusId(activity), learningNoticeTone(activity));
+      const earlier = request.earlierNotices ?? 0;
+      if (notice)
+        request.onNotice(
+          earlier > 0 ? `${notice} · ${String(earlier)} more in /learning` : notice,
+          learningAuditFocusId(activity),
+          learningNoticeTone(activity),
+        );
     }, request.onFailure)
     .catch(request.onError);
 }
@@ -152,10 +162,22 @@ export async function settledTurnPresentation(
       { type: "execution-changed", execution: "idle" },
       { type: "system-message", text: "Turn interrupted." },
     );
-  const focusActivity = learning.activities.find(
-    (activity) => activity.turnId === request.turnId && workingAdjustmentNotice(activity) !== undefined,
+  // A turn's own reflection waits for the user's reply. This turn's message released the
+  // previous turn's reflection, so its result belongs with this turn.
+  const releasedByThisTurn = (activity: TuiLearningActivitySummary): boolean =>
+    activity.reactionTurnId === request.turnId;
+  const notable = learning.activities.filter(
+    (activity) =>
+      (releasedByThisTurn(activity) || activity.turnId === request.turnId) &&
+      workingAdjustmentNotice(activity) !== undefined,
   );
-  const learningNotice = focusActivity ? workingAdjustmentNotice(focusActivity) : undefined;
+  const focusActivity = notable[0];
+  // One notice per turn: the first change, plus how many others /learning holds.
+  const firstNotice = focusActivity ? workingAdjustmentNotice(focusActivity) : undefined;
+  const learningNotice =
+    firstNotice && notable.length > 1
+      ? `${firstNotice} · ${String(notable.length - 1)} more in /learning`
+      : firstNotice;
   if (focusActivity && learningNotice)
     actions.push({
       type: "notification-shown",
@@ -164,7 +186,7 @@ export async function settledTurnPresentation(
     });
   const pendingReflectionJobId = learning.activities.find(
     (activity) =>
-      activity.turnId === request.turnId &&
+      releasedByThisTurn(activity) &&
       activity.stage === "reflection" &&
       (activity.status === "queued" || activity.status === "running"),
   )?.jobId;
@@ -172,6 +194,7 @@ export async function settledTurnPresentation(
   return Object.freeze(
     createConditionalObject({
       actions: Object.freeze(actions),
+      settledNoticeCount: notable.length,
     } as const)
       .addOptional(pendingReflectionJobId ? { pendingReflectionJobId } : undefined)
       .addOptional(focusActivity ? { learningFocusId: learningAuditFocusId(focusActivity) } : undefined)
@@ -200,6 +223,7 @@ export function reconcileSettledTurnPresentation(
         startLateLearningNoticeRefresh(runtime, {
           trailId: request.trailId,
           jobId: presentation.pendingReflectionJobId,
+          earlierNotices: presentation.settledNoticeCount,
           onNotice: (notice, focusId, tone) => {
             if (!host.isTrailCurrent()) return;
             host.dispatch({

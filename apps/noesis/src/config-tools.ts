@@ -1,5 +1,6 @@
 import {
   BUILT_IN_AGENT_DEFAULTS,
+  BUILT_IN_REFLECTION_DEFAULTS,
   BUILT_IN_TITLES_DEFAULTS,
   type AgentConfig,
   NoesisConfigPatchSchema,
@@ -28,6 +29,7 @@ export interface ConfigurationPort {
 const FOREGROUND_ROUTE_TIMING =
   "Applies when Noesis next starts a session without an explicit route, normally the next launch. Switch the current session with /provider, /model, or /reasoning.";
 const NEXT_TURN = "Applies from the next turn.";
+const NEXT_LAUNCH = "Applies when Noesis next starts.";
 const NEXT_SESSION_TITLE =
   "Applies to the next session's first message; existing titles stay. session.update renames the current session.";
 
@@ -99,6 +101,28 @@ const SETTINGS = Object.freeze([
     description: "Reasoning level for the title model. Default off.",
     appliesWhen: NEXT_SESSION_TITLE,
   },
+  {
+    key: "reflection.provider",
+    description:
+      "Provider for the model that reviews each exchange for lasting lessons. null uses the foreground provider.",
+    appliesWhen: NEXT_LAUNCH,
+  },
+  {
+    key: "reflection.model",
+    description: "Model that reviews each exchange for lasting lessons. null uses the foreground model.",
+    appliesWhen: NEXT_LAUNCH,
+  },
+  {
+    key: "reflection.thinkingLevel",
+    description: "Reasoning level for the reflection model. Default low.",
+    appliesWhen: NEXT_LAUNCH,
+  },
+  {
+    key: "reflection.idleMinutes",
+    description:
+      "Minutes a turn waits for the user's reply before Noesis reflects on it without one. The next user message starts reflection at once. Default 10.",
+    appliesWhen: NEXT_LAUNCH,
+  },
 ]);
 
 const AGENT_KEYS = ["provider", "model", "thinkingLevel"] as const;
@@ -120,6 +144,12 @@ const effective = (config: ResolvedNoesisConfig) => ({
     provider: config.titles.provider ?? null,
     model: config.titles.model ?? null,
     thinkingLevel: config.titles.thinkingLevel,
+  },
+  reflection: {
+    provider: config.reflection.provider ?? null,
+    model: config.reflection.model ?? null,
+    thinkingLevel: config.reflection.thinkingLevel,
+    idleMinutes: config.reflection.idleMinutes,
   },
 });
 
@@ -198,7 +228,22 @@ export const routesAfter = (
       BUILT_IN_TITLES_DEFAULTS.thinkingLevel,
     ),
   };
-  return { stored, agent, agents, agentsBefore, titles, titlesBefore };
+  // Unset reflection fields follow the configured foreground route when Noesis next starts.
+  const reflectionBefore: Route = {
+    provider: before.reflection.provider ?? before.agent.provider,
+    model: before.reflection.model ?? before.agent.model,
+    thinkingLevel: before.reflection.thinkingLevel,
+  };
+  const reflection: Route = {
+    provider: patched(patch.reflection?.provider, reflectionBefore.provider, agent.provider),
+    model: patched(patch.reflection?.model, reflectionBefore.model, agent.model),
+    thinkingLevel: patched(
+      patch.reflection?.thinkingLevel,
+      reflectionBefore.thinkingLevel,
+      BUILT_IN_REFLECTION_DEFAULTS.thinkingLevel,
+    ),
+  };
+  return { stored, agent, agents, agentsBefore, titles, titlesBefore, reflection, reflectionBefore };
 };
 
 const providerTarget = z.strictObject({ provider: z.string().min(1) });
@@ -219,6 +264,13 @@ const EffectiveSchema = z.strictObject({
     model: z.string().nullable(),
     thinkingLevel: ThinkingLevelSchema,
   }),
+  /** A null provider or model uses the foreground route. */
+  reflection: z.strictObject({
+    provider: z.string().nullable(),
+    model: z.string().nullable(),
+    thinkingLevel: ThinkingLevelSchema,
+    idleMinutes: z.number(),
+  }),
 });
 const ConfigSourceSchema = z.enum(["cli", "environment", "config", "default"]);
 const AgentDefaultSourceSchema = z.enum(["configured", "foreground"]);
@@ -235,6 +287,7 @@ const AppliesWhenSchema = z.strictObject({
   agents: z.string(),
   context: z.string(),
   titles: z.string(),
+  reflection: z.string(),
 });
 
 const ConfigInspectOutputSchema = z.strictObject({
@@ -325,7 +378,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
 
   /** Rejects routes the model catalog does not offer. Skipped when no catalog is available. */
   const validateRoute = async (
-    section: "agent" | "agents" | "titles",
+    section: "agent" | "agents" | "titles" | "reflection",
     { provider, model, thinkingLevel }: Route,
     signal: AbortSignal,
   ): Promise<void> => {
@@ -384,7 +437,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
       name: "config.update",
       label: "Update Noesis configuration",
       description:
-        "Change Noesis's configuration with one partial patch of agent, agents, context, and titles fields. null clears a field so its default applies; for agents it inherits the foreground route, and for the title provider and model it uses the session's own. Provider and model IDs are checked against providers.list. Returns the previous and new effective values, fields still overridden by command-line or environment settings, and provider sign-in status for routes that need it.",
+        "Change Noesis's configuration with one partial patch of agent, agents, context, titles, and reflection fields. null clears a field so its default applies; for agents it inherits the foreground route, and for the title and reflection provider and model it uses the session's own. Provider and model IDs are checked against providers.list. Returns the previous and new effective values, fields still overridden by command-line or environment settings, and provider sign-in status for routes that need it.",
       inputSchema: NoesisConfigPatchSchema,
       outputSchema: ConfigUpdateOutputSchema,
       effect: () => ({ effect: "write", resource: "config:noesis", estimatedCost: 0 }),
@@ -400,6 +453,8 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
           await validateRoute("agents", routes.agents, context.signal);
         if (!sameRoute(routes.titles, routes.titlesBefore))
           await validateRoute("titles", routes.titles, context.signal);
+        if (!sameRoute(routes.reflection, routes.reflectionBefore))
+          await validateRoute("reflection", routes.reflection, context.signal);
         context.signal.throwIfAborted();
         const after = await port.update(patch);
         const overridden = AGENT_KEYS.filter(
@@ -413,6 +468,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
               patch.agent?.provider !== undefined ? after.agent.provider : undefined,
               patch.agents?.provider !== undefined ? after.agents.provider : undefined,
               typeof patch.titles?.provider === "string" ? patch.titles.provider : undefined,
+              typeof patch.reflection?.provider === "string" ? patch.reflection.provider : undefined,
             ].filter((provider): provider is string => provider !== undefined),
           ),
         ];
@@ -432,6 +488,7 @@ export function createConfigurationTools(port: ConfigurationPort, session: Route
             agents: NEXT_TURN,
             context: NEXT_TURN,
             titles: NEXT_SESSION_TITLE,
+            reflection: NEXT_LAUNCH,
           },
         };
       },

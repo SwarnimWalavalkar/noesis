@@ -11,15 +11,19 @@ import {
   CapabilityGateRequestSchema,
   type CapabilityLifecycleRevision,
   CapabilityLifecycleRevisionSchema,
+  type CapabilityOutcome,
+  type CapabilityTrackRecord,
   CapabilityRevisionSchema,
   type CapabilityScope,
   canonicalJson,
   capabilityRevisionRef,
   type EvidenceRef,
+  EvidenceRefSchema,
   sameCapabilityRevisionRef,
   WorkingAdjustmentSchema,
 } from "@noesis/domain";
 import { parseJson, requiredNumber, requiredString, type WorkspaceDatabase } from "./database.ts";
+import { z } from "zod";
 import type { CapabilityLifecycleStore } from "./types.ts";
 interface CapabilityLifecycleStoreOptions {
   readonly database: WorkspaceDatabase;
@@ -96,14 +100,18 @@ function normalizeLifecycleRevision(value: unknown): CapabilityLifecycleRevision
       } as const)
       .finish(),
   );
-  return Object.freeze({
-    revision,
-    reference: Object.freeze(parsed.reference),
-    summary: parsed.summary,
-    rationale: parsed.rationale,
-    anticipatedEffect: parsed.anticipatedEffect,
-    createdAt: parsed.createdAt,
-  });
+  return Object.freeze(
+    createConditionalObject({
+      revision,
+      reference: Object.freeze(parsed.reference),
+      summary: parsed.summary,
+      rationale: parsed.rationale,
+      anticipatedEffect: parsed.anticipatedEffect,
+    } as const)
+      .addOptional(parsed.evidence ? { evidence: Object.freeze({ ...parsed.evidence }) } : undefined)
+      .add({ createdAt: parsed.createdAt } as const)
+      .finish(),
+  );
 }
 function normalizeGate(value: unknown): CapabilityGateRequest {
   const parsed = CapabilityGateRequestSchema.parse(value);
@@ -778,6 +786,15 @@ export function createCapabilityLifecycleStore(
         throw new Error("A capability revision must succeed the current bound revision");
       insertRevision(revision);
       insertFeedback(feedback);
+      if (request.definition) {
+        const definition = CapabilityDefinitionSchema.parse(request.definition);
+        if (definition.capabilityId !== revision.reference.capabilityId)
+          throw new Error("Capability definition and revision identities do not match");
+        db.prepare("UPDATE capabilities SET definition_json = ? WHERE capability_id = ?").run(
+          canonicalJson(definition),
+          definition.capabilityId,
+        );
+      }
       return updateBindingRow({
         capabilityId: revision.reference.capabilityId,
         expectedRevisionNumber: request.expectedBindingRevision,
@@ -1000,7 +1017,119 @@ export function createCapabilityLifecycleStore(
       db.prepare("DELETE FROM active_project_adjustments").run();
       return true;
     });
+  const OutcomeResultSchema = z.enum(["helped", "hurt", "unclear"]);
+  const decodeOutcome = (row: DatabaseRow): CapabilityOutcome =>
+    Object.freeze({
+      outcomeId: requiredString(row, "outcome_id"),
+      capabilityId: requiredString(row, "capability_id"),
+      capabilityRevisionId: requiredString(row, "capability_revision_id"),
+      sessionId: requiredString(row, "session_id"),
+      turnId: requiredString(row, "turn_id"),
+      result: OutcomeResultSchema.parse(requiredString(row, "result")),
+      reason: requiredString(row, "reason"),
+      evidenceRefs: Object.freeze(
+        z.array(EvidenceRefSchema).parse(parseJson(requiredString(row, "evidence_json"))),
+      ),
+      createdAt: requiredString(row, "created_at"),
+    });
+  const recordOutcomes: CapabilityLifecycleStore["recordOutcomes"] = async (outcomes) => {
+    for (const outcome of outcomes)
+      for (const reference of outcome.evidenceRefs) options.assertStoredReference(reference);
+    return options.database.transaction(() =>
+      Object.freeze(
+        outcomes.map((outcome) => {
+          const result = OutcomeResultSchema.parse(outcome.result);
+          // One judgment per revision and turn. A repeated reflection keeps the first judgment.
+          db.prepare(`INSERT INTO capability_outcomes(
+              outcome_id, capability_id, capability_revision_id, session_id, turn_id,
+              result, reason, evidence_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(capability_revision_id, turn_id) DO NOTHING`).run(
+            outcome.outcomeId,
+            outcome.capabilityId,
+            outcome.capabilityRevisionId,
+            outcome.sessionId,
+            outcome.turnId,
+            result,
+            outcome.reason,
+            canonicalJson(outcome.evidenceRefs),
+            outcome.createdAt,
+          );
+          const stored = db
+            .prepare("SELECT * FROM capability_outcomes WHERE capability_revision_id = ? AND turn_id = ?")
+            .get(outcome.capabilityRevisionId, outcome.turnId);
+          if (!stored) throw new Error(`Capability outcome for ${outcome.turnId} disappeared`);
+          return decodeOutcome(stored);
+        }),
+      ),
+    );
+  };
+  const trackRecords: CapabilityLifecycleStore["trackRecords"] = async (capabilityRevisionIds) => {
+    const records = new Map<string, CapabilityTrackRecord>();
+    for (const capabilityRevisionId of new Set(capabilityRevisionIds)) {
+      const counts = { helped: 0, hurt: 0, unclear: 0 };
+      for (const row of db
+        .prepare(
+          "SELECT result, COUNT(*) AS count FROM capability_outcomes WHERE capability_revision_id = ? GROUP BY result",
+        )
+        .all(capabilityRevisionId))
+        counts[OutcomeResultSchema.parse(requiredString(row, "result"))] = requiredNumber(row, "count");
+      records.set(capabilityRevisionId, Object.freeze({ capabilityRevisionId, ...counts }));
+    }
+    return records;
+  };
+  const outcomeCounts: CapabilityLifecycleStore["outcomeCounts"] = async (capabilityId, since) => {
+    const counts = { helped: 0, hurt: 0, unclear: 0 };
+    for (const row of db
+      .prepare(
+        "SELECT result, COUNT(*) AS count FROM capability_outcomes WHERE capability_id = ? AND created_at >= ? GROUP BY result",
+      )
+      .all(capabilityId, since ?? ""))
+      counts[OutcomeResultSchema.parse(requiredString(row, "result"))] = requiredNumber(row, "count");
+    const first = db
+      .prepare("SELECT MIN(created_at) AS first_at FROM capability_outcomes WHERE capability_id = ?")
+      .get(capabilityId);
+    const firstAt = first ? first["first_at"] : undefined;
+    return Object.freeze(
+      createConditionalObject(counts)
+        .addOptional(typeof firstAt === "string" ? { firstAt } : undefined)
+        .finish(),
+    );
+  };
+  const listOutcomes: CapabilityLifecycleStore["listOutcomes"] = async (capabilityId, limit) => {
+    assertLimit(limit);
+    return Object.freeze(
+      db
+        .prepare(
+          "SELECT * FROM capability_outcomes WHERE capability_id = ? ORDER BY created_at DESC, outcome_id DESC LIMIT ?",
+        )
+        .all(capabilityId, limit)
+        .map(decodeOutcome),
+    );
+  };
+  const updateDefinition: CapabilityLifecycleStore["updateDefinition"] = async (input) => {
+    const definition = CapabilityDefinitionSchema.parse(input);
+    options.database.transaction(() => {
+      const existing = decodeDefinition(
+        db
+          .prepare("SELECT definition_json FROM capabilities WHERE capability_id = ?")
+          .get(definition.capabilityId),
+      );
+      if (!existing) throw new Error(`Unknown capability ${definition.capabilityId}`);
+      if (existing.createdAt !== definition.createdAt)
+        throw new Error("A Capability's creation time cannot change");
+      db.prepare("UPDATE capabilities SET definition_json = ? WHERE capability_id = ?").run(
+        canonicalJson(definition),
+        definition.capabilityId,
+      );
+    });
+  };
   return Object.freeze({
+    outcomeCounts,
+    updateDefinition,
+    recordOutcomes,
+    trackRecords,
+    listOutcomes,
     create,
     getDefinition,
     listDefinitions,

@@ -127,8 +127,10 @@ describe("turn settlement", () => {
     });
     const observedSelections: (readonly CapabilityRevisionRef[])[] = [];
     const reflectionFailures: string[] = [];
+    const releasedSessions: string[] = [];
     const observedLearningTurns: {
       readonly outcome: string;
+      readonly cause: string | undefined;
       readonly toolFailureCount: number;
       readonly evidenceTables: readonly string[];
     }[] = [];
@@ -136,10 +138,14 @@ describe("turn settlement", () => {
       workspace,
       project: Object.freeze({ projectId: "project_test", root: "/workspace/noesis" }),
       coordinator: Object.freeze({
+        releaseSession: async (sessionId: string) => {
+          releasedSessions.push(sessionId);
+        },
         observeSettledTurn: async (input) => {
           observedSelections.push(input.selectedCapabilities);
           observedLearningTurns.push({
             outcome: input.turn.outcome,
+            cause: input.turn.cause,
             toolFailureCount: input.turn.telemetry.toolFailureCount,
             evidenceTables: input.turn.evidenceRefs.map((reference) =>
               reference.kind === "database_row" ? reference.table : reference.kind,
@@ -238,6 +244,7 @@ describe("turn settlement", () => {
     expect(observedLearningTurns).toEqual([
       {
         outcome: "unknown",
+        cause: "completed",
         toolFailureCount: 1,
         evidenceTables: ["messages", "messages", "tool_calls", "tool_calls"],
       },
@@ -275,13 +282,31 @@ describe("turn settlement", () => {
         }),
       }),
     ).resolves.toMatchObject({ result: { outcome: "aborted", output: "partial" } });
-    expect(observedLearningTurns.at(-1)?.outcome).toBe("failed");
+    expect(observedLearningTurns.at(-1)).toMatchObject({ outcome: "failed", cause: "user_aborted" });
     const outcomes = await workspace.operational.outcomes.listForSession("session-1");
     expect(outcomes).toHaveLength(2);
     expect(outcomes.find((outcome) => outcome.turnId === "turn-aborted")).toMatchObject({
       status: "failed",
-      metadata: { aborted: true, replayEligible: false },
+      metadata: { cause: "user_aborted", aborted: true, replayEligible: false },
     });
+    const providerFailurePlan = turnPlan("session-1", "turn-provider-failure", []);
+    seedForegroundTurn(workspace, "session-1", "turn-provider-failure", providerFailurePlan.planId);
+    await expect(
+      settlement.run({
+        sessionId: "session-1",
+        turnId: "turn-provider-failure",
+        input: "hey hey",
+        occurredAt: "2026-07-25T00:01:30.000Z",
+        plan: providerFailurePlan,
+        execute: async () => await Promise.reject(new Error("400 MissingSessionID")),
+      }),
+    ).rejects.toThrow("400 MissingSessionID");
+    expect(await workspace.operational.outcomes.get("turn-provider-failure:outcome")).toMatchObject({
+      status: "failed",
+      metadata: { cause: "failed_before_output" },
+    });
+    // A turn that failed before the model produced anything is never reflected on.
+    expect(observedLearningTurns).toHaveLength(2);
     const correctedPlan = turnPlan("session-1", "turn-corrected", [
       { capabilityId: "general", name: "General", scope: "general" },
     ]);
@@ -305,6 +330,8 @@ describe("turn settlement", () => {
       result: { outcome: "completed", output: "Corrected response with an exact primary source." },
     });
     expect(reflectionFailures).toHaveLength(3);
+    // Every user message releases the session's held reflections, since it reacts to the last turn.
+    expect(releasedSessions).toEqual(["session-1", "session-1", "session-1", "session-1"]);
     expect(observedLearningTurns.at(-1)?.outcome).toBe("unknown");
     await workspace.operational.outcomes.classify({
       outcomeId: "turn-corrected:outcome",

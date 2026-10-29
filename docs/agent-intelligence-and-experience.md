@@ -23,7 +23,7 @@ The built-in `noesis` skill holds the operational guidance for inspecting and de
 
 A Program effect pins the same immutable definition revision used by the ordinary runner and records its script or workflow mode. Capability storage never copies the Program into a second format. The model creates and revises project Programs through the foreground `execute` path. Ambient reflection may attach an existing saved Program to a Capability.
 
-The semantic router selects global `relevant` Capabilities for matching requests. An `always` Capability enters every eligible turn.
+An `always` Capability puts its instructions in the system prompt of every eligible turn. Every eligible `relevant` Capability is listed with the other skills by name and "when" text. Its instructions form one learned skill that the foreground model loads with `skills.load` when the Capability applies. Planning makes no separate routing model call, and the turn trace records which Capabilities the model loaded.
 
 ## Instruction levels
 
@@ -81,7 +81,9 @@ Use a capable model when a decision depends on meaning. Do not use keywords or r
 
 Code may record facts such as a failed tool, cancellation, latency, or direct tool call. It must not treat words such as "always," "never," or "actually" as proof of meaning.
 
-After every admitted foreground turn settles, the reflector receives its trace, runtime facts, active exact Capability references, and a small set of related cross-session evidence. It chooses one outcome:
+Reflection reviews an exchange: a settled turn and the user's reaction to it. The reaction is the user's next message in the session. When the user does not reply, reflection runs after the session has been idle for `reflection.idleMinutes`, 10 by default. Settlement records how the turn ended as a runtime fact. A turn that failed before the model produced any output is not reflected on.
+
+The reflector receives the turn's trace, its reaction, runtime facts, the Capabilities the turn used with their track records, the other current Capabilities, and a small set of related cross-session evidence. It must name the evidence for any new lesson: an explicit request, a user correction, the same need in several sessions, or a method that worked and was accepted. It also judges each Capability the turn used as helped, hurt, or unclear. Noesis pauses a revision on its own after two hurt results and no helped result. The reflector chooses one outcome:
 
 - `no_change`
 - create or revise one Capability
@@ -92,7 +94,7 @@ A turn with many tool calls receives a structural projection before reflection. 
 
 The foreground agent is an equally capable semantic author. When the task or user calls for deliberate refinement, it may inspect all current Capability definitions, bindings, revisions, feedback, and exact effect material through progressively disclosed catalog tools. It gathers evidence through ordinary work and submits one complete structured decision. The host adds only the non-forgeable admitted-turn envelope and evidence references; it does not call a second model to revise the decision.
 
-Ambient reflection and foreground authoring share one protected Capability publisher. That publisher records exact instruction and skill bytes, resolves exact saved-program revisions, validates scope and consequence, compares the expected binding revision, preserves predecessor lineage, and either activates or creates the same small protected gate. A foreground publication changes later frozen turn plans, never the already-admitted current plan. Subagents may inspect and advise but cannot publish.
+Ambient reflection and foreground authoring share one protected Capability publisher. That publisher records the Capability's file as an exact revision, resolves exact saved-program revisions, validates scope and consequence, compares the expected binding revision, preserves predecessor lineage, and either activates or creates the same small protected gate. A foreground publication changes later frozen turn plans, never the already-admitted current plan. Subagents may inspect and advise but cannot publish.
 
 Reflection also receives an exact foreground Capability surface. It distinguishes material injected into the initial system prompt, effect skills exposed only as name-and-description metadata, completed `skills.load` calls that later exposed a full frozen body, and exact saved-program adapters. Complete predecessor materials remain available separately for revision authoring; their presence in reflector context is not evidence that the foreground model saw them.
 
@@ -102,9 +104,11 @@ Credential export, recovery or audit control, and irreversible external actions 
 
 A Capability states when an ability should help, why the evidence supports it, what behavior changes, and its anticipated effect. Its revision contains one or more exact effects rather than a mechanism label.
 
-New Capabilities are globally eligible and relevant by default. Semantic routing decides when they apply. The user may narrow the scope or make one always active.
+New Capabilities are globally eligible and relevant by default. The foreground model sees each one's name and "when" text with the other skills and loads it when it applies. The user may narrow the scope or make one always active.
 
-Direct deliberate learning and ambient reflection both publish versioned Capabilities through the same protected publisher. A lasting user fact, preference, or criterion that should alter future behavior is represented as a Capability with an exact Instruction or Skill effect, not as a second model-facing memory primitive. Historical user criteria remain readable evaluation and audit data.
+Direct deliberate learning and ambient reflection both publish versioned Capabilities through the same protected publisher. A lasting user fact, preference, or criterion that should alter future behavior is represented as a Capability whose file holds its guidance, not as a second model-facing memory primitive.
+
+A session review runs once a session has been quiet for 30 minutes after its last turn. It receives a prepared packet: the session's requests, matching requests from earlier sessions, and every current Capability with its track record. It has no tools. It may create, revise, pause, or rescope at most three Capabilities through the same publisher, and it cannot author Programs. Historical user criteria remain readable evaluation and audit data.
 
 Inside `execute`, `capabilities.inspect` progressively exposes the Capability list, one complete lifecycle, or one exact effect material. `capabilities.refine` accepts the complete decision schema and returns the authoritative publication result. These schemas come from the frozen Tool Catalog and remain discoverable through `noesis.describe`; they are not handwritten into the system prompt or skill body. Completed normal-sensitivity calls earlier in the same foreground execution, plus the current user message, form the bounded publication evidence set.
 
@@ -112,10 +116,12 @@ Existing experiment and preflight records remain readable historical evidence. N
 
 ## Capability records
 
-The current Capability lifecycle has four durable records:
+The current Capability lifecycle has these durable records and files:
 
 - `CapabilityDefinition` owns the stable ID, name, description, and applicability.
-- `CapabilityLifecycleRevision` owns one immutable revision, its exact effects, its rationale, and its anticipated effect.
+- `CapabilityLifecycleRevision` owns one immutable revision, its exact effects, its rationale, its anticipated effect, and the evidence claim behind it.
+- Each Capability has one Markdown file under `definitions/capabilities/`. Its frontmatter holds `name`, `when`, and `description`, followed by the guidance and by notes that Noesis writes from the Capability's history. Every revision pins an immutable snapshot of the file as its instruction effect, and the model receives only the guidance. The user can edit the working file directly. Before the next turn, Noesis records the edit as a new revision through the publisher, or leaves an unreadable edit in place and reports it in `/learning`. A restore rewrites the working file to the restored revision.
+- `CapabilityOutcome` records whether a revision helped or hurt in a turn that used it.
 - `CapabilityBinding` is the sole authority for the active revision, global, project, or session scope, relevant or always mode, and active or paused state.
 - `CapabilityFeedback` records a positive result, correction, regression, scope change, activation change, or restore request against one exact revision.
 

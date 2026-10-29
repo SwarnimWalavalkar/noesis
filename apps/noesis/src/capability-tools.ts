@@ -14,7 +14,10 @@ import {
   ProjectRefSchema,
   type ProjectRef,
 } from "@noesis/domain";
+import { join } from "node:path";
 import {
+  capabilityDocumentRevision,
+  capabilityWorkingDocumentPath,
   CapabilityDecisionSchema,
   CapabilityPublicationResultSchema,
   type CapabilityProgramLibrary,
@@ -179,6 +182,24 @@ const CapabilityInspectOutputSchema = z.discriminatedUnion("view", [
         revisionCount: z.number().int().nonnegative(),
         feedbackCount: z.number().int().nonnegative(),
         gateCount: z.number().int().nonnegative(),
+        /** The editable Markdown file for this Capability. Direct edits apply from the next turn. */
+        file: z.string().nullable(),
+        /** How the current revision did in turns that used it, as judged by reflection. */
+        trackRecord: z.strictObject({
+          helped: z.number().int().nonnegative(),
+          hurt: z.number().int().nonnegative(),
+          unclear: z.number().int().nonnegative(),
+        }),
+        recentOutcomes: z.array(
+          z.strictObject({
+            capabilityRevisionId: z.string(),
+            turnId: z.string(),
+            result: z.enum(["helped", "hurt", "unclear"]),
+            reason: z.string(),
+            createdAt: z.string(),
+            evidenceRefs: z.array(EvidenceRefSchema),
+          }),
+        ),
       })
       .nullable(),
   }),
@@ -222,6 +243,8 @@ const CapabilityInspectOutputSchema = z.discriminatedUnion("view", [
 
 export interface CreateCapabilityToolsOptions {
   readonly workspace: NoesisWorkspaceStore;
+  /** The Noesis home, so inspection can name each Capability's editable file. */
+  readonly home?: string;
   readonly project: ProjectRef;
   readonly plan: FrozenTurnPlan;
   readonly publisher: CapabilityPublisher;
@@ -318,6 +341,12 @@ function revisionSummary(revision: CapabilityLifecycleRevision | undefined) {
 
 /** The complete progressively disclosed Capability surface for one frozen foreground turn. */
 export function createCapabilityTools(options: CreateCapabilityToolsOptions): readonly ToolDefinition[] {
+  const capabilityFile = (revision: CapabilityLifecycleRevision | undefined): string | null => {
+    const document = revision ? capabilityDocumentRevision(revision) : undefined;
+    if (!document) return null;
+    const path = capabilityWorkingDocumentPath(document);
+    return options.home ? join(options.home, path) : path;
+  };
   const inspect = defineTool({
     name: "capabilities.inspect",
     label: "Inspect Capabilities",
@@ -375,6 +404,11 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
         const currentRevision = binding
           ? await options.workspace.capabilities.getRevision(binding.revision)
           : undefined;
+        const [records, recentOutcomes] = await Promise.all([
+          options.workspace.capabilities.trackRecords(binding ? [binding.revision.capabilityRevisionId] : []),
+          options.workspace.capabilities.listOutcomes(input.capabilityId, 10),
+        ]);
+        const record = binding ? records.get(binding.revision.capabilityRevisionId) : undefined;
         return CapabilityInspectOutputSchema.parse({
           view: "detail",
           capability: {
@@ -384,6 +418,20 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
             revisionCount: counts.revisions,
             feedbackCount: counts.feedback,
             gateCount: counts.gates,
+            file: capabilityFile(currentRevision),
+            trackRecord: {
+              helped: record?.helped ?? 0,
+              hurt: record?.hurt ?? 0,
+              unclear: record?.unclear ?? 0,
+            },
+            recentOutcomes: recentOutcomes.map((outcome) => ({
+              capabilityRevisionId: outcome.capabilityRevisionId,
+              turnId: outcome.turnId,
+              result: outcome.result,
+              reason: outcome.reason,
+              createdAt: outcome.createdAt,
+              evidenceRefs: [...outcome.evidenceRefs],
+            })),
           },
         });
       }

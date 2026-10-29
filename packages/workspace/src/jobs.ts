@@ -453,6 +453,16 @@ export function createDurableJobStore(
       }
       return read(jobId);
     });
+  const release = async (jobId: string, now: string): Promise<DurableJobRecord | undefined> =>
+    database.transaction(() => {
+      const current = read(jobId);
+      if (!current) return undefined;
+      if (current.status === "scheduled" && current.notBefore > now) {
+        db.prepare("UPDATE jobs SET not_before = ?, updated_at = ? WHERE job_id = ?").run(now, now, jobId);
+        recordActivity(actor, "coordinator.job_released", "job", jobId);
+      }
+      return read(jobId);
+    });
   const retry = async (request: {
     readonly jobId: string;
     readonly now: string;
@@ -499,6 +509,7 @@ export function createDurableJobStore(
     complete,
     fail,
     cancel,
+    release,
     retry,
   });
 }

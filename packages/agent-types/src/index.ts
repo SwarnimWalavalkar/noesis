@@ -31,6 +31,7 @@ export type AgentRole =
   | "history_reranker"
   | "signal_interpreter"
   | "reflector"
+  | "session_reviewer"
   | "revision_author"
   | "case_generator"
   | "trial"
@@ -470,6 +471,12 @@ export interface FrozenCapabilitySelection {
   readonly applicability: string;
   readonly scope: string;
   readonly selectionReason: string;
+  /**
+   * How the turn delivers this Capability. `prompt` puts its instructions in the system prompt.
+   * `on_demand` lists it as a skill that the model loads when relevant. Older plans omit it and
+   * used `prompt`.
+   */
+  readonly delivery?: "prompt" | "on_demand" | undefined;
   readonly revision: CapabilityRevisionRef;
   readonly baseline: FrozenBaselineRef;
   /** Present on effects-first revisions. Legacy frozen plans omit it. */
@@ -694,6 +701,7 @@ const FrozenCapabilitySelectionSchema = z.strictObject({
   applicability: z.string().min(1),
   scope: z.string().min(1),
   selectionReason: z.string().min(1),
+  delivery: z.enum(["prompt", "on_demand"]).optional(),
   revision: CapabilityRevisionRefSchema,
   baseline: FrozenBaselineRefSchema,
   effects: z.array(FrozenCapabilityEffectSchema).min(1).max(32).optional(),

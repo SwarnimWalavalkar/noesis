@@ -1,5 +1,5 @@
 import type { TrailState } from "@noesis/runtime";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   learningAuditFocusId,
   learningDiagnosticNotice,
@@ -151,11 +151,17 @@ describe("working-adjustment notice presentation", () => {
             createdAt: "2026-08-01T00:00:00.000Z",
             updatedAt: "2026-08-01T00:00:00.000Z",
           }),
-        listLearningActivity: async () => Object.freeze([activity("running")]),
+        listLearningActivity: async () =>
+          Object.freeze([
+            // This turn's own reflection waits for the user's reply, so the TUI does not wait on it.
+            Object.freeze({ ...activity("queued"), jobId: "job-held", turnId: "turn-2" }),
+            // This turn's message released the previous turn's reflection.
+            Object.freeze({ ...activity("running"), turnId: "turn-1", reactionTurnId: "turn-2" }),
+          ]),
       },
       {
         trailId: "trail-1",
-        turnId: "turn-1",
+        turnId: "turn-2",
         outcome: "completed",
         contextUsage: undefined,
       },
@@ -245,6 +251,60 @@ describe("working-adjustment notice presentation", () => {
     }),
   ])("keeps unstringifiable learning failures nonfatal", (failure) => {
     expect(learningDiagnosticNotice(failure)).toBe("learning · unavailable");
+  });
+
+  test("names how many more learning changes /learning holds for one turn", async () => {
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const presentation = await settledTurnPresentation(
+      {
+        getTranscript: async () => Object.freeze([]),
+        getTrail: async () =>
+          Object.freeze({
+            trailId: "trail-1",
+            title: "Trail 1",
+            paneId: "pane-1",
+            runtime: "test",
+            provider: "test",
+            model: "test",
+            thinkingLevel: "high",
+            status: "idle" as const,
+            turns: Object.freeze([]),
+            capabilityVersions: Object.freeze({}),
+            createdAt: "2026-08-01T00:00:00.000Z",
+            updatedAt: "2026-08-01T00:00:00.000Z",
+          }),
+        listLearningActivity: async () =>
+          Object.freeze([
+            Object.freeze({ ...activity("activated"), turnId: "turn-1", reactionTurnId: "turn-2" }),
+            Object.freeze({ ...activity("paused"), jobId: "job-review", reactionTurnId: "turn-2" }),
+          ]),
+      },
+      { trailId: "trail-1", turnId: "turn-2", outcome: "completed", contextUsage: undefined },
+    );
+    expect(presentation.actions).toContainEqual(
+      expect.objectContaining({
+        type: "notification-shown",
+        text: "Capability active · activated summary · 1 more in /learning",
+      }),
+    );
+  });
+
+  test("counts changes already announced when a late learning result arrives", async () => {
+    const notices: string[] = [];
+    startLateLearningNoticeRefresh(
+      { waitForLearningActivity: async () => activity("revised") },
+      {
+        trailId: "trail-1",
+        jobId: "job-revised",
+        earlierNotices: 1,
+        onNotice: (notice) => notices.push(notice),
+        onFailure: () => undefined,
+        onError: () => undefined,
+      },
+    );
+    await vi.waitFor(() =>
+      expect(notices).toEqual(["Capability updated · revised summary · 1 more in /learning"]),
+    );
   });
 
   test("reports errors thrown while applying a fulfilled settled presentation", async () => {

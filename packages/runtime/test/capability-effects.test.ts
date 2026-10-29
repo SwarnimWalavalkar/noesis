@@ -180,14 +180,6 @@ describe("effects-first Capability turn planning", () => {
       workspace,
       protectedRuntime,
       capabilities: resolver,
-      capabilityRouter: Object.freeze({
-        route: async () =>
-          Object.freeze({
-            strategyId: "semantic-capability-router-v1",
-            reason: "No relevance candidates remain after always-active selection.",
-            selections: Object.freeze([]),
-          }),
-      }),
       project,
       now: () => "2026-08-21T00:01:00.000Z",
     });
@@ -216,5 +208,62 @@ describe("effects-first Capability turn planning", () => {
         },
       },
     ]);
+
+    // Always-active guidance shares one allowance; a Capability past it is listed on demand instead.
+    const longGuidance = `LONG ALWAYS GUIDANCE ${"x".repeat(7000)}`;
+    const longInstruction = await publish("long-instruction", "capabilities/effects/long.md", longGuidance);
+    const long = makeRevision(
+      "long-always",
+      "long-always-r1",
+      [],
+      [Object.freeze({ kind: "instruction" as const, material: longInstruction })],
+    );
+    const longRef = capabilityRevisionRef(long);
+    revisions.set(longRef.capabilityRevisionId, long);
+    capabilities.set("long-always", {
+      capabilityId: "long-always",
+      name: "Long always",
+      scope: "general",
+      intent: "Every turn.",
+    });
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    await workspace.capabilities.create({
+      definition: Object.freeze({
+        capabilityId: "long-always",
+        name: "Long always",
+        description: "Too long to enter every prompt.",
+        applicability: "Every turn.",
+        createdAt: "2026-08-21T00:00:00.000Z",
+      }),
+      revision: Object.freeze({
+        revision: long,
+        reference: longRef,
+        summary: "Long guidance.",
+        rationale: "Fixture.",
+        anticipatedEffect: "None.",
+        createdAt: "2026-08-21T00:00:00.000Z",
+      }),
+      binding: Object.freeze({
+        capabilityId: "long-always",
+        revision: longRef,
+        scope: Object.freeze({ kind: "global" as const }),
+        activationMode: "always",
+        state: "active",
+      }),
+    });
+    const bounded = await planner.planAndAdmit({
+      sessionId: "session-effects",
+      turnId: "turn-effects-bounded",
+      userInput: "Synthesize these sources again.",
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off",
+      baseSystemPrompt: "BASE",
+    });
+    expect(bounded.renderedSystemPrompt).toContain("Keep answers evidence-dense.");
+    expect(bounded.renderedSystemPrompt).not.toContain("LONG ALWAYS GUIDANCE");
+    expect(bounded.selectedCapabilities.find((item) => item.capabilityId === "long-always")?.delivery).toBe(
+      "on_demand",
+    );
   });
 });

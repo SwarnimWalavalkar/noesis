@@ -290,12 +290,20 @@ export const CapabilityDefinitionSchema = z.strictObject({
   createdAt: z.string().datetime(),
 });
 
+/** What kind of evidence supports a learned Capability, stated by the model that authored it. */
+export const CapabilityEvidenceClaimSchema = z.strictObject({
+  kind: z.enum(["explicit_request", "user_correction", "repeated_across_sessions", "verified_method"]),
+  quote: z.string().trim().min(1).max(1_000),
+  wouldOtherwise: z.string().trim().min(1).max(1_000),
+});
+
 export const CapabilityLifecycleRevisionSchema = z.strictObject({
   revision: CapabilityRevisionSchema,
   reference: CapabilityRevisionRefSchema,
   summary: z.string().min(1),
   rationale: z.string().min(1),
   anticipatedEffect: z.string().min(1),
+  evidence: CapabilityEvidenceClaimSchema.optional(),
   createdAt: z.string().datetime(),
 });
 

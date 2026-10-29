@@ -12,12 +12,19 @@ import {
   type CapabilityFeedback,
   type CapabilityLifecycleRevision,
   type CapabilityScope,
+  CapabilityEvidenceClaimSchema,
+  capabilityEvidenceLabel,
   canonicalJson,
   createConditionalObject,
   createId,
   type EvidenceRef,
   type FileRevisionRef,
   type ProjectRef,
+  capabilityGuidance,
+  learnedCapabilitySkillName,
+  parseCapabilityDocument,
+  renderCapabilityDocument,
+  sha256,
 } from "@noesis/domain";
 import type { CapabilityLifecycleStore, NoesisWorkspaceStore } from "@noesis/workspace";
 import { z } from "zod";
@@ -63,6 +70,7 @@ export const CapabilityProposalSchema = z
     activationMode: z.enum(["relevant", "always"]).optional(),
     consequence: CapabilityConsequenceSchema,
     consequenceDescription: z.string().trim().min(1).max(2_048),
+    evidence: CapabilityEvidenceClaimSchema.optional(),
   })
   .superRefine((proposal, context) => {
     if (proposal.effects.filter((effect) => effect.kind === "program").length <= 1) return;
@@ -165,6 +173,11 @@ export interface CapabilityPublicationContext {
   readonly interpretation?: string;
   /** Foreground turns may pin program effects to the exact saved definitions visible at admission. */
   readonly programResolver?: Pick<CapabilityProgramLibrary, "resolve">;
+  /**
+   * Set only by the startup move into Capability files. It keeps an existing long always-active
+   * Capability as it was; the per-turn allowance still bounds what reaches the prompt.
+   */
+  readonly preservingExistingGuidance?: true;
 }
 
 export interface CapabilityPublisher {
@@ -173,6 +186,34 @@ export interface CapabilityPublisher {
     context: CapabilityPublicationContext,
     signal: AbortSignal,
   ) => Promise<CapabilityPublicationResult>;
+  /** Rewrites a Capability's working file to match its current revision after a restore or approval. */
+  /** Rejects an always-active mode when the current guidance is too long for every prompt. */
+  readonly assertCurrentGuidanceFitsAlways: (capabilityId: string) => Promise<void>;
+  /** Rejects approving a pending always-active revision whose guidance is too long. */
+  readonly assertGateFitsAlways: (gateRequestId: string) => Promise<void>;
+  readonly syncWorkingDocument: (
+    capabilityId: string,
+    context?: Pick<CapabilityPublicationContext, "project" | "sessionId">,
+    options?: {
+      /** The user restored or approved this revision, so it replaces unapplied file edits. */
+      readonly userChoseRevision?: boolean;
+      /** Replace an unapplied edit only while the file still holds these exact bytes. */
+      readonly onlyReplacingDigest?: string;
+    },
+  ) => Promise<void>;
+  /**
+   * Records direct edits to Capability files as new revisions. An edit that cannot be read is left
+   * in place and reported, and the Capability keeps its current revision.
+   */
+  readonly recordDocumentEdits: (
+    context: Pick<CapabilityPublicationContext, "project" | "sessionId">,
+    signal: AbortSignal,
+  ) => Promise<CapabilityDocumentEditReport>;
+  /** Gives every Capability made before Capability files a readable file, as a new revision. */
+  readonly moveToDocuments: (
+    context: Pick<CapabilityPublicationContext, "project" | "sessionId">,
+    signal: AbortSignal,
+  ) => Promise<number>;
   /** Replace one exact pending gated revision after a user-authored natural-language amendment. */
   readonly replacePendingGate: (
     input: {
@@ -186,6 +227,15 @@ export interface CapabilityPublisher {
     },
     signal: AbortSignal,
   ) => Promise<CapabilityPublicationResult>;
+}
+
+export interface CapabilityDocumentEditReport {
+  readonly recorded: readonly { readonly capabilityId: string; readonly name: string }[];
+  readonly problems: readonly {
+    readonly capabilityId: string;
+    readonly path: string;
+    readonly error: string;
+  }[];
 }
 
 export interface CreateCapabilityPublisherOptions {
@@ -236,6 +286,40 @@ function proposedActivationMode(
   current?: CapabilityActivationMode,
 ): CapabilityActivationMode {
   return proposal.activationMode ?? current ?? "relevant";
+}
+
+const evidenceKindLabel = capabilityEvidenceLabel;
+/** The actor ambient reflection publishes as. */
+export const AMBIENT_REFLECTION_ACTOR_ID = "automatic-learning-organ";
+/** An always-active Capability enters every turn's prompt, so its guidance must stay short. */
+export const ALWAYS_GUIDANCE_MAX_CHARACTERS = 2_000;
+
+function assertAlwaysGuidanceFits(guidance: string): void {
+  if (guidance.length > ALWAYS_GUIDANCE_MAX_CHARACTERS)
+    throw new Error(
+      `An always-active Capability's guidance must be at most ${String(ALWAYS_GUIDANCE_MAX_CHARACTERS)} characters; it has ${String(guidance.length)}. Keep it relevant, or shorten the guidance.`,
+    );
+}
+const DOCUMENT_PATH = /^definitions\/(?:candidates\/)?capabilities\/[^/]+\.md$/u;
+
+/** The readable file for a new Capability. It keeps this path for every later revision. */
+function capabilityDocumentPath(capabilityId: string, name: string): string {
+  return `capabilities/${learnedCapabilitySkillName(capabilityId, name).slice("learned-".length)}.md`;
+}
+
+/** The editable working file for a Capability file revision, outside the candidate area. */
+export function capabilityWorkingDocumentPath(document: FileRevisionRef): string {
+  return document.workingPath.replace(/^definitions\/candidates\//u, "definitions/");
+}
+
+/** The Capability file a revision pins, or undefined for revisions made before Capability files. */
+export function capabilityDocumentRevision(
+  revision: CapabilityLifecycleRevision,
+): FileRevisionRef | undefined {
+  const first = capabilityEffects(revision.revision)[0];
+  return first?.kind === "instruction" && DOCUMENT_PATH.test(first.material.workingPath)
+    ? first.material
+    : undefined;
 }
 
 function registryCapability(capability: CapabilityDefinition): Capability {
@@ -327,97 +411,106 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       : undefined;
     if (input.predecessor && !existingDefinition)
       throw new Error(`Capability ${input.capabilityId} has a revision but no definition`);
-    if (
-      existingDefinition &&
-      (input.proposal.name !== existingDefinition.name ||
-        input.proposal.description !== existingDefinition.description ||
-        input.proposal.applicability !== existingDefinition.applicability)
-    )
-      throw new Error(
-        `Capability ${input.capabilityId} definition fields are immutable; revise only its behavior-bearing revision`,
-      );
+    // A revision may refine the name, description, and applicability. The Capability ID and its
+    // creation time stay fixed, so lineage and restoration still refer to the same Capability.
     const definition: CapabilityDefinition = Object.freeze(
       createConditionalObject({
         capabilityId: input.capabilityId,
-        name: existingDefinition?.name ?? input.proposal.name,
+        name: input.proposal.name,
       } as const)
         .addOptional(existingDefinition?.kind ? { kind: existingDefinition.kind } : undefined)
         .add({
-          description: existingDefinition?.description ?? input.proposal.description,
-          applicability: existingDefinition?.applicability ?? input.proposal.applicability,
+          description: input.proposal.description,
+          applicability: input.proposal.applicability,
           createdAt: existingDefinition?.createdAt ?? now(),
         } as const)
         .finish(),
     );
-    options.registry.registerCapability(registryCapability(definition));
-    const predecessorEffects = input.predecessor
-      ? capabilityEffects(input.predecessor.revision)
-      : Object.freeze([]);
-    const effects = validateCapabilityEffects(
-      await Promise.all(
-        input.proposal.effects.map(async (draft, index): Promise<CapabilityEffect> => {
-          if (draft.kind === "instruction") {
-            const instructionIndex = input.proposal.effects
-              .slice(0, index)
-              .filter((candidate) => candidate.kind === "instruction").length;
-            const predecessor = predecessorEffects.filter((effect) => effect.kind === "instruction")[
-              instructionIndex
-            ];
-            const material = await options.workspace.definitions.recordWorkingDefinition(
-              createConditionalObject({
-                workingPath: `capabilities/${input.capabilityId}/${capabilityRevisionId}/instruction-${String(index + 1)}.md`,
-                bytes: new TextEncoder().encode(`${draft.content.trim()}\n`),
-                actor: input.actor,
-                reason: input.proposal.rationale,
-                provenanceRefs: input.evidenceRefs,
-              } as const)
-                .addOptional(
-                  predecessor?.kind === "instruction"
-                    ? { predecessorRevisionId: predecessor.material.revisionId }
-                    : undefined,
-                )
-                .finish(),
-            );
-            return Object.freeze({ kind: "instruction" as const, material });
-          }
-          if (draft.kind === "skill") {
-            const predecessor = predecessorEffects.find(
-              (effect) => effect.kind === "skill" && effect.name === draft.name,
-            );
-            const material = await options.workspace.definitions.recordWorkingDefinition(
-              createConditionalObject({
-                workingPath: `capabilities/${input.capabilityId}/${capabilityRevisionId}/skills/${draft.name}/SKILL.md`,
-                bytes: new TextEncoder().encode(`${draft.instructions.trim()}\n`),
-                actor: input.actor,
-                reason: input.proposal.rationale,
-                provenanceRefs: input.evidenceRefs,
-              } as const)
-                .addOptional(
-                  predecessor?.kind === "skill"
-                    ? { predecessorRevisionId: predecessor.material.revisionId }
-                    : undefined,
-                )
-                .finish(),
-            );
-            return Object.freeze({
-              kind: "skill" as const,
-              name: draft.name,
-              description: draft.description,
-              material,
-            });
-          }
-          if (!input.project)
-            throw new Error(`Capability ${draft.kind} ${draft.name} has no project authority`);
-          const resolved = await (input.programResolver ?? programs).resolve(
-            draft.mode,
-            draft.name,
-            input.project,
-          );
-          if (!resolved) throw new Error(`Unknown saved ${draft.mode} Program ${draft.name}`);
-          return resolved;
-        }),
+    // A new Capability must be registered before its first revision is built. A revision of an
+    // existing one registers its new name only after the store accepts it.
+    if (!existingDefinition) options.registry.registerCapability(registryCapability(definition));
+    // Instruction and skill drafts become the guidance of one readable Capability file.
+    const guidance = input.proposal.effects
+      .flatMap((draft) =>
+        draft.kind === "instruction"
+          ? [draft.content.trim()]
+          : draft.kind === "skill"
+            ? [`## ${draft.name}\n\n${draft.description.trim()}\n\n${draft.instructions.trim()}`]
+            : [],
+      )
+      .join("\n\n");
+    const programDrafts = input.proposal.effects.filter((draft) => draft.kind === "program");
+    if (guidance.length === 0 && programDrafts.length === 0)
+      throw new Error("A Capability needs guidance or a saved Program");
+    const predecessorDocument = input.predecessor ? capabilityDocumentRevision(input.predecessor) : undefined;
+    // listRevisions without a limit returns the oldest first; the file lists the newest first.
+    const history = input.predecessor
+      ? (await options.store.listRevisions(input.capabilityId)).toReversed().map((revision) => ({
+          date: revision.createdAt.slice(0, 10),
+          summary: revision.summary,
+        }))
+      : [];
+    const bytes = new TextEncoder().encode(
+      renderCapabilityDocument(
+        {
+          name: input.proposal.name,
+          when: input.proposal.applicability,
+          description: input.proposal.description,
+          guidance:
+            guidance.length > 0
+              ? guidance
+              : `Use the saved ${programDrafts.map((draft) => `${draft.mode} \`${draft.name}\``).join(" and ")}.`,
+        },
+        createConditionalObject({
+          rationale: input.proposal.rationale,
+          history: [{ date: now().slice(0, 10), summary: input.proposal.summary }, ...history],
+        } as const)
+          .addOptional(
+            input.proposal.evidence
+              ? {
+                  evidence: {
+                    label: evidenceKindLabel(input.proposal.evidence.kind),
+                    quote: input.proposal.evidence.quote,
+                    wouldOtherwise: input.proposal.evidence.wouldOtherwise,
+                  },
+                }
+              : undefined,
+          )
+          .finish(),
       ),
     );
+    const documentRequest = createConditionalObject({
+      workingPath: predecessorDocument
+        ? capabilityWorkingDocumentPath(predecessorDocument)
+        : capabilityDocumentPath(input.capabilityId, input.proposal.name),
+      bytes,
+      actor: input.actor,
+      reason: input.proposal.rationale,
+      provenanceRefs: input.evidenceRefs,
+    } as const)
+      .addOptional(
+        predecessorDocument ? { predecessorRevisionId: predecessorDocument.revisionId } : undefined,
+      )
+      .finish();
+    // Each revision is recorded as a candidate snapshot. The file the user reads changes only after
+    // the revision becomes current, so a failed or stale publication never looks like a user edit.
+    const document = await options.workspace.definitions.recordCandidateDefinition(documentRequest);
+    const programEffects = await Promise.all(
+      programDrafts.map(async (draft): Promise<CapabilityEffect> => {
+        if (!input.project) throw new Error(`Capability program ${draft.name} has no project authority`);
+        const resolved = await (input.programResolver ?? programs).resolve(
+          draft.mode,
+          draft.name,
+          input.project,
+        );
+        if (!resolved) throw new Error(`Unknown saved ${draft.mode} Program ${draft.name}`);
+        return resolved;
+      }),
+    );
+    const effects = validateCapabilityEffects([
+      Object.freeze({ kind: "instruction" as const, material: document }),
+      ...programEffects,
+    ]);
     const router = await compatibilityRouter(input.evidenceRefs, input.actor);
     const executesPrograms = effects.some((effect) => effect.kind === "program");
     const reference = options.registry.constructRevision(
@@ -468,14 +561,18 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     if (!revision) throw new Error(`Capability registry lost authored revision ${capabilityRevisionId}`);
     return Object.freeze({
       definition,
-      revision: Object.freeze({
-        revision,
-        reference,
-        summary: input.proposal.summary,
-        rationale: input.proposal.rationale,
-        anticipatedEffect: input.proposal.anticipatedEffect,
-        createdAt: now(),
-      }),
+      revision: Object.freeze(
+        createConditionalObject({
+          revision,
+          reference,
+          summary: input.proposal.summary,
+          rationale: input.proposal.rationale,
+          anticipatedEffect: input.proposal.anticipatedEffect,
+        } as const)
+          .addOptional(input.proposal.evidence ? { evidence: input.proposal.evidence } : undefined)
+          .add({ createdAt: now() } as const)
+          .finish(),
+      ),
     });
   };
 
@@ -543,6 +640,11 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         state: "active",
         feedback: decisionFeedback(binding, decision.reason, "restore_request"),
       });
+      if (updated.status !== "stale")
+        // Ambient reflection restoring a revision does not override the user's unapplied edits.
+        await syncWorkingDocument(binding.capabilityId, context, {
+          userChoseRevision: context.actor.actorId !== AMBIENT_REFLECTION_ACTOR_ID,
+        });
       return Object.freeze({
         status: updated.status === "stale" ? ("stale" as const) : ("restored" as const),
         capabilityId: binding.capabilityId,
@@ -559,6 +661,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
           capabilityId: binding.capabilityId,
           message: "Capability changed concurrently",
         });
+      if (decision.activationMode === "always") await assertCurrentGuidanceFitsAlways(binding.capabilityId);
       signal.throwIfAborted();
       const updated = await options.store.updateBindingWithFeedback({
         capabilityId: binding.capabilityId,
@@ -610,6 +713,8 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     const requiresGate = hostRequiresActivationGate(authored.revision) || proposal.consequence !== "ordinary";
     const nextScope = proposedScope(proposal, context, binding?.scope);
     const nextActivationMode = proposedActivationMode(proposal, binding?.activationMode);
+    if (nextActivationMode === "always" && !context.preservingExistingGuidance)
+      await assertRevisionGuidanceFitsAlways(authored.revision);
 
     if (!binding) {
       const gate = requiresGate
@@ -641,6 +746,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
           .addOptional(gate ? { gate } : undefined)
           .finish(),
       );
+      await syncWorkingDocument(capabilityId, context);
       return Object.freeze({
         status: requiresGate ? ("pending" as const) : ("activated" as const),
         capabilityId,
@@ -691,11 +797,16 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     signal.throwIfAborted();
     const updated = await options.store.applyRevision({
       revision: authored.revision,
+      definition: authored.definition,
       feedback,
       expectedBindingRevision,
       scope: nextScope,
       activationMode: nextActivationMode,
     });
+    if (updated.status !== "stale") {
+      options.registry.registerCapability(registryCapability(authored.definition));
+      await syncWorkingDocument(capabilityId, context);
+    }
     return Object.freeze({
       status: updated.status === "stale" ? ("stale" as const) : ("revised" as const),
       capabilityId,
@@ -728,6 +839,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         .addOptional(context.project ? { project: context.project } : undefined)
         .finish(),
     );
+    if (gate.proposedActivationMode === "always") await assertRevisionGuidanceFitsAlways(authored.revision);
     signal.throwIfAborted();
     const staged = await options.store.stageGatedRevision({
       revision: authored.revision,
@@ -767,5 +879,375 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     });
   };
 
-  return Object.freeze({ publish, replacePendingGate });
+  async function assertRevisionGuidanceFitsAlways(revision: CapabilityLifecycleRevision): Promise<void> {
+    const document = capabilityDocumentRevision(revision);
+    // Revisions from before Capability files keep their guidance in separate materials.
+    const guidance = document
+      ? capabilityGuidance(new TextDecoder().decode(await options.workspace.reads.readRevision(document)))
+      : (await currentDrafts(revision)).drafts
+          .flatMap((draft) => (draft.kind === "instruction" ? [draft.content] : []))
+          .join("\n\n");
+    assertAlwaysGuidanceFits(guidance);
+  }
+  const assertCurrentGuidanceFitsAlways = async (capabilityId: string): Promise<void> => {
+    const binding = await options.store.getBinding(capabilityId);
+    const lifecycle = binding ? await options.store.getRevision(binding.revision) : undefined;
+    if (lifecycle) await assertRevisionGuidanceFitsAlways(lifecycle);
+  };
+  const assertGateFitsAlways = async (gateRequestId: string): Promise<void> => {
+    const gate = await options.store.getGate(gateRequestId);
+    if (gate?.proposedActivationMode !== "always") return;
+    const lifecycle = await options.store.getRevision(gate.revision);
+    if (lifecycle) await assertRevisionGuidanceFitsAlways(lifecycle);
+  };
+  const systemActor: ActorRef = Object.freeze({ actorId: "capability-files", kind: "system" });
+  const userActor: ActorRef = Object.freeze({ actorId: "workspace-user", kind: "user" });
+  /**
+   * True when Noesis's own file sync made the last record at this path and the file still matches
+   * it. A user edit, including bytes restored from a backup, never meets both.
+   */
+  const isUnchangedNoesisWrite = async (path: string, working: Uint8Array): Promise<boolean> => {
+    const lastRecorded = await options.workspace.reads.latestWorkingRevision(path);
+    return (
+      lastRecorded?.actor.actorId === systemActor.actorId &&
+      lastRecorded.actor.kind === systemActor.kind &&
+      lastRecorded.revision.contentDigest === sha256(working)
+    );
+  };
+
+  /** Guidance and Program drafts that reproduce a revision's current effects exactly. */
+  const currentDrafts = async (
+    lifecycle: CapabilityLifecycleRevision,
+  ): Promise<{
+    readonly drafts: readonly CapabilityProposal["effects"][number][];
+    readonly resolver: Pick<CapabilityProgramLibrary, "resolve">;
+    readonly project?: ProjectRef;
+  }> => {
+    const decoder = new TextDecoder("utf8", { fatal: true });
+    const effects = capabilityEffects(lifecycle.revision);
+    const texts =
+      effects.length > 0
+        ? await Promise.all(
+            effects.flatMap((effect) =>
+              effect.kind === "instruction"
+                ? [
+                    (async () =>
+                      capabilityGuidance(
+                        decoder.decode(await options.workspace.reads.readRevision(effect.material)),
+                      ))(),
+                  ]
+                : effect.kind === "skill"
+                  ? [
+                      (async () =>
+                        `## ${effect.name}\n\n${effect.description}\n\n${decoder.decode(await options.workspace.reads.readRevision(effect.material)).trim()}`)(),
+                    ]
+                  : [],
+            ),
+          )
+        : await Promise.all(
+            [...lifecycle.revision.promptModules, ...lifecycle.revision.skills].map(async (material) =>
+              decoder.decode(await options.workspace.reads.readRevision(material)).trim(),
+            ),
+          );
+    const programs = effects.filter((effect) => effect.kind === "program");
+    const guidance = texts.filter((text) => text.length > 0).join("\n\n");
+    return createConditionalObject({
+      drafts: Object.freeze<CapabilityProposal["effects"][number][]>([
+        ...(guidance.length > 0 ? [{ kind: "instruction" as const, content: guidance }] : []),
+        ...programs.map((effect) => ({
+          kind: "program" as const,
+          mode: effect.program.mode,
+          name: effect.program.name,
+        })),
+      ]),
+      // Keep the exact pinned Program revisions instead of resolving the live library.
+      resolver: Object.freeze({
+        resolve: async (mode: "script" | "workflow", name: string) =>
+          programs.find((effect) => effect.program.mode === mode && effect.program.name === name),
+      }),
+    } as const)
+      .addOptional(programs[0] ? { project: programs[0].program.project } : undefined)
+      .finish();
+  };
+
+  // Syncs for one Capability run one at a time. Each reads the binding when it starts, so the last
+  // sync always writes the current revision even when publications race.
+  const syncQueues = new Map<string, Promise<void>>();
+  const syncWorkingDocument: CapabilityPublisher["syncWorkingDocument"] = async (
+    capabilityId,
+    context,
+    options_,
+  ) => {
+    // A restored revision from before Capability files gets a file as a new revision. That move
+    // publishes, and publishing syncs again, so it runs outside the queue to avoid waiting on itself.
+    // Without a project context, the next startup moves it instead.
+    const binding = await options.store.getBinding(capabilityId);
+    const lifecycle = binding ? await options.store.getRevision(binding.revision) : undefined;
+    if (binding && lifecycle && !capabilityDocumentRevision(lifecycle)) {
+      if (context) await moveOne(binding, lifecycle, context, new AbortController().signal);
+      return;
+    }
+    const previous = syncQueues.get(capabilityId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(
+        async () =>
+          await syncNow(capabilityId, options_?.userChoseRevision === true, options_?.onlyReplacingDigest),
+      );
+    syncQueues.set(capabilityId, next);
+    try {
+      await next;
+    } finally {
+      if (syncQueues.get(capabilityId) === next) syncQueues.delete(capabilityId);
+    }
+  };
+  const syncNow = async (
+    capabilityId: string,
+    userChoseRevision: boolean,
+    onlyReplacingDigest: string | undefined,
+  ): Promise<void> => {
+    const binding = await options.store.getBinding(capabilityId);
+    if (!binding) return;
+    const lifecycle = await options.store.getRevision(binding.revision);
+    if (!lifecycle) return;
+    const document = capabilityDocumentRevision(lifecycle);
+    if (!document) return;
+    // A restore or approval may select a revision with an older name or "when" text.
+    const bytes = await options.workspace.reads.readRevision(document);
+    const parsed = parseCapabilityDocument(new TextDecoder().decode(bytes));
+    const definition = await options.store.getDefinition(capabilityId);
+    if (
+      parsed.ok &&
+      definition &&
+      (definition.name !== parsed.content.name ||
+        definition.applicability !== parsed.content.when ||
+        definition.description !== parsed.content.description)
+    ) {
+      const updated = Object.freeze({
+        ...definition,
+        name: parsed.content.name,
+        applicability: parsed.content.when,
+        description: parsed.content.description,
+      });
+      await options.store.updateDefinition(updated);
+      options.registry.registerCapability(registryCapability(updated));
+    }
+    const path = capabilityWorkingDocumentPath(document);
+    const working = await options.workspace.reads.readWorkingFile(path);
+    if (working && sha256(working) === document.contentDigest) return;
+    if (working && !(await isUnchangedNoesisWrite(path, working))) {
+      // The file holds an edit Noesis has not recorded yet. A publication leaves it, so the next edit
+      // scan applies the user's edit on top of this revision. The user's own restore or approval
+      // replaces it, after keeping its bytes as a revision so nothing is lost.
+      if (!userChoseRevision) return;
+      if (onlyReplacingDigest !== undefined && sha256(working) !== onlyReplacingDigest) return;
+      await options.workspace.recordDirectEdit(
+        path,
+        userActor,
+        "Unapplied edit replaced by the user's restore",
+      );
+    }
+    await options.workspace.definitions.recordWorkingDefinition({
+      workingPath: path,
+      bytes,
+      actor: systemActor,
+      reason: "Match the Capability file to its current revision",
+      provenanceRefs: [document],
+    });
+  };
+
+  const moveOne = async (
+    binding: import("@noesis/domain").CapabilityBinding,
+    lifecycle: CapabilityLifecycleRevision,
+    context: Pick<CapabilityPublicationContext, "project" | "sessionId">,
+    signal: AbortSignal,
+  ): Promise<boolean> => {
+    const definition = await options.store.getDefinition(binding.capabilityId);
+    if (!definition) return false;
+    const current = await currentDrafts(lifecycle);
+    if (current.drafts.length === 0) return false;
+    const result = await publish(
+      {
+        decision: "revise",
+        capabilityId: binding.capabilityId,
+        expectedBindingRevision: binding.revisionNumber,
+        proposal: createConditionalObject({
+          name: definition.name,
+          description: definition.description,
+          applicability: definition.applicability,
+          summary: "Moved into a readable Capability file.",
+          rationale: lifecycle.rationale,
+          anticipatedEffect: lifecycle.anticipatedEffect,
+          effects: Array.from(current.drafts),
+          consequence: "ordinary" as const,
+          consequenceDescription: "The guidance is unchanged. Only its storage changes.",
+        } as const)
+          .addOptional(lifecycle.evidence ? { evidence: lifecycle.evidence } : undefined)
+          .finish(),
+      },
+      {
+        project: current.project ?? context.project,
+        sessionId: context.sessionId,
+        // Older revisions may carry no evidence rows; their recorded material is then the evidence.
+        evidenceRefs:
+          lifecycle.revision.evidenceRefs.length > 0
+            ? lifecycle.revision.evidenceRefs
+            : [
+                ...capabilityEffects(lifecycle.revision).flatMap((effect) =>
+                  effect.kind === "program" ? [] : [effect.material],
+                ),
+                ...lifecycle.revision.promptModules,
+              ].slice(0, 1),
+        actor: systemActor,
+        interpretation: "Moved into a readable Capability file",
+        programResolver: current.resolver,
+        preservingExistingGuidance: true,
+      },
+      signal,
+    );
+    return result.status === "revised";
+  };
+
+  const moveToDocuments: CapabilityPublisher["moveToDocuments"] = async (context, signal) => {
+    const definitions = await options.store.listDefinitions();
+    const bindings = await options.store.getBindings(
+      definitions.map((definition) => definition.capabilityId),
+    );
+    let moved = 0;
+    for (const binding of bindings) {
+      signal.throwIfAborted();
+      const lifecycle = await options.store.getRevision(binding.revision);
+      if (!lifecycle || capabilityDocumentRevision(lifecycle)) continue;
+      // A pending gate expects the binding as it is, so leave this Capability until it is decided.
+      if ((await options.store.listGates(binding.capabilityId)).some((gate) => gate.status === "pending"))
+        continue;
+      // One Capability that cannot move must not keep the others, or Noesis, from starting.
+      const result = await moveOne(binding, lifecycle, context, signal).then(
+        (done) => done,
+        () => false,
+      );
+      if (result) moved += 1;
+    }
+    return moved;
+  };
+
+  const recordDocumentEdits: CapabilityPublisher["recordDocumentEdits"] = async (context, signal) => {
+    const definitions = await options.store.listDefinitions();
+    const bindings = await options.store.getBindings(
+      definitions.map((definition) => definition.capabilityId),
+    );
+    const recorded: { capabilityId: string; name: string }[] = [];
+    const problems: { capabilityId: string; path: string; error: string }[] = [];
+    for (const binding of bindings) {
+      signal.throwIfAborted();
+      const lifecycle = await options.store.getRevision(binding.revision);
+      const document = lifecycle ? capabilityDocumentRevision(lifecycle) : undefined;
+      if (!lifecycle || !document) continue;
+      const path = capabilityWorkingDocumentPath(document);
+      const working = await options.workspace.reads.readWorkingFile(path);
+      if (!working || sha256(working) === document.contentDigest) continue;
+      // A file Noesis wrote that was never brought up to date, e.g. Noesis stopped right after
+      // publishing, is synced instead of imported as the user's edit.
+      const writtenByNoesis = await isUnchangedNoesisWrite(path, working);
+      if (writtenByNoesis) {
+        await syncWorkingDocument(binding.capabilityId, context);
+        continue;
+      }
+      const parsed = parseCapabilityDocument(new TextDecoder().decode(working));
+      if (!parsed.ok) {
+        problems.push({ capabilityId: binding.capabilityId, path, error: parsed.error });
+        continue;
+      }
+      const current = await currentDrafts(lifecycle);
+      if (current.project && current.project.projectId !== context.project.projectId) continue;
+      // An edit gets the same limits as any authored Capability, e.g. name and guidance length.
+      const proposal = CapabilityProposalSchema.safeParse({
+        name: parsed.content.name,
+        description: parsed.content.description,
+        applicability: parsed.content.when,
+        summary: "Edited directly in its Capability file.",
+        rationale: "The user edited the Capability file.",
+        anticipatedEffect: "Noesis follows the edited guidance from the next turn.",
+        effects: [
+          { kind: "instruction", content: parsed.content.guidance },
+          ...current.drafts.filter((draft) => draft.kind === "program"),
+        ],
+        consequence: "ordinary",
+        consequenceDescription: "The user changed the guidance directly.",
+        evidence: {
+          kind: "explicit_request",
+          quote: `Edited ${path}`,
+          wouldOtherwise: "Noesis would keep following the guidance the user replaced.",
+        },
+      });
+      if (!proposal.success) {
+        problems.push({
+          capabilityId: binding.capabilityId,
+          path,
+          error: proposal.error.issues
+            .map((issue) => `${issue.path.join(".") || "file"}: ${issue.message}`)
+            .join("; "),
+        });
+        continue;
+      }
+      const outcome = await (async () => {
+        const edit = await options.workspace.recordDirectEdit(
+          path,
+          userActor,
+          "Direct edit to a Capability file",
+        );
+        return await publish(
+          {
+            decision: "revise",
+            capabilityId: binding.capabilityId,
+            expectedBindingRevision: binding.revisionNumber,
+            proposal: proposal.data,
+          },
+          {
+            project: current.project ?? context.project,
+            sessionId: context.sessionId,
+            evidenceRefs: [edit],
+            actor: userActor,
+            interpretation: "The user edited the Capability file directly",
+            programResolver: current.resolver,
+          },
+          signal,
+        );
+      })().then(
+        (result) => ({ ok: true as const, result }),
+        (cause: Error) => ({ ok: false as const, message: cause.message }),
+      );
+      if (!outcome.ok) {
+        // The edit stays in the file. Noesis reports it and keeps the current revision.
+        problems.push({ capabilityId: binding.capabilityId, path, error: outcome.message });
+        continue;
+      }
+      const result = outcome.result;
+      // The edit is now the current revision, so write its normalized file over the user's bytes,
+      // unless the user saved again meanwhile; the next scan imports that newer save.
+      if (result.status === "revised") {
+        const synced = await syncWorkingDocument(binding.capabilityId, context, {
+          userChoseRevision: true,
+          onlyReplacingDigest: sha256(working),
+        }).then(
+          () => undefined,
+          (cause: Error) => cause.message,
+        );
+        if (synced !== undefined) problems.push({ capabilityId: binding.capabilityId, path, error: synced });
+      }
+      if (result.status === "revised")
+        recorded.push({ capabilityId: binding.capabilityId, name: parsed.content.name });
+    }
+    return Object.freeze({ recorded: Object.freeze(recorded), problems: Object.freeze(problems) });
+  };
+
+  return Object.freeze({
+    publish,
+    replacePendingGate,
+    assertCurrentGuidanceFitsAlways,
+    assertGateFitsAlways,
+    syncWorkingDocument,
+    recordDocumentEdits,
+    moveToDocuments,
+  });
 }

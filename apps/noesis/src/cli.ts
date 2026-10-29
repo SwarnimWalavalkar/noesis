@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createConditionalObject } from "@noesis/domain";
+import { createWorkspaceStore } from "@noesis/workspace";
 // Imported first so the filter is installed before any module can emit a load-time warning.
 import "./process-warnings.ts";
 import { join } from "node:path";
@@ -43,6 +44,7 @@ import { createApplicationMcpIntegration } from "./mcp-integration.ts";
 import { prepareNoesisBuiltInSkills } from "./noesis-skill.ts";
 import { checkForUpdate, NOESIS_VERSION, updateNoesis } from "./update.ts";
 import { type CliInput, parseArgs } from "./cli-args.ts";
+import { computeLearningReport, formatLearningReport } from "./learning-report.ts";
 const CLI_HELP = `Noesis
 
 Usage:
@@ -57,6 +59,7 @@ Usage:
   noesis skills list [--workspace] [--trust-workspace] [--home PATH]
   noesis skills install|remove SOURCE [--workspace] [--trust-workspace] [--home PATH]
   noesis skills update [SOURCE] [--workspace] [--trust-workspace] [--home PATH]
+  noesis learning report [--days N] [--home PATH]
   noesis update
   noesis help
   noesis --version
@@ -396,6 +399,22 @@ async function main(): Promise<void> {
     await runSkills(input);
     return;
   }
+  if (input.command === "learning") {
+    const workspace = await createWorkspaceStore(input.home);
+    try {
+      console.log(
+        formatLearningReport(
+          await computeLearningReport(
+            workspace,
+            input.sinceDays === undefined ? {} : { sinceDays: input.sinceDays },
+          ),
+        ),
+      );
+    } finally {
+      workspace.close();
+    }
+    return;
+  }
   const updateNotice =
     (input.command === "tui" || input.command === "onboard") && process.stdout.isTTY
       ? checkForUpdate()
@@ -469,7 +488,7 @@ async function main(): Promise<void> {
       });
     else
       throw new Error(
-        `Unknown command ${input.command}. Use tui, onboard, inspect, rebuild, config, auth, or skills.`,
+        `Unknown command ${input.command}. Use tui, onboard, inspect, rebuild, config, auth, skills, learning, update, or help.`,
       );
   } finally {
     await runtime.shutdown();

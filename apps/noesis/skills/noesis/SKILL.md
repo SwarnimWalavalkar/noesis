@@ -16,6 +16,7 @@ When the user asks what can be configured, answer from this table and from `conf
 | Subagent model route                               | `config.update` (`agents`)                                     | Applies from the next turn. `null` inherits the foreground session route.                                                                                                             |
 | Context budget and automatic compaction            | `config.update` (`context`)                                    | Applies from the next turn.                                                                                                                                                           |
 | Automatic session titles                           | `config.update` (`titles`)                                     | Applies to the next new session. `null` provider or model uses the session's own; reasoning defaults to `off`.                                                                        |
+| Ambient reflection model and reply wait            | `config.update` (`reflection`)                                 | Applies on the next launch. `null` provider or model uses the foreground route; reasoning defaults to `low`; `idleMinutes` defaults to 10.                                            |
 | Model provider sign-in                             | `providers.list`, `providers.authenticate`, `providers.logout` | Sign-in runs the `/provider` flow in the TUI.                                                                                                                                         |
 | MCP servers                                        | `mcp.*`                                                        | See [Manage MCP servers](#manage-mcp-servers).                                                                                                                                        |
 | Lasting behavior, preferences, and abilities       | `capabilities.inspect`, `capabilities.refine`                  | See [Deliberate refinement](#deliberate-refinement).                                                                                                                                  |
@@ -52,7 +53,7 @@ Two session changes stay with the user. Explain why and name the command instead
 
 `noesis.describe(name)` starts with `signature.input` and `signature.output`, compact types for each tool's fields. Read them before guessing a field name. The shapes you need most:
 
-- `config.update` input: `{ agent?, agents?, context?, titles? }`, where `agent` and `agents` take `{ provider?, model?, thinkingLevel? }`, `context` takes `{ tokenBudget?, autoCompact? }`, and `titles` takes `{ enabled?, provider?, model?, thinkingLevel? }`. Reasoning is `thinkingLevel`.
+- `config.update` input: `{ agent?, agents?, context?, titles?, reflection? }`, where `agent` and `agents` take `{ provider?, model?, thinkingLevel? }`, `context` takes `{ tokenBudget?, autoCompact? }`, `titles` takes `{ enabled?, provider?, model?, thinkingLevel? }`, and `reflection` takes `{ provider?, model?, thinkingLevel?, idleMinutes? }`. Reasoning is `thinkingLevel`.
 - `config.update` result: `previous`, `effective`, `overridden`, `providers`, and `appliesWhen`.
 - `providers.list({ provider })` models: `{ model, name, default, thinkingLevels }`.
 
@@ -91,7 +92,9 @@ return { previous: result.previous.agents, now: result.effective.agents, signedI
 
 - Answer normally when nothing should persist.
 - Save a Program in `script` mode for one reusable computation or `workflow` mode for a durable multi-phase procedure. Verify a newly saved Program by running its exact revision before depending on it.
-- Create or revise a Capability when a lasting fact, preference, criterion, or ability should change Noesis's behavior in future situations. A Capability may contain exact Instruction and Skill materials and may attach an exact already-saved Program revision.
+- Create or revise a Capability when a lasting fact, preference, criterion, or ability should change Noesis's behavior in future situations. Its instruction and skill drafts become the guidance of one readable Markdown file, and it may attach an exact already-saved Program revision.
+
+Each Capability lives in one file under `<home>/definitions/capabilities/`, and `capabilities.inspect` detail returns its path as `file`. `file` is null for an older Capability that has not moved into a file yet, e.g. one waiting at a gate. The file has `name`, `when`, and `description` frontmatter, then the guidance, then notes Noesis writes. When the user wants to change a Capability's wording, you may edit the file directly with file write. Before the next turn, Noesis records a valid edit as a new revision. An edit it cannot read or apply stays in the file, keeps the current revision, and is reported in `/learning`. Status, scope, and mode are not in the file; change them through `capabilities.refine`.
 
 Persist only when future behavior should change. `no_change` is a valid deliberate decision.
 

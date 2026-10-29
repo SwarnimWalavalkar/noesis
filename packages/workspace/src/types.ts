@@ -1237,6 +1237,34 @@ export interface CapabilityLifecycleCounts {
 }
 
 export interface CapabilityLifecycleStore {
+  /** Replaces the name, description, and applicability, e.g. when a restore selects an older file. */
+  readonly updateDefinition: (definition: import("@noesis/domain").CapabilityDefinition) => Promise<void>;
+  /** Records judged outcomes. A revision keeps only its first judgment for each turn. */
+  readonly recordOutcomes: (
+    outcomes: readonly import("@noesis/domain").CapabilityOutcome[],
+  ) => Promise<readonly import("@noesis/domain").CapabilityOutcome[]>;
+  /** Helped, hurt, and unclear counts for each requested revision. */
+  readonly trackRecords: (
+    capabilityRevisionIds: readonly string[],
+  ) => Promise<ReadonlyMap<string, import("@noesis/domain").CapabilityTrackRecord>>;
+  /**
+   * Judged outcome counts for one Capability across all its revisions, optionally since a time,
+   * and when its first judged outcome happened.
+   */
+  readonly outcomeCounts: (
+    capabilityId: string,
+    since?: string,
+  ) => Promise<{
+    readonly helped: number;
+    readonly hurt: number;
+    readonly unclear: number;
+    readonly firstAt?: string;
+  }>;
+  /** The newest judged outcomes for one Capability, across its revisions. */
+  readonly listOutcomes: (
+    capabilityId: string,
+    limit: number,
+  ) => Promise<readonly import("@noesis/domain").CapabilityOutcome[]>;
   readonly create: (request: {
     readonly definition: import("@noesis/domain").CapabilityDefinition;
     readonly revision: import("@noesis/domain").CapabilityLifecycleRevision;
@@ -1336,6 +1364,8 @@ export interface CapabilityLifecycleStore {
   >;
   readonly applyRevision: (request: {
     readonly revision: import("@noesis/domain").CapabilityLifecycleRevision;
+    /** Replaces the name, description, and applicability in the same transaction as the binding. */
+    readonly definition?: import("@noesis/domain").CapabilityDefinition;
     readonly feedback: import("@noesis/domain").CapabilityFeedback;
     readonly expectedBindingRevision: number;
     readonly scope: import("@noesis/domain").CapabilityScope;

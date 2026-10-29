@@ -756,8 +756,7 @@ describe("protected workspace runtime", () => {
       new URL("../../runtime-pi/src/role-context.ts", import.meta.url),
       "utf8",
     );
-    const learningOrgan = await readFile(new URL("../../learning/src/organ.ts", import.meta.url), "utf8");
-    expect(`${generatedRoleContext}\n${learningOrgan}`).not.toMatch(
+    expect(generatedRoleContext).not.toMatch(
       /workspace\/src\/protected-runtime|createWorkspaceRuntimeInternals/iu,
     );
     workspace.close();

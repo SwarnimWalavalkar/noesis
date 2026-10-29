@@ -533,10 +533,15 @@ export function previewDocument(
   now: Date,
 ): readonly string[] {
   const whatChanged = record.detailSections.find((section) => section.title.toLowerCase() === "what changed");
+  // A Capability's editable file is the first thing a user needs to find.
+  const file = record.detailSections.find((section) => section.title.toLowerCase() === "file");
   const firstEvidence = record.evidencePreviews[0];
   return [
     ...recordHeading(record, colorEnabled, now, false),
     "",
+    ...(file
+      ? [rule(file.title, width, colorEnabled), ...labeledEntries(file.entries, colorEnabled), ""]
+      : []),
     ...(whatChanged
       ? [
           rule(whatChanged.title, width, colorEnabled),

@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import type { EvidenceRef, FileRevisionRef, ProjectRef } from "@noesis/domain";
-import { sha256 } from "@noesis/domain";
+import { learnedCapabilitySkillName, sha256 } from "@noesis/domain";
 import type { HistoryPort } from "@noesis/intelligence";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { type CapabilityProgramLibrary, createCapabilityLearningModule } from "../src/capability-loop.ts";
+import { createCapabilityPublisher } from "../src/capability-publisher.ts";
 import { createScriptedLearningInferencePort } from "./support/scripted-learning-inference.ts";
 
 const opened: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
@@ -44,6 +45,60 @@ const emptyHistory: Pick<HistoryPort, "search"> = Object.freeze({
 });
 
 describe("Capability learning loop", () => {
+  test("does not reflect on a turn that failed before the model produced output", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-capability-loop-skip-"));
+    const workspace = await createWorkspaceStore(root);
+    opened.push({ root, workspace });
+    const inference = createScriptedLearningInferencePort({ steps: [] });
+    const module = createCapabilityLearningModule({
+      workspace,
+      store: workspace.capabilities,
+      registry: createAtomicCapabilityRegistry(),
+      history: emptyHistory,
+      inference,
+      reflector: Object.freeze({
+        variant: Object.freeze({
+          variantId: "reflector-v1",
+          axis: "role" as const,
+          configurationRefs: Object.freeze([promptRevision]),
+        }),
+        promptRevision,
+        model: "fake",
+        reasoning: "off" as const,
+      }),
+    });
+    const project: ProjectRef = Object.freeze({ projectId: "project-skip", root });
+    await expect(
+      module.reflectSettledTurn(
+        Object.freeze({
+          turn: Object.freeze({
+            sessionId: "session-skip",
+            turnId: "turn-provider-error",
+            userMessage: "hey hey",
+            outcome: "failed",
+            cause: "failed_before_output",
+            servedWorkingAdjustmentOutcomes: [],
+            scope: "global",
+            sensitivity: "normal",
+            occurredAt: "2026-10-28T14:56:48.000Z",
+            evidenceRefs: [
+              Object.freeze({
+                kind: "database_row" as const,
+                table: "messages" as const,
+                rowId: "turn-provider-error:user",
+              }),
+            ],
+            telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
+          }),
+          project,
+          selectedCapabilities: [],
+        }),
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ status: "no_change" });
+    expect(inference.requests()).toHaveLength(0);
+  });
+
   test("creates a global relevant capability directly from one evidenced reflection", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-loop-"));
     const workspace = await createWorkspaceStore(root);
@@ -126,6 +181,11 @@ describe("Capability learning loop", () => {
               activationMode: "relevant",
               consequence: "ordinary",
               consequenceDescription: "Only model instructions change.",
+              evidence: Object.freeze({
+                kind: "explicit_request",
+                quote: "The user asked for this behavior in future work.",
+                wouldOtherwise: "The user would have to repeat the request in later sessions.",
+              }),
               evidenceCitationIndexes: Object.freeze([0, 1, 2]),
             }),
           }),
@@ -152,6 +212,11 @@ describe("Capability learning loop", () => {
               activationMode: "relevant",
               consequence: "recovery_control",
               consequenceDescription: "This changes recovery control behavior.",
+              evidence: Object.freeze({
+                kind: "explicit_request",
+                quote: "The user asked for this behavior in future work.",
+                wouldOtherwise: "The user would have to repeat the request in later sessions.",
+              }),
               evidenceCitationIndexes: Object.freeze([0]),
             }),
           }),
@@ -263,7 +328,7 @@ describe("Capability learning loop", () => {
     expect(await workspace.capabilities.getDefinition("capability-1")).not.toHaveProperty("kind");
     expect((await workspace.capabilities.listRevisions("capability-1"))[0]).toMatchObject({
       revision: {
-        effects: [{ kind: "instruction" }, { kind: "skill", name: "concise-evidence-synthesis" }],
+        effects: [{ kind: "instruction" }],
         evidenceRefs: [
           { table: "messages", rowId: "turn-1:user" },
           { table: "tool_calls", rowId: "turn-1:tool:1" },
@@ -277,8 +342,22 @@ describe("Capability learning loop", () => {
       "foreground_capability_surface",
       "current_capability_materials",
       "available_saved_programs",
+      "capabilities_in_use",
       "evidence",
     ]);
+    // The next user message in the session is the reaction to the reflected turn.
+    const settledTurn = JSON.parse(inference.requests()[0]?.messages[0]?.content ?? "{}");
+    expect(settledTurn.reaction).toEqual({
+      kind: "next_user_message",
+      content: "Teach recovery behavior, but do not apply it before I approve it.",
+    });
+    expect(settledTurn.cause).toBe("unrecorded");
+    expect(inference.requests()[0]?.messages.at(-1)?.content).toContain("turn-2:user");
+    expect((await workspace.capabilities.listRevisions("capability-1"))[0]?.evidence).toEqual({
+      kind: "explicit_request",
+      quote: "The user asked for this behavior in future work.",
+      wouldOtherwise: "The user would have to repeat the request in later sessions.",
+    });
     expect(inference.requests()[0]?.messages.at(-1)?.content).toContain("web.search");
     expect(inference.requests()[0]?.messages.at(-1)?.content).toContain(
       "I kept the research summary concise",
@@ -292,9 +371,11 @@ describe("Capability learning loop", () => {
       toolName: "skills.load",
       request: Object.freeze({
         executionId: "execution-turn-2",
-        input: Object.freeze({ name: "concise-evidence-synthesis" }),
+        input: Object.freeze({ name: learnedCapabilitySkillName("capability-1", "Concise research") }),
       }),
-      response: Object.freeze({ output: Object.freeze({ name: "concise-evidence-synthesis" }) }),
+      response: Object.freeze({
+        output: Object.freeze({ name: learnedCapabilitySkillName("capability-1", "Concise research") }),
+      }),
       status: "completed",
       sensitivity: "normal",
       createdAt: "2026-08-18T00:30:00.500Z",
@@ -496,6 +577,11 @@ describe("Capability learning loop", () => {
               activationMode: "relevant",
               consequence: "ordinary",
               consequenceDescription: "This activates an existing saved project script.",
+              evidence: Object.freeze({
+                kind: "explicit_request",
+                quote: "The user asked for this behavior in future work.",
+                wouldOtherwise: "The user would have to repeat the request in later sessions.",
+              }),
               evidenceCitationIndexes: Object.freeze([0]),
             }),
           }),
@@ -589,6 +675,7 @@ describe("Capability learning loop", () => {
     expect((await workspace.capabilities.listRevisions("capability-dense"))[0]).toMatchObject({
       revision: {
         effects: [
+          { kind: "instruction" },
           {
             kind: "program",
             program: { mode: "script", name: "comparative-research-scout", project, definitionRevision },
@@ -652,6 +739,11 @@ describe("Capability learning loop", () => {
               activationMode: "relevant",
               consequence: "ordinary",
               consequenceDescription: "This activates an existing saved workflow.",
+              evidence: Object.freeze({
+                kind: "explicit_request",
+                quote: "The user asked for this behavior in future work.",
+                wouldOtherwise: "The user would have to repeat the request in later sessions.",
+              }),
               evidenceCitationIndexes: Object.freeze([0]),
             }),
           }),
@@ -738,11 +830,207 @@ describe("Capability learning loop", () => {
     expect(binding).toMatchObject({ scope: { kind: "project", project } });
     const current = binding ? await workspace.capabilities.getRevision(binding.revision) : undefined;
     expect(current?.revision.effects).toEqual([
+      expect.objectContaining({ kind: "instruction" }),
       {
         kind: "program",
         program: { mode: "workflow", name: "evidence-synthesis", project, definitionRevision },
       },
     ]);
     expect(await workspace.definitionMetadata.listCurrent("program:project-workflow:workflow")).toEqual([]);
+  });
+
+  test("records how a used Capability did and pauses it after two harmful uses", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-capability-outcomes-"));
+    const workspace = await createWorkspaceStore(root);
+    opened.push({ root, workspace });
+    const project: ProjectRef = Object.freeze({ projectId: "project-outcomes", root });
+    const registry = createAtomicCapabilityRegistry();
+    await workspace.operational.sessions.put({
+      sessionId: "session-outcomes",
+      title: "Outcomes",
+      status: "idle",
+      provider: "fake",
+      model: "fake",
+      runtime: "fake",
+      createdAt: "2026-10-29T10:00:00.000Z",
+      updatedAt: "2026-10-29T10:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const putUser = async (turnId: string, content: string, createdAt: string) =>
+      await workspace.operational.messages.put({
+        messageId: `${turnId}:user`,
+        sessionId: "session-outcomes",
+        role: "user",
+        content,
+        sensitivity: "normal",
+        createdAt,
+        metadata: Object.freeze({ turnId }),
+      });
+    const origin = await putUser(
+      "turn-0",
+      "Always run the formatter after edits.",
+      "2026-10-29T10:00:00.000Z",
+    );
+    let sequence = 0;
+    const nextId = (prefix: string) => {
+      sequence += 1;
+      return prefix === "capability" ? "capability-format" : `${prefix}-${String(sequence)}`;
+    };
+    const publisher = createCapabilityPublisher({
+      workspace,
+      store: workspace.capabilities,
+      registry,
+      now: () => "2026-10-29T10:00:01.000Z",
+      nextId,
+    });
+    await publisher.publish(
+      {
+        decision: "create",
+        proposal: {
+          name: "Format after edits",
+          description: "Run the formatter after editing files.",
+          applicability: "Editing source files in a repository.",
+          summary: "Run the formatter after edits.",
+          rationale: "The user asked for it.",
+          anticipatedEffect: "Edits stay formatted.",
+          effects: [{ kind: "instruction", content: "Run the formatter after every edit." }],
+          consequence: "ordinary",
+          consequenceDescription: "Only model instructions change.",
+        },
+      },
+      {
+        project,
+        sessionId: "session-outcomes",
+        evidenceRefs: [origin],
+        actor: Object.freeze({ actorId: "test", kind: "noesis" as const }),
+      },
+      new AbortController().signal,
+    );
+    const binding = await workspace.capabilities.getBinding("capability-format");
+    if (!binding) throw new Error("Expected the Capability to exist");
+    const skillName = learnedCapabilitySkillName("capability-format", "Format after edits");
+    const hurtJudgment = Object.freeze({
+      decision: "no_change",
+      reason: "The correction is about the Capability, which outcomes already record.",
+      outcomes: [
+        { capabilityId: "capability-format", result: "hurt", reason: "The user undid the formatting." },
+        { capabilityId: "capability-unused", result: "helped", reason: "Not used, so ignored." },
+      ],
+    });
+    const inference = createScriptedLearningInferencePort({
+      steps: [
+        Object.freeze({ role: "reflector", value: hurtJudgment }),
+        Object.freeze({ role: "reflector", value: hurtJudgment }),
+      ],
+    });
+    const module = createCapabilityLearningModule({
+      workspace,
+      store: workspace.capabilities,
+      registry,
+      history: emptyHistory,
+      inference,
+      publisher,
+      reflector: Object.freeze({
+        variant: Object.freeze({
+          variantId: "reflector-v1",
+          axis: "role" as const,
+          configurationRefs: Object.freeze([promptRevision]),
+        }),
+        promptRevision,
+        model: "fake",
+        reasoning: "off" as const,
+      }),
+      now: () => "2026-10-29T11:00:00.000Z",
+      nextId,
+    });
+    const reflectOn = async (turnId: string, minute: number) => {
+      const user = await putUser(turnId, "Fix the parser bug.", `2026-10-29T10:${String(minute)}0:00.000Z`);
+      const load = await workspace.operational.toolCalls.put({
+        toolCallId: `${turnId}:load`,
+        sessionId: "session-outcomes",
+        toolName: "skills.load",
+        request: Object.freeze({ name: skillName }),
+        response: Object.freeze({ content: "Run the formatter after every edit." }),
+        status: "completed",
+        sensitivity: "normal",
+        createdAt: `2026-10-29T10:${String(minute)}0:01.000Z`,
+        completedAt: `2026-10-29T10:${String(minute)}0:02.000Z`,
+      });
+      await putUser(
+        `${turnId}-reaction`,
+        "Stop reformatting files I did not touch.",
+        `2026-10-29T10:${String(minute)}5:00.000Z`,
+      );
+      return await module.reflectSettledTurn(
+        Object.freeze({
+          turn: Object.freeze({
+            sessionId: "session-outcomes",
+            turnId,
+            userMessage: "Fix the parser bug.",
+            outcome: "unknown",
+            cause: "completed",
+            servedWorkingAdjustmentOutcomes: [],
+            scope: "global",
+            sensitivity: "normal",
+            occurredAt: `2026-10-29T10:${String(minute)}0:00.000Z`,
+            evidenceRefs: [user, load],
+            telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
+          }),
+          project,
+          selectedCapabilities: [binding.revision],
+          // The frozen plan delivered this Capability on demand, not in the prompt.
+          promptCapabilityIds: [],
+        }),
+        new AbortController().signal,
+      );
+    };
+
+    await expect(reflectOn("turn-1", 1)).resolves.toMatchObject({ status: "no_change" });
+    const firstMessages = inference.requests()[0]?.messages ?? [];
+    const inUse = JSON.parse(
+      firstMessages.find((message) => message.name === "capabilities_in_use")?.content ?? "{}",
+    );
+    expect(inUse.capabilities).toEqual([
+      {
+        capabilityId: "capability-format",
+        capabilityRevisionId: binding.revision.capabilityRevisionId,
+        name: "Format after edits",
+        how: "loaded_by_model",
+        guidance: "Run the formatter after every edit.",
+        trackRecord: { helped: 0, hurt: 0, unclear: 0 },
+      },
+    ]);
+    expect((await workspace.capabilities.getBinding("capability-format"))?.state).toBe("active");
+
+    // A mode change after the turn does not change how the turn used the Capability.
+    const current = await workspace.capabilities.getBinding("capability-format");
+    if (!current) throw new Error("Expected the Capability binding");
+    await workspace.capabilities.updateBinding({
+      capabilityId: "capability-format",
+      expectedRevisionNumber: current.revisionNumber,
+      activationMode: "always",
+    });
+    await expect(reflectOn("turn-2", 2)).resolves.toMatchObject({
+      status: "paused",
+      capabilityId: "capability-format",
+    });
+    expect((await workspace.capabilities.getBinding("capability-format"))?.state).toBe("paused");
+    const secondInUse = JSON.parse(
+      inference.requests()[1]?.messages.find((message) => message.name === "capabilities_in_use")?.content ??
+        "{}",
+    );
+    expect(secondInUse.capabilities[0]?.how).toBe("loaded_by_model");
+    const outcomes = await workspace.capabilities.listOutcomes("capability-format", 10);
+    expect(outcomes.map((outcome) => [outcome.turnId, outcome.result])).toEqual([
+      ["turn-2", "hurt"],
+      ["turn-1", "hurt"],
+    ]);
+    // The judgment about a Capability the turn did not use is ignored.
+    expect(await workspace.capabilities.listOutcomes("capability-unused", 10)).toEqual([]);
+    expect(
+      (await workspace.capabilities.listFeedback("capability-format")).some(
+        (feedback) => feedback.disposition === "regression",
+      ),
+    ).toBe(true);
   });
 });
