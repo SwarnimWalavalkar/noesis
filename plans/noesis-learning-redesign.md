@@ -444,3 +444,15 @@ Not built yet:
 
 - The archive export and removal of the old experiment, preflight, activation, and working-adjustment tables. Both current installs have no rows in them, and the `/learning` audit view still reads them, so removing them does not change use.
 - The second half of phase 8, two-session scenarios against a real model. The controlled-provider tests cover the main cases.
+
+### Single learning system (follow-up to PR #56)
+
+The follow-up branch removes everything that served older learning systems or older Capability formats, so one system remains:
+
+- A Capability revision is its Markdown file plus at most one saved Program. Skill effects, prompt modules, routing records, permission manifests, and the in-memory Capability registry are gone.
+- Turns are admitted from Capability bindings alone. The genesis baseline and the activation pipeline are gone; the genesis guidance lines are now part of the base system prompt.
+- Experiments, preflights, evaluations, feedback signals, working adjustments, compounding replay, outcome classification, criteria, the history tools built on them, the legacy JSONL importer, and the operational cutover are deleted.
+- Migrations 054 to 057 drop their tables. Migration 056 resets learned Capabilities, and `docs/migrating-capabilities.md` gives a prompt that recreates them from the files still on disk.
+- Migrations now run with foreign keys off and must pass `PRAGMA foreign_key_check` before they commit, which is SQLite's documented procedure for rebuilding tables.
+
+The old experiment and activation tables and the evaluation records listed under "Not built yet" above are therefore removed, not kept.

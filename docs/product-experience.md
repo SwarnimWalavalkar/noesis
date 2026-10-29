@@ -126,7 +126,7 @@ The main interaction remains conversational. A user can ask, "Why did you work w
 
 `/learning` opens an interactive explorer built with the same terminal components as the rest of Noesis. Wide terminals show the activity list and selected record together. Narrow terminals open the selected record as a separate view.
 
-The default filter shows active and recently revised Capabilities, protected decisions, feedback, and failures. Routine `no_change` reflections appear as a bounded summary. Failed reflections remain in an expandable section. Historical experiments remain available for audit, but they do not compete with the current Capability lifecycle.
+The default filter shows active and recently revised Capabilities, protected decisions, feedback, and failures. Routine `no_change` reflections appear as a bounded summary. Failed reflections remain in an expandable section.
 
 Each Capability shows the path of its editable file, its guidance, any attached Program and its script or workflow mode, and its track record in turns that used it. The detail pane opens the exact file revision or saved definition behind each effect. It also shows the decision, applicability, binding, revision history, cited evidence, considered inputs, feedback, and related records.
 
