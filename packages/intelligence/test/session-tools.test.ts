@@ -1,8 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
-import { type CapabilityRevisionRef, canonicalJson, type Experiment, sha256 } from "@noesis/domain";
+import { canonicalJson, sha256 } from "@noesis/domain";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
@@ -191,7 +190,7 @@ describe("AC-07 session search tools", () => {
       limits: overrides,
     });
 
-  test("Session B retrieves cited public and correction evidence from Session A without private injection", async () => {
+  test("Session B retrieves cited public evidence from Session A without private injection", async () => {
     const sessionTools = tools({
       currentSessionId: "session-b",
       privateSessionIds: ["session-a"],
@@ -215,19 +214,6 @@ describe("AC-07 session search tools", () => {
     expect(JSON.stringify(search.value)).not.toContain("ultrasecret");
     expect(JSON.stringify(search.value)).not.toContain("zephyr budget");
     expect(JSON.stringify(search.value)).not.toContain("Orphan preserve voice");
-
-    const corrections = await tools().findCorrections({
-      topic: "release research exact citations",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
-    });
-    expect(corrections.ok).toBe(true);
-    if (!corrections.ok) return;
-    expect(corrections.value.hits).toHaveLength(1);
-    expect(corrections.value.fragments[0]?.citation.identity).toEqual({
-      kind: "outcome",
-      sessionId: "session-a",
-      outcomeId: "outcome-correction",
-    });
   });
 
   test("defaults automatic retrieval to hybrid and only searches prior session-linked evidence", async () => {
@@ -661,119 +647,7 @@ describe("AC-07 session search tools", () => {
     expect(rerankedExcerpts.join(" ")).not.toContain("private late provenance payload");
   });
 
-  test("reauthorizes transitive feedback provenance before reopening experiment evidence", async () => {
-    const feedback = await workspace.research.feedbackSignals.recordFeedbackSignal({
-      signalId: "feedback-normal-private-message",
-      kind: "explicit_correction",
-      scope: "transitive heliotrope review",
-      evidenceRefs: [{ kind: "database_row", table: "messages", rowId: "message-private" }],
-      strength: 1,
-      novelty: 1,
-      sensitivity: "normal",
-    });
-    await putCompletedExperiment({
-      experimentId: "experiment-transitive-private",
-      hypothesis: "Transitive heliotrope review improves acquisition planning",
-      scope: "acquisition",
-      outcome: "keep",
-      evidenceRefs: [feedback],
-    });
-
-    const authorized = await tools({
-      currentSessionId: "session-b",
-      privateSessionIds: ["session-private"],
-    }).searchSessions({
-      query: "transitive heliotrope review",
-      sessionId: "session-private",
-      includePrivate: true,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
-    });
-    expect(authorized.ok).toBe(true);
-    if (!authorized.ok) return;
-    const fragment = authorized.value.fragments.find(
-      (candidate) =>
-        candidate.citation.identity.kind === "experiment" &&
-        candidate.citation.identity.experimentId === "experiment-transitive-private",
-    );
-    expect(fragment?.citation).toMatchObject({
-      sessionIds: ["session-private"],
-      messageIds: ["message-private"],
-      sensitivity: "private",
-    });
-    if (!fragment) throw new Error("Expected authorized transitive experiment citation");
-
-    const reopenedWithoutGrant = await tools().openSessionEvidence({ citation: fragment.citation });
-    expect(reopenedWithoutGrant).toMatchObject({ ok: false, error: { code: "unauthorized" } });
-  });
-
-  test("keeps experiment-to-experiment provenance searchable", async () => {
-    await putCompletedExperiment({
-      experimentId: "experiment-lineage-source",
-      hypothesis: "Lineage source preserves grounded evidence",
-      scope: "release research",
-      outcome: "keep",
-      evidenceRefs: [{ kind: "database_row", table: "messages", rowId: "message-public" }],
-    });
-    await putCompletedExperiment({
-      experimentId: "experiment-lineage-successor",
-      hypothesis: "Nested umber lineage improves follow-up synthesis",
-      scope: "release research",
-      outcome: "revise",
-      evidenceRefs: [{ kind: "database_row", table: "experiments", rowId: "experiment-lineage-source" }],
-    });
-
-    const result = await tools().searchSessions({
-      query: "nested umber lineage",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    const successor = result.value.fragments.find(
-      (fragment) =>
-        fragment.citation.identity.kind === "experiment" &&
-        fragment.citation.identity.experimentId === "experiment-lineage-successor",
-    );
-    expect(successor?.citation).toMatchObject({
-      sessionIds: ["session-a"],
-      messageIds: ["message-public"],
-      sensitivity: "normal",
-    });
-  });
-
-  test("fails closed for cyclic and missing transitive experiment provenance", async () => {
-    const cycleA = experimentBase("experiment-cycle-a", "Cyclic vermilion alpha", []);
-    const cycleB = experimentBase("experiment-cycle-b", "Cyclic vermilion beta", [
-      { kind: "database_row", table: "experiments", rowId: "experiment-cycle-a" },
-    ]);
-    await workspace.research.experiments.putExperiment({ ...cycleA, status: "hypothesis" });
-    await workspace.research.experiments.putExperiment({ ...cycleB, status: "hypothesis" });
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const cycleARefs = [{ kind: "database_row", table: "experiments", rowId: "experiment-cycle-b" }] as const;
-    await completeExistingExperiment({ ...cycleA, evidenceRefs: cycleARefs });
-    await completeExistingExperiment(cycleB);
-
-    await putCompletedExperiment({
-      experimentId: "experiment-missing-provenance",
-      hypothesis: "Missing chartreuse provenance must remain hidden",
-      scope: "release research",
-      outcome: "revert",
-      evidenceRefs: [{ kind: "database_row", table: "messages", rowId: "message-public" }],
-    });
-    const database = new DatabaseSync(workspace.unsafeDatabasePathForTesting);
-    database.prepare("DELETE FROM messages WHERE message_id = ?").run("message-public");
-    database.close();
-
-    const result = await tools().searchSessions({
-      query: "cyclic vermilion missing chartreuse provenance",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
-    });
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(JSON.stringify(result.value)).not.toContain("experiment-cycle");
-    expect(JSON.stringify(result.value)).not.toContain("experiment-missing-provenance");
-  });
-
-  test("filters similar tasks and completed experiment outcomes by authoritative type", async () => {
+  test("filters similar tasks by authoritative type", async () => {
     const similar = await tools().findSimilarTasks({
       description: "source grounded release research",
       strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
@@ -786,116 +660,6 @@ describe("AC-07 session search tools", () => {
             fragment.citation.identity.kind === "session" || fragment.citation.identity.kind === "outcome",
         ),
       ).toBe(true);
-
-    await putCompletedExperiment({
-      experimentId: "experiment-release",
-      hypothesis: "Preserving voice improves release research",
-      scope: "release research",
-      outcome: "keep",
-      evidenceRefs: [{ kind: "database_row", table: "messages", rowId: "message-public" }],
-    });
-    await putCompletedExperiment({
-      experimentId: "experiment-private",
-      hypothesis: "Acquisition zephyr routing improves",
-      scope: "acquisition",
-      outcome: "revert",
-      evidenceRefs: [{ kind: "database_row", table: "messages", rowId: "message-private" }],
-    });
-    const privateSignal = await workspace.research.feedbackSignals.recordFeedbackSignal({
-      signalId: "feedback-private",
-      kind: "explicit_correction",
-      scope: "confidential launch",
-      evidenceRefs: [{ kind: "database_row", table: "messages", rowId: "message-private" }],
-      strength: 1,
-      novelty: 1,
-      sensitivity: "private",
-    });
-    await putCompletedExperiment({
-      experimentId: "experiment-private-signal",
-      hypothesis: "Confidential launch correction should change routing",
-      scope: "confidential launch",
-      outcome: "revise",
-      evidenceRefs: [privateSignal],
-    });
-    const outcomes = await tools().priorExperimentOutcomes({ task: "release research preserving voice" });
-    expect(outcomes.ok).toBe(true);
-    if (!outcomes.ok) return;
-    expect(outcomes.value.hits).toHaveLength(1);
-    expect(outcomes.value.hits[0]).toMatchObject({
-      experimentId: "experiment-release",
-      outcome: "keep",
-    });
-    const outcomeFragment = outcomes.value.fragments.find(
-      (fragment) => fragment.id === outcomes.value.hits[0]?.fragmentId,
-    );
-    expect(outcomeFragment?.citation.identity).toEqual({
-      kind: "experiment",
-      experimentId: "experiment-release",
-    });
-    expect(JSON.stringify(outcomes.value)).not.toContain("experiment-private");
-    const privateSignalOutcomes = await tools().priorExperimentOutcomes({ task: "confidential launch" });
-    expect(privateSignalOutcomes.ok).toBe(true);
-    expect(JSON.stringify(privateSignalOutcomes)).not.toContain("experiment-private-signal");
-    const opened = await tools().openSessionEvidence({ citation: outcomeFragment?.citation });
-    expect(opened.ok).toBe(true);
-  });
-
-  test("uses model-ranked semantic relevance for non-overlapping completed experiments", async () => {
-    await putCompletedExperiment({
-      experimentId: "experiment-semantic-target",
-      hypothesis: "Concise provenance improves essays",
-      scope: "writing synthesis",
-      outcome: "keep",
-      evidenceRefs: [{ kind: "database_row", table: "messages", rowId: "message-public" }],
-    });
-    await putCompletedExperiment({
-      experimentId: "experiment-semantic-distractor",
-      hypothesis: "Verbose citations improve release notes",
-      scope: "release operations",
-      outcome: "revise",
-      evidenceRefs: [{ kind: "database_row", table: "messages", rowId: "message-public" }],
-    });
-    let rerankCalls = 0;
-    const semanticHistory = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: {
-        rerank: async (request) => {
-          rerankCalls += 1;
-          return [...request.candidates]
-            .sort((left, right) => {
-              const leftRelevant = left.excerpt.includes("Concise provenance") ? 1 : 0;
-              const rightRelevant = right.excerpt.includes("Concise provenance") ? 1 : 0;
-              return rightRelevant - leftRelevant;
-            })
-            .map((candidate) => ({
-              documentId: candidate.documentId,
-              reason: "The model recognizes terse attribution as concise provenance.",
-            }));
-        },
-      },
-    });
-
-    const result = await tools(
-      { currentSessionId: "session-b" },
-      { maxResults: 1, maxCandidates: 8 },
-      semanticHistory,
-    ).priorExperimentOutcomes({ task: "terse attribution", maxResults: 1 });
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(rerankCalls).toBe(1);
-    expect(result.value.hits).toMatchObject([
-      {
-        experimentId: "experiment-semantic-target",
-        outcome: "keep",
-        rerankReason: "The model recognizes terse attribution as concise provenance.",
-      },
-    ]);
-    expect(result.value.fragments[0]?.citation.identity).toEqual({
-      kind: "experiment",
-      experimentId: "experiment-semantic-target",
-    });
   });
 
   test("requests a broad hybrid ranking before focused tools filter and backfill results", async () => {
@@ -925,24 +689,6 @@ describe("AC-07 session search tools", () => {
       },
     });
 
-    const corrections = await tools(
-      { currentSessionId: "session-b" },
-      { maxResults: 1, maxCandidates: 8 },
-      broadHistory,
-    ).findCorrections({
-      topic: "release research exact citations",
-      maxResults: 1,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
-    });
-    expect(corrections.ok).toBe(true);
-    if (!corrections.ok) return;
-    expect(corrections.value.fragments).toHaveLength(1);
-    expect(corrections.value.fragments[0]?.citation.identity).toEqual({
-      kind: "outcome",
-      sessionId: "session-a",
-      outcomeId: "outcome-correction",
-    });
-
     const similar = await tools(
       { currentSessionId: "session-b" },
       { maxResults: 1, maxCandidates: 8 },
@@ -958,91 +704,6 @@ describe("AC-07 session search tools", () => {
     expect(["session", "outcome"]).toContain(similar.value.fragments[0]?.citation.identity.kind);
     expect(requestedResultLimits.length).toBeGreaterThan(0);
     expect(requestedResultLimits.every((limit) => limit === 8)).toBe(true);
-  });
-
-  test("pre-filters more than twelve rejected outcomes before the configured rerank bound", async () => {
-    await workspace.operational.searchConfiguration.put({
-      lexicalLimit: 32,
-      semanticLimit: 32,
-      rerankLimit: 12,
-      maxExcerptChars: 256,
-      includePrivate: true,
-      updatedAt: later,
-    });
-    await Promise.all(
-      Array.from({ length: 20 }, (_, index) =>
-        workspace.operational.outcomes.put({
-          outcomeId: `outcome-rejected-${String(index).padStart(2, "0")}`,
-          sessionId: "session-a",
-          status: "accepted",
-          summary: "Saffron regression marker rejected decoy saffron regression marker rejected decoy.",
-          sensitivity: "normal",
-          createdAt: later,
-          metadata: {},
-        }),
-      ),
-    );
-    await Promise.all([
-      workspace.operational.outcomes.put({
-        outcomeId: "outcome-eligible-preferred",
-        sessionId: "session-a",
-        status: "corrected",
-        summary: "Saffron regression marker preferred eligible correction.",
-        sensitivity: "normal",
-        createdAt: later,
-        metadata: {},
-      }),
-      workspace.operational.outcomes.put({
-        outcomeId: "outcome-eligible-backup",
-        sessionId: "session-a",
-        status: "corrected",
-        summary: "Saffron regression marker backup eligible correction.",
-        sensitivity: "normal",
-        createdAt: later,
-        metadata: {},
-      }),
-    ]);
-    let rankedExcerpts: readonly string[] = [];
-    const filteredHistory = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: {
-        rerank: async (request) => {
-          rankedExcerpts = request.candidates.map((candidate) => candidate.excerpt);
-          return [...request.candidates]
-            .sort((left, right) => {
-              const leftPreferred = left.excerpt.includes("preferred eligible") ? 1 : 0;
-              const rightPreferred = right.excerpt.includes("preferred eligible") ? 1 : 0;
-              return rightPreferred - leftPreferred;
-            })
-            .map((candidate) => ({
-              documentId: candidate.documentId,
-              reason: "Controlled eligible correction order.",
-            }));
-        },
-      },
-    });
-
-    const result = await tools(
-      { currentSessionId: "session-b" },
-      { maxResults: 1, maxCandidates: 32 },
-      filteredHistory,
-    ).findCorrections({
-      topic: "saffron regression marker",
-      maxResults: 1,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
-    });
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(rankedExcerpts.length).toBeGreaterThanOrEqual(2);
-    expect(rankedExcerpts.some((excerpt) => excerpt.includes("rejected decoy"))).toBe(false);
-    expect(result.value.fragments).toHaveLength(1);
-    expect(result.value.fragments[0]?.citation.identity).toEqual({
-      kind: "outcome",
-      sessionId: "session-a",
-      outcomeId: "outcome-eligible-preferred",
-    });
   });
 
   test("retains outcome-linked file revisions in exact and previous-session scopes", async () => {
@@ -1295,57 +956,4 @@ describe("AC-07 session search tools", () => {
     });
     expect(failed).toMatchObject({ ok: false, error: { code: "backend_failure", retryable: true } });
   });
-
-  async function putCompletedExperiment(input: {
-    readonly experimentId: string;
-    readonly hypothesis: string;
-    readonly scope: string;
-    readonly outcome: "keep" | "revise" | "revert";
-    readonly evidenceRefs: Experiment["evidenceRefs"];
-  }): Promise<void> {
-    const base = experimentBase(input.experimentId, input.hypothesis, input.evidenceRefs, input.scope);
-    await workspace.research.experiments.putExperiment({ ...base, status: "hypothesis" });
-    await completeExistingExperiment(base, input.outcome);
-  }
-
-  function experimentBase(
-    experimentId: string,
-    hypothesis: string,
-    evidenceRefs: Experiment["evidenceRefs"],
-    scope = "release research",
-  ) {
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    return {
-      experimentId,
-      hypothesis,
-      scope,
-      evidenceRefs,
-      baselineRevision: revision(`${experimentId}-baseline`),
-      candidateRevisions: [revision(`${experimentId}-candidate`)],
-      feedbackSignalIds: [],
-    } as const;
-  }
-
-  async function completeExistingExperiment(
-    base: ReturnType<typeof experimentBase>,
-    outcome: "keep" | "revise" | "revert" = "keep",
-  ): Promise<void> {
-    await workspace.research.experiments.putExperiment({ ...base, status: "authoring" });
-    await workspace.research.experiments.putExperiment({ ...base, status: "preflight" });
-    await workspace.research.experiments.putExperiment({ ...base, status: "observing" });
-    await workspace.research.experiments.putExperiment({
-      ...base,
-      status: "completed",
-      outcome,
-    });
-  }
 });
-
-function revision(id: string): CapabilityRevisionRef {
-  return {
-    kind: "capability_revision",
-    capabilityId: "research",
-    capabilityRevisionId: id,
-    bundleDigest: sha256(id),
-  };
-}

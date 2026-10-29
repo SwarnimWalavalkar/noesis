@@ -63,8 +63,8 @@ describe("learning audit view helpers", () => {
     expect(
       isNoteworthy(
         record({
-          id: "working_adjustment:active",
-          kind: "working_adjustment",
+          id: "capability_revision:current",
+          kind: "capability_revision",
           group: "history",
           title: "Keep review constraints",
           tone: "active",
@@ -74,41 +74,10 @@ describe("learning audit view helpers", () => {
     expect(
       isNoteworthy(
         record({
-          id: "working_adjustment:old",
-          kind: "working_adjustment",
+          id: "capability_revision:old",
+          kind: "capability_revision",
           group: "history",
-          title: "Old strategy",
-        }),
-      ),
-    ).toBe(false);
-    expect(
-      isNoteworthy(
-        record({
-          id: "trial:1",
-          kind: "trial",
-          group: "evaluation",
-          title: "baseline trial",
-        }),
-      ),
-    ).toBe(false);
-    expect(
-      isNoteworthy(
-        record({
-          id: "trial:failed",
-          kind: "trial",
-          group: "evaluation",
-          title: "candidate trial",
-          tone: "negative",
-        }),
-      ),
-    ).toBe(true);
-    expect(
-      isNoteworthy(
-        record({
-          id: "feedback_signal:1",
-          kind: "feedback_signal",
-          group: "feedback",
-          title: "correction",
+          title: "Old revision",
         }),
       ),
     ).toBe(false);
@@ -117,10 +86,10 @@ describe("learning audit view helpers", () => {
   test("separates all-activity toggle from group cycling", () => {
     expect(toggleAllActivity("noteworthy")).toBe("all");
     expect(toggleAllActivity("all")).toBe("capabilities");
-    expect(toggleAllActivity("memory")).toBe("all");
+    expect(toggleAllActivity("history")).toBe("all");
     expect(nextGroupFilter("noteworthy")).toBe("capabilities");
     expect(nextGroupFilter("capabilities")).toBe("feedback");
-    expect(nextGroupFilter("operations")).toBe("capabilities");
+    expect(nextGroupFilter("history")).toBe("capabilities");
   });
 
   test("tucks failed reflections behind a quiet expandable section", () => {
@@ -140,22 +109,22 @@ describe("learning audit view helpers", () => {
       tone: "positive",
       occurredAt: "2026-08-14T00:00:02.000Z",
     });
-    const experiment = record({
-      id: "experiment:1",
-      kind: "experiment",
+    const revision = record({
+      id: "capability_revision:1",
+      kind: "capability_revision",
       group: "history",
       title: "Prefer narrow research",
       occurredAt: "2026-08-14T00:00:01.000Z",
     });
     expect(isQuietFailure(failed)).toBe(true);
     expect(isQuietFailure(lesson)).toBe(false);
-    expect(navigableRecords([failed, experiment, lesson], false).map((item) => item.id)).toEqual([
+    expect(navigableRecords([failed, revision, lesson], false).map((item) => item.id)).toEqual([
       "reflection:1",
-      "experiment:1",
+      "capability_revision:1",
     ]);
-    expect(navigableRecords([failed, experiment, lesson], true).map((item) => item.id)).toEqual([
+    expect(navigableRecords([failed, revision, lesson], true).map((item) => item.id)).toEqual([
       "reflection:1",
-      "experiment:1",
+      "capability_revision:1",
       "reflection:failed",
     ]);
   });
@@ -243,11 +212,11 @@ describe("learning audit view helpers", () => {
         title: "First decision",
       }),
       record({
-        id: "experiment:1",
-        kind: "experiment",
+        id: "capability_revision:1",
+        kind: "capability_revision",
         group: "history",
-        title: "Selected experiment",
-        summary: "Selected experiment detail",
+        title: "Selected revision",
+        summary: "Selected revision detail",
       }),
     ];
     const options = Object.freeze({
@@ -259,12 +228,12 @@ describe("learning audit view helpers", () => {
 
     const oneRow = listViewport(records, 1, 80, 1, false, now, undefined, options);
     expect(oneRow).toHaveLength(1);
-    expect(oneRow[0]).toContain("› ◌ Selected experiment");
+    expect(oneRow[0]).toContain("› ◌ Selected revision");
 
     const twoRows = listViewport(records, 1, 80, 2, false, now, undefined, options);
     expect(twoRows).toHaveLength(2);
-    expect(twoRows[0]).toContain("› ◌ Selected experiment");
-    expect(twoRows[1]).toContain("Selected experiment detail");
+    expect(twoRows[0]).toContain("› ◌ Selected revision");
+    expect(twoRows[1]).toContain("Selected revision detail");
   });
 
   test("pretty-prints the raw JSON projection", () => {
@@ -272,8 +241,8 @@ describe("learning audit view helpers", () => {
     expect(
       detailDocument(
         record({
-          id: "experiment:1",
-          kind: "experiment",
+          id: "capability_revision:1",
+          kind: "capability_revision",
           group: "history",
           title: "Prefer narrow research",
           rawJson: '{"hypothesis":"Use narrower research first"}',
@@ -347,7 +316,7 @@ describe("learning audit view helpers", () => {
         Object.freeze({ identity: "b", label: "USER", excerpt: "second cited preview", redacted: false }),
         Object.freeze({ identity: "c", label: "USER", excerpt: "third cited preview", redacted: false }),
       ]),
-      relations: Object.freeze([{ label: "experiment", targetId: "experiment:1" }]),
+      relations: Object.freeze([{ label: "experiment", targetId: "capability_revision:1" }]),
     });
     expect(interactableStops(withEvidence)).toEqual(["evidence", "inputs", "related"]);
     expect(cycleDetailFocus(withEvidence, "document")).toBe("evidence");

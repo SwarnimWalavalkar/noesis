@@ -240,18 +240,11 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
               turnId: request.turnId,
               outcomeId,
               project: options.project,
-              servedWorkingAdjustmentOutcomes: Object.freeze([]),
               scope: "global",
               userMessage: request.input,
             } satisfies Pick<
               SettledLearningTurn,
-              | "sessionId"
-              | "turnId"
-              | "outcomeId"
-              | "project"
-              | "servedWorkingAdjustmentOutcomes"
-              | "scope"
-              | "userMessage"
+              "sessionId" | "turnId" | "outcomeId" | "project" | "scope" | "userMessage"
             >)
               .addOptional(assistantMessage ? { assistantMessage } : undefined)
               .add({

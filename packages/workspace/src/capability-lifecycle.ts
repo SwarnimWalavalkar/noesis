@@ -20,7 +20,6 @@ import {
   type EvidenceRef,
   EvidenceRefSchema,
   sameCapabilityRevisionRef,
-  WorkingAdjustmentSchema,
 } from "@noesis/domain";
 import { parseJson, requiredNumber, requiredString, type WorkspaceDatabase } from "./database.ts";
 import { z } from "zod";
@@ -948,75 +947,6 @@ export function createCapabilityLifecycleStore(
       }
       return settlePendingGate(current, request.status, request.instruction);
     });
-  const listActiveLegacyAdjustments: CapabilityLifecycleStore["listActiveLegacyAdjustments"] = async () =>
-    Object.freeze(
-      db
-        .prepare(`SELECT adjustment.data_json
-           FROM active_project_adjustments AS active
-           JOIN working_adjustments AS adjustment
-             ON adjustment.project_id = active.project_id
-            AND adjustment.adjustment_id = active.adjustment_id
-           ORDER BY active.project_id`)
-        .all()
-        .map((row) => WorkingAdjustmentSchema.parse(parseJson(requiredString(row, "data_json")))),
-    );
-  const recordCutoverFailure: CapabilityLifecycleStore["recordCutoverFailure"] = async (
-    adjustment,
-    failure,
-  ) => {
-    options.database.transaction(() => {
-      db.prepare(`INSERT INTO capability_learning_cutover_failures(
-          source_project_id, source_adjustment_id, failure, occurred_at
-        ) VALUES (?, ?, ?, ?)
-        ON CONFLICT(source_project_id, source_adjustment_id) DO UPDATE SET
-          failure = excluded.failure,
-          occurred_at = excluded.occurred_at`).run(
-        adjustment.scope.projectId,
-        adjustment.adjustmentId,
-        failure.slice(0, 8192),
-        options.now(),
-      );
-    });
-  };
-  const clearCutoverFailure: CapabilityLifecycleStore["clearCutoverFailure"] = async (adjustment) => {
-    options.database.transaction(() => {
-      db.prepare(`DELETE FROM capability_learning_cutover_failures
-         WHERE source_project_id = ? AND source_adjustment_id = ?`).run(
-        adjustment.scope.projectId,
-        adjustment.adjustmentId,
-      );
-    });
-  };
-  const isCutoverComplete: CapabilityLifecycleStore["isCutoverComplete"] = async () =>
-    db.prepare("SELECT 1 FROM capability_learning_cutovers WHERE cutover_version = 1").get() !== undefined;
-  const completeCutover: CapabilityLifecycleStore["completeCutover"] = async () =>
-    options.database.transaction(() => {
-      if (db.prepare("SELECT 1 FROM capability_learning_cutovers WHERE cutover_version = 1").get())
-        return false;
-      db.prepare(`DELETE FROM capability_learning_cutover_failures
-         WHERE NOT EXISTS (
-           SELECT 1
-           FROM active_project_adjustments AS active
-           JOIN working_adjustments AS adjustment
-             ON adjustment.project_id = active.project_id
-            AND adjustment.adjustment_id = active.adjustment_id
-           WHERE adjustment.project_id = capability_learning_cutover_failures.source_project_id
-             AND adjustment.adjustment_id = capability_learning_cutover_failures.source_adjustment_id
-         )`).run();
-      if (db.prepare("SELECT 1 FROM capability_learning_cutover_failures LIMIT 1").get())
-        throw new Error("Capability learning cutover still has recorded failures");
-      db.prepare("INSERT INTO capability_learning_cutovers(cutover_version, completed_at) VALUES (1, ?)").run(
-        options.now(),
-      );
-      db.prepare(`UPDATE jobs
-         SET status = 'cancelled', completed_at = ?, lease_token = NULL, lease_until = NULL
-         WHERE status IN ('scheduled', 'running')
-           AND kind IN ('runtime.author_revision', 'runtime.preflight', 'runtime.outcome_judge')`).run(
-        options.now(),
-      );
-      db.prepare("DELETE FROM active_project_adjustments").run();
-      return true;
-    });
   const OutcomeResultSchema = z.enum(["helped", "hurt", "unclear"]);
   const decodeOutcome = (row: DatabaseRow): CapabilityOutcome =>
     Object.freeze({
@@ -1158,11 +1088,6 @@ export function createCapabilityLifecycleStore(
     countLifecycle,
     decideGate,
     settleGate,
-    completeCutover,
-    isCutoverComplete,
-    listActiveLegacyAdjustments,
-    recordCutoverFailure,
-    clearCutoverFailure,
   });
 }
 function readStoredRevision(

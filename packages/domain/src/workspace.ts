@@ -3,17 +3,10 @@ import type {
   ArtifactFileRef,
   DatabaseRowRef,
   DatabaseTable,
-  EvaluationRecord,
   EvidenceKind,
   EvidenceRef,
   EvidenceRevisionRef,
-  Experiment,
-  ExperimentTrial,
-  FeedbackSignal,
   FileRevisionRef,
-  PreflightPlan,
-  PreflightReport,
-  WorkingAdjustment,
 } from "./research.ts";
 
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -25,14 +18,6 @@ export const PERSISTED_DATA = [
   "workflow_run",
   "workflow_phase",
   "job",
-  "working_adjustment",
-  "experiment",
-  "experiment_trial",
-  "feedback_signal",
-  "preflight_plan",
-  "preflight_report",
-  "evaluation",
-  "activation_pointer",
   "definition_current_pointer",
   "search_configuration",
   "activity_provenance",
@@ -75,14 +60,6 @@ export const PERSISTED_AUTHORITY_BY_DATUM = {
   workflow_run: "sqlite_operational",
   workflow_phase: "sqlite_operational",
   job: "sqlite_operational",
-  working_adjustment: "sqlite_operational",
-  experiment: "sqlite_operational",
-  experiment_trial: "sqlite_operational",
-  feedback_signal: "sqlite_operational",
-  preflight_plan: "sqlite_operational",
-  preflight_report: "sqlite_operational",
-  evaluation: "sqlite_operational",
-  activation_pointer: "sqlite_operational",
   definition_current_pointer: "sqlite_operational",
   search_configuration: "sqlite_operational",
   activity_provenance: "sqlite_operational",
@@ -250,60 +227,6 @@ export interface ArtifactFilePort {
   readonly importArtifact: (request: ArtifactImportRequest) => Promise<ArtifactFileRef>;
 }
 
-export interface ExperimentStorePort {
-  readonly getExperiment: (experimentId: string) => Promise<Experiment | undefined>;
-  readonly listExperiments: (request: {
-    readonly status?: Experiment["status"];
-    readonly sourceAdjustmentIds?: readonly string[];
-    readonly limit: number;
-  }) => Promise<readonly Experiment[]>;
-  readonly putExperiment: (experiment: Experiment) => Promise<DatabaseRowRef<"experiments">>;
-}
-
-export interface ExperimentTrialStorePort {
-  readonly getTrial: (trialId: string) => Promise<ExperimentTrial | undefined>;
-  readonly listTrials: (experimentId: string) => Promise<readonly ExperimentTrial[]>;
-  readonly putTrial: (trial: ExperimentTrial) => Promise<DatabaseRowRef<"experiment_trials">>;
-}
-
-export interface PreflightStorePort {
-  readonly getPreflightPlan: (planId: string) => Promise<PreflightPlan | undefined>;
-  readonly putPreflightPlan: (plan: PreflightPlan) => Promise<DatabaseRowRef<"preflight_plans">>;
-  readonly getPreflightReport: (preflightId: string) => Promise<PreflightReport | undefined>;
-  readonly putPreflightReport: (report: PreflightReport) => Promise<DatabaseRowRef<"preflight_reports">>;
-  readonly completePreflight: (input: {
-    readonly report: PreflightReport;
-    readonly evaluation: EvaluationRecord;
-  }) => Promise<{
-    readonly report: DatabaseRowRef<"preflight_reports">;
-    readonly evaluation: DatabaseRowRef<"evaluations">;
-  }>;
-}
-
-export interface EvaluationStorePort {
-  readonly getEvaluation: (evaluationId: string) => Promise<EvaluationRecord | undefined>;
-  readonly listEvaluations: (experimentId: string) => Promise<readonly EvaluationRecord[]>;
-  readonly putEvaluation: (evaluation: EvaluationRecord) => Promise<DatabaseRowRef<"evaluations">>;
-}
-
-export interface FeedbackSignalStorePort {
-  readonly getFeedbackSignal: (signalId: string) => Promise<FeedbackSignal | undefined>;
-  readonly listFeedbackSignals: (request: {
-    readonly experimentId?: string;
-    readonly limit: number;
-  }) => Promise<readonly FeedbackSignal[]>;
-  readonly recordFeedbackSignal: (signal: FeedbackSignal) => Promise<DatabaseRowRef<"feedback_signals">>;
-}
-
-export interface WorkingAdjustmentReadPort {
-  readonly get: (adjustmentId: string) => Promise<WorkingAdjustment | undefined>;
-  readonly getActive: (projectId: string) => Promise<WorkingAdjustment | undefined>;
-  readonly list: (request: {
-    readonly projectId?: string;
-    readonly limit: number;
-  }) => Promise<readonly WorkingAdjustment[]>;
-}
-
 export type DurableJobStatus =
   | "scheduled"
   | "running"
@@ -351,14 +274,6 @@ export interface DurableJobEnqueueRequest {
   readonly maxAttempts: number;
   readonly estimatedCost: number;
   readonly budget: number;
-  readonly observations?: readonly DurableJobObservationRequest[];
-  readonly inheritObservationsFromParentJobId?: string;
-}
-
-export interface DurableJobObservationRequest {
-  readonly sourceSessionId: string;
-  readonly parentJobId: string;
-  readonly observedAt: string;
 }
 
 export interface DurableJobFailure {
@@ -419,14 +334,8 @@ export interface DurableJobListRequest {
   readonly order?: "oldest" | "newest";
   /** Exact reflection-session selector over the authoritative JSON payload. */
   readonly payloadSessionId?: string;
-  /** Exact source-session selector for authoring and preflight payloads. */
-  readonly payloadSourceSessionIds?: readonly string[];
   /** Exact reflection-project selector over the authoritative JSON payload. */
   readonly payloadProjectId?: string;
-  /** Exact session selector over authoritative many-to-one job observations. */
-  readonly observedSessionId?: string;
-  /** Exact experiment selector for authoring and preflight payloads. */
-  readonly payloadExperimentIds?: readonly string[];
 }
 
 export interface DurableJobPage {
@@ -438,8 +347,6 @@ export interface DurableJobPage {
 /** Atomic SQLite-backed scheduling primitives. Runtime owns job meanings and retry decisions. */
 export interface DurableJobStorePort {
   readonly enqueue: (request: DurableJobEnqueueRequest) => Promise<DurableJobRecord>;
-  readonly recordObservation: (jobId: string, observation: DurableJobObservationRequest) => Promise<void>;
-  readonly inheritObservations: (jobId: string, parentJobId: string, observedAt: string) => Promise<void>;
   readonly get: (jobId: string) => Promise<DurableJobRecord | undefined>;
   readonly list: (request?: DurableJobListRequest) => Promise<readonly DurableJobRecord[]>;
   readonly listPage: (request?: DurableJobListRequest) => Promise<DurableJobPage>;
@@ -479,14 +386,6 @@ export interface DurableJobStorePort {
   }) => Promise<DurableJobRecord>;
 }
 
-export interface ResearchStatePort {
-  readonly experiments: ExperimentStorePort;
-  readonly trials: ExperimentTrialStorePort;
-  readonly preflights: PreflightStorePort;
-  readonly evaluations: EvaluationStorePort;
-  readonly feedbackSignals: FeedbackSignalStorePort;
-}
-
 /**
  * The non-protected persistence surface shared by research packages. Activation and authority mutation
  * deliberately live behind unexported runtime and policy internals.
@@ -499,8 +398,6 @@ export interface WorkspaceStore {
   readonly revisions: RevisionSnapshotPort;
   readonly evidence: EvidenceFilePort;
   readonly artifacts: ArtifactFilePort;
-  readonly research: ResearchStatePort;
   readonly jobs: DurableJobStorePort;
-  readonly workingAdjustments: WorkingAdjustmentReadPort;
   readonly declaredAuthority: typeof declaredAuthorityFor;
 }

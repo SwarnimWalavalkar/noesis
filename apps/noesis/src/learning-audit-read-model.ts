@@ -10,8 +10,6 @@ import {
   capabilityEvidenceLabel,
   type DurableJobRecord,
   type EvidenceRef,
-  EvidenceRefSchema,
-  type Experiment,
   type FileRevisionRef,
   type ProjectRef,
   isJsonObject,
@@ -20,7 +18,6 @@ import {
   parseCapabilityDocument,
   sha256,
   toJsonValue,
-  type WorkingAdjustment,
 } from "@noesis/domain";
 import { capabilityDocumentRevision, capabilityWorkingDocumentPath } from "@noesis/learning";
 import { join } from "node:path";
@@ -31,7 +28,6 @@ import type {
   TuiLearningDetailSection,
   TuiLearningEvidencePreview,
   TuiLearningPrimitive,
-  TuiLearningPrimitiveGroup,
   TuiLearningPrimitiveKind,
   TuiLearningRelation,
 } from "@noesis/tui";
@@ -42,10 +38,6 @@ const EVIDENCE_PREVIEW_LIMIT = 8;
 const CONSIDERED_PREVIEW_LIMIT = 8;
 const EVIDENCE_EXCERPT_LIMIT = 480;
 const MATERIAL_PREVIEW_LIMIT = 2400;
-const LEGACY_REFLECTION_JOB_KIND = "runtime.reflect_turn";
-function isReflectionJob(job: DurableJobRecord): boolean {
-  return job.kind === CAPABILITY_REFLECTION_JOB_KIND || job.kind === LEGACY_REFLECTION_JOB_KIND;
-}
 interface LearningAuditSource {
   readonly workspace: NoesisWorkspaceStore;
   /** The Noesis home, used to show where each Capability file lives. */
@@ -229,24 +221,6 @@ function createEvidencePreviewResolver(workspace: NoesisWorkspaceStore) {
         redacted: false,
       });
     }
-    if (reference.table === "feedback_signals") {
-      const signal = await workspace.research.feedbackSignals.getFeedbackSignal(reference.rowId);
-      if (!signal || signal.sensitivity !== "normal") return redactedEvidence(identity, "FEEDBACK");
-      return Object.freeze({
-        identity,
-        label: `FEEDBACK · ${signal.kind.replaceAll("_", " ")}`,
-        excerpt: `${signal.scope} scope · strength ${String(signal.strength)} · novelty ${String(signal.novelty)}`,
-        redacted: false,
-      });
-    }
-    if (reference.table === "experiments") {
-      return Object.freeze({
-        identity,
-        label: "EXPERIMENT",
-        excerpt: "Open the related experiment primitive to inspect its authorized projection.",
-        redacted: true,
-      });
-    }
     return Object.freeze({
       identity,
       label: reference.table.replaceAll("_", " ").toUpperCase(),
@@ -290,20 +264,6 @@ function stringField(value: unknown, key: string): string | undefined {
   const field = parsed.data[key];
   return typeof field === "string" && field.length > 0 ? field : undefined;
 }
-function objectField(value: unknown, key: string): JsonObject | undefined {
-  const parsed = JsonValueSchema.safeParse(value);
-  if (!parsed.success || !isJsonObject(parsed.data)) return undefined;
-  const field = parsed.data[key];
-  return isJsonObject(field) ? Object.freeze({ ...field }) : undefined;
-}
-function evidenceRefsField(value: unknown, key: string): readonly EvidenceRef[] {
-  const object = JsonValueSchema.safeParse(value);
-  if (!object.success || !isJsonObject(object.data)) return Object.freeze([]);
-  const parsed = EvidenceRefSchema.array().safeParse(object.data[key]);
-  return parsed.success
-    ? Object.freeze(parsed.data.map((reference) => Object.freeze({ ...reference })))
-    : Object.freeze([]);
-}
 function detailEntry(label: string, value: string | undefined) {
   return value ? Object.freeze({ label, value }) : undefined;
 }
@@ -322,20 +282,12 @@ function capabilityScopeLabel(scope: CapabilityScope): string {
 function capabilitySelectionLabel(mode: "relevant" | "always"): string {
   return mode === "always" ? "Always active" : "Selected when semantically relevant";
 }
-function legacyMaterialCounts(revision: CapabilityRevision): string {
-  return [
-    `${String(revision.promptModules.length)} prompt${revision.promptModules.length === 1 ? "" : "s"}`,
-    `${String(revision.skills.length)} skill${revision.skills.length === 1 ? "" : "s"}`,
-    `${String(revision.tools.length)} tool${revision.tools.length === 1 ? "" : "s"}`,
-    "1 router",
-  ].join(" · ");
-}
 function capabilityFacets(revision: CapabilityRevision | undefined): readonly TuiCapabilityFacet[] {
   return revision ? capabilityEffectKinds(revision) : Object.freeze([]);
 }
 function facetCountLabel(revision: CapabilityRevision): string {
   const effects = capabilityEffects(revision);
-  if (effects.length === 0) return `Legacy bundle · ${legacyMaterialCounts(revision)}`;
+  if (effects.length === 0) return "Legacy bundle";
   const counts = new Map<TuiCapabilityFacet, number>();
   for (const effect of effects) counts.set(effect.kind, (counts.get(effect.kind) ?? 0) + 1);
   return [...counts.entries()]
@@ -427,16 +379,10 @@ async function capabilityMaterialEntries(
     ),
     detailEntry("change", lifecycle.summary),
     ...materialEntries,
-    detailEntry("materials", legacyMaterialCounts(revision)),
   ]);
 }
 function reflectionStatusLabel(status: string): string {
   if (status === "no_change") return "No lasting change";
-  if (status === "adjusted") return "Applied project strategy";
-  if (status === "replaced") return "Updated project strategy";
-  if (status === "unapplied") return "Removed project strategy";
-  if (status === "experiment") return "Proposed an experiment";
-  if (status === "deduped") return "Matched an existing experiment";
   if (status === "stale") return "Decision became stale before application";
   if (status === "failed" || status === "budget_exhausted" || status === "cancelled")
     return `Reflection ${status.replaceAll("_", " ")}`;
@@ -452,10 +398,7 @@ function reflectionReason(job: DurableJobRecord): string {
   if (reason === "sensitive") return "The turn was too sensitive for ambient learning.";
   return reason ?? job.lastError?.message ?? `The reflection is ${job.status.replaceAll("_", " ")}.`;
 }
-function reflectionDetails(
-  job: DurableJobRecord,
-  adjustments: ReadonlyMap<string, WorkingAdjustment>,
-): readonly TuiLearningDetailSection[] {
+function reflectionDetails(job: DurableJobRecord): readonly TuiLearningDetailSection[] {
   const status = stringField(job.result, "status") ?? job.status;
   if (jobSensitivity(job) !== "normal")
     return Object.freeze(
@@ -469,45 +412,15 @@ function reflectionDetails(
         ]),
       ].filter(defined),
     );
-  const observation = objectField(job.result, "observation");
-  const adjustmentId = stringField(job.result, "adjustmentId");
-  const adjustment = adjustmentId ? adjustments.get(adjustmentId) : undefined;
-  const replacedAdjustmentId = stringField(job.result, "replacedAdjustmentId");
-  const replaced = replacedAdjustmentId ? adjustments.get(replacedAdjustmentId) : undefined;
-  const transition =
-    status === "adjusted" || status === "replaced"
-      ? adjustment
-        ? detailSection("What changed", [
-            detailEntry("Before", replaced?.strategy ?? "No project strategy was active."),
-            detailEntry("Now", adjustment.strategy),
-            detailEntry("Success looks like", adjustment.successSignal),
-            detailEntry("Scope", "This project"),
-          ])
-        : undefined
-      : status === "unapplied"
-        ? adjustment
-          ? detailSection("What changed", [
-              detailEntry("Before", adjustment.strategy),
-              detailEntry("Now", "No project strategy is active."),
-              detailEntry("Scope", "This project"),
-            ])
-          : undefined
-        : status === "stale"
-          ? detailSection("What changed", [
-              detailEntry("Result", "No strategy changed because the decision was stale."),
-            ])
-          : undefined;
   return Object.freeze(
     [
       detailSection("Decision", [
         detailEntry("Outcome", reflectionStatusLabel(status)),
         detailEntry("Why", reflectionReason(job)),
       ]),
-      transition,
-      observation
-        ? detailSection("Observation", [
-            detailEntry("Classified as", stringField(observation, "kind")?.replaceAll("_", " ")),
-            detailEntry("Reason", stringField(observation, "reason")),
+      status === "stale"
+        ? detailSection("What changed", [
+            detailEntry("Result", "Nothing changed because the decision was stale."),
           ])
         : undefined,
     ].filter(defined),
@@ -517,254 +430,66 @@ async function listProjectReflectionJobs(
   workspace: NoesisWorkspaceStore,
   projectId: string,
 ): Promise<readonly DurableJobRecord[]> {
-  const jobs = (
-    await Promise.all(
-      [CAPABILITY_REFLECTION_JOB_KIND, LEGACY_REFLECTION_JOB_KIND].map((kind) =>
-        workspace.jobs.list({
-          kind,
-          payloadProjectId: projectId,
-          order: "newest",
-          limit: AUDIT_LIMIT,
-        }),
-      ),
-    )
-  ).flat();
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return Object.freeze(
-    [...new Map(jobs.map((job) => [job.jobId, job] as const)).values()]
-      .sort(
-        (left, right) =>
-          right.createdAt.localeCompare(left.createdAt) || right.jobId.localeCompare(left.jobId),
-      )
-      .slice(0, AUDIT_LIMIT),
-  );
+  return await workspace.jobs.list({
+    kind: CAPABILITY_REFLECTION_JOB_KIND,
+    payloadProjectId: projectId,
+    order: "newest",
+    limit: AUDIT_LIMIT,
+  });
 }
-async function listExperimentJobs(
-  workspace: NoesisWorkspaceStore,
-  experimentIds: readonly string[],
-): Promise<readonly DurableJobRecord[]> {
-  const chunks: string[][] = [];
-  for (let index = 0; index < experimentIds.length; index += 250)
-    chunks.push(experimentIds.slice(index, index + 250));
-  const jobs = (
-    await Promise.all(
-      chunks.map((payloadExperimentIds) =>
-        workspace.jobs.list({
-          payloadExperimentIds,
-          order: "newest",
-          limit: AUDIT_LIMIT,
-        }),
-      ),
-    )
-  ).flat();
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return Object.freeze(
-    [...new Map(jobs.map((job) => [job.jobId, job] as const)).values()]
-      .sort(
-        (left, right) =>
-          right.createdAt.localeCompare(left.createdAt) || right.jobId.localeCompare(left.jobId),
-      )
-      .slice(0, AUDIT_LIMIT),
-  );
-}
-async function listSourceSessionJobs(
-  workspace: NoesisWorkspaceStore,
-  sessionIds: readonly string[],
-): Promise<readonly DurableJobRecord[]> {
-  const chunks: string[][] = [];
-  for (let index = 0; index < sessionIds.length; index += 250)
-    chunks.push(sessionIds.slice(index, index + 250));
-  const jobs = (
-    await Promise.all(
-      chunks.map((payloadSourceSessionIds) =>
-        workspace.jobs.list({
-          payloadSourceSessionIds,
-          order: "newest",
-          limit: AUDIT_LIMIT,
-        }),
-      ),
-    )
-  ).flat();
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return Object.freeze([...new Map(jobs.map((job) => [job.jobId, job] as const)).values()]);
-}
-async function resolveProjectExperiments(
-  workspace: NoesisWorkspaceStore,
-  originJobs: readonly DurableJobRecord[],
-  adjustments: Awaited<ReturnType<NoesisWorkspaceStore["workingAdjustments"]["list"]>>,
-): Promise<readonly Experiment[]> {
-  const adjustmentIds = adjustments.map((adjustment) => adjustment.adjustmentId);
-  const adjustmentExperiments =
-    adjustmentIds.length === 0
-      ? []
-      : await workspace.research.experiments.listExperiments({
-          sourceAdjustmentIds: adjustmentIds,
-          limit: AUDIT_LIMIT,
-        });
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const knownById = new Map(
-    adjustmentExperiments.map((experiment) => [experiment.experimentId, experiment] as const),
-  );
-  const queue = [
-    ...new Set([
-      ...originJobs.map(jobExperimentId).filter(defined),
-      ...adjustmentExperiments.map((experiment) => experiment.experimentId),
-    ]),
-  ];
-  const selected = new Map<string, Experiment>();
-  for (let index = 0; index < queue.length && selected.size < AUDIT_LIMIT; index += 1) {
-    const experimentId = queue[index];
-    if (experimentId === undefined || selected.has(experimentId)) continue;
-    const experiment =
-      knownById.get(experimentId) ?? (await workspace.research.experiments.getExperiment(experimentId));
-    if (experiment === undefined) continue;
-    selected.set(experimentId, experiment);
-    if (experiment.followUpExperimentId !== undefined) queue.push(experiment.followUpExperimentId);
-  }
-  return Object.freeze([...selected.values()]);
-}
-function jobExperimentId(job: DurableJobRecord): string | undefined {
-  return stringField(job.payload, "experimentId") ?? stringField(job.result, "experimentId");
+// BOUNDARY: Reflection payloads are read loosely so older completed jobs stay listable.
+function reflectionTurn(job: DurableJobRecord): JsonObject | undefined {
+  const payload = JsonValueSchema.safeParse(job.payload);
+  if (!payload.success || !isJsonObject(payload.data)) return undefined;
+  const turn = payload.data["turn"];
+  return isJsonObject(turn) ? turn : undefined;
 }
 function jobProjectId(job: DurableJobRecord): string | undefined {
-  const direct = stringField(job.result, "projectId");
-  if (direct) return direct;
-  const payload = JsonValueSchema.safeParse(job.payload);
-  if (!isReflectionJob(job) || !payload.success || !isJsonObject(payload.data)) return undefined;
-  const turn = payload.data["turn"];
-  const project = isJsonObject(turn) ? turn["project"] : undefined;
-  return stringField(project, "projectId");
+  return stringField(job.result, "projectId") ?? stringField(reflectionTurn(job)?.["project"], "projectId");
 }
 function jobSessionId(job: DurableJobRecord): string | undefined {
-  const payload = JsonValueSchema.safeParse(job.payload);
-  if (isReflectionJob(job) && payload.success && isJsonObject(payload.data))
-    return stringField(payload.data["turn"], "sessionId");
-  return stringField(job.payload, "sourceSessionId");
-}
-function reflectionTurnId(job: DurableJobRecord): string | undefined {
-  const payload = JsonValueSchema.safeParse(job.payload);
-  if (!isReflectionJob(job) || !payload.success || !isJsonObject(payload.data)) return undefined;
-  return stringField(payload.data["turn"], "turnId");
+  return stringField(reflectionTurn(job), "sessionId");
 }
 function jobSensitivity(job: DurableJobRecord): "normal" | "private" | "secret" {
-  const payload = JsonValueSchema.safeParse(job.payload);
-  if (!isReflectionJob(job) || !payload.success || !isJsonObject(payload.data)) return "normal";
-  const turn = payload.data["turn"];
-  const value = stringField(turn, "sensitivity");
+  const value = stringField(reflectionTurn(job), "sensitivity");
   return value === "private" || value === "secret" ? value : "normal";
 }
 function jobSummary(job: DurableJobRecord): string {
-  if (isReflectionJob(job) && jobSensitivity(job) !== "normal")
+  if (jobSensitivity(job) !== "normal")
     return "Sensitive reflection details are hidden because this TUI has no admitted grant for them.";
   if (job.status === "failed" || job.status === "budget_exhausted" || job.status === "cancelled")
     return job.lastError?.message ?? `Learning job ${job.status.replaceAll("_", " ")}`;
   if (job.status !== "completed") return `${job.kind} is ${job.status}`;
-  if (isReflectionJob(job)) return reflectionReason(job);
-  const resultStatus = stringField(job.result, "status");
-  return (
-    stringField(job.result, "rationale") ??
-    stringField(job.result, "reason") ??
-    (resultStatus
-      ? `${job.kind} completed with ${resultStatus.replaceAll("_", " ")}`
-      : `${job.kind} completed`)
-  );
+  return reflectionReason(job);
 }
-function reflectionTitle(job: DurableJobRecord, adjustment: WorkingAdjustment | undefined): string {
+function reflectionTitle(job: DurableJobRecord): string {
   const status = stringField(job.result, "status") ?? job.status;
   if (jobSensitivity(job) !== "normal") return reflectionStatusLabel(status);
-  if ((status === "adjusted" || status === "replaced" || status === "unapplied") && adjustment?.strategy)
-    return adjustment.strategy;
   const rationale = stringField(job.result, "rationale");
   if (rationale && status !== "no_change") return rationale;
   return reflectionStatusLabel(status);
 }
-function originSessionMaps(
-  jobs: readonly DurableJobRecord[],
-  adjustments: readonly WorkingAdjustment[],
-  experiments: readonly Experiment[],
-): Readonly<{
-  readonly sessionByTurnId: ReadonlyMap<string, string>;
-  readonly sessionByAdjustmentId: ReadonlyMap<string, string>;
-  readonly sessionByExperimentId: ReadonlyMap<string, string>;
-}> {
-  const sessionByTurnId = new Map<string, string>();
-  const sessionByExperimentId = new Map<string, string>();
-  for (const job of jobs) {
-    const sessionId = jobSessionId(job);
-    if (!sessionId) continue;
-    const turnId = reflectionTurnId(job);
-    if (turnId) sessionByTurnId.set(turnId, sessionId);
-    const experimentId = jobExperimentId(job);
-    if (experimentId && !sessionByExperimentId.has(experimentId))
-      sessionByExperimentId.set(experimentId, sessionId);
-  }
-  const sessionByAdjustmentId = new Map<string, string>();
-  for (const adjustment of adjustments) {
-    const sessionId = sessionByTurnId.get(adjustment.createdFromTurnId);
-    if (sessionId) sessionByAdjustmentId.set(adjustment.adjustmentId, sessionId);
-  }
-  for (const experiment of experiments) {
-    if (sessionByExperimentId.has(experiment.experimentId)) continue;
-    const fromAdjustment =
-      experiment.sourceAdjustmentId === undefined
-        ? undefined
-        : sessionByAdjustmentId.get(experiment.sourceAdjustmentId);
-    if (fromAdjustment) sessionByExperimentId.set(experiment.experimentId, fromAdjustment);
-  }
-  return Object.freeze({
-    sessionByTurnId,
-    sessionByAdjustmentId,
-    sessionByExperimentId,
-  });
-}
-async function jobPrimitive(
+async function reflectionPrimitive(
   job: DurableJobRecord,
-  adjustments: ReadonlyMap<string, WorkingAdjustment>,
   evidencePreviews: (
     references: readonly EvidenceRef[],
     limit?: number,
   ) => Promise<readonly TuiLearningEvidencePreview[]>,
 ): Promise<TuiLearningPrimitive> {
-  const experimentId = jobExperimentId(job);
   const sessionId = jobSessionId(job);
   const projectId = jobProjectId(job);
-  const isReflection = isReflectionJob(job);
-  const kind: TuiLearningPrimitiveKind = isReflection ? "reflection" : "job";
-  const group: TuiLearningPrimitiveGroup = isReflection ? "reflection" : "operations";
-  const adjustmentId = isReflection ? stringField(job.result, "adjustmentId") : undefined;
-  const adjustment = adjustmentId ? adjustments.get(adjustmentId) : undefined;
   const reflectionStatus = stringField(job.result, "status") ?? job.status;
   const sensitivity = jobSensitivity(job);
-  const citedEvidence =
-    isReflection && sensitivity !== "normal"
-      ? []
-      : isReflection
-        ? reflectionStatus === "unapplied"
-          ? evidenceRefsField(job.result, "evidenceRefs")
-          : reflectionStatus === "adjusted" || reflectionStatus === "replaced"
-            ? (adjustment?.evidenceRefs ?? [])
-            : []
-        : job.payloadRefs;
-  const consideredEvidence = isReflection && sensitivity === "normal" ? job.payloadRefs : [];
-  const previewConsideredEvidence = new Set([
-    "adjusted",
-    "replaced",
-    "unapplied",
-    "experiment",
-    "deduped",
-    "stale",
-  ]).has(reflectionStatus);
-  const title = isReflection
-    ? reflectionTitle(job, adjustment)
-    : job.kind.replace("runtime.", "").replaceAll("_", " ");
+  const consideredEvidence = sensitivity === "normal" ? job.payloadRefs : [];
+  const title = reflectionTitle(job);
   const summary = jobSummary(job);
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   return primitive(
     createConditionalObject({
-      id: nativeId(kind, job.jobId),
-      kind,
-      group,
-      status: stringField(job.result, "status") ?? job.status,
+      id: nativeId("reflection", job.jobId),
+      kind: "reflection",
+      group: "reflection",
+      status: reflectionStatus,
       tone:
         job.status === "failed" || job.status === "budget_exhausted" || job.status === "cancelled"
           ? "negative"
@@ -779,35 +504,18 @@ async function jobPrimitive(
     } as const)
       .addOptional(sessionId ? { sessionId } : undefined)
       .addOptional(projectId ? { projectId } : undefined)
-      .addOptional(experimentId ? { experimentId } : undefined)
       .add({
-        evidence: citedEvidence,
-        evidencePreviews: await evidencePreviews(citedEvidence),
         consideredEvidenceCount: consideredEvidence.length,
-        consideredEvidencePreviews: previewConsideredEvidence
-          ? await evidencePreviews(consideredEvidence, CONSIDERED_PREVIEW_LIMIT)
-          : [],
-        detailSections: isReflection ? reflectionDetails(job, adjustments) : [],
-        relations: [
-          relation("experiment", "experiment", experimentId),
-          relation("adjustment", "working_adjustment", stringField(job.result, "adjustmentId")),
-          relation(
-            "candidate",
-            "capability_revision",
-            stringField(objectField(job.result, "candidateRevision"), "capabilityRevisionId"),
-          ),
-        ].filter(defined),
+        consideredEvidencePreviews:
+          job.status === "completed" && reflectionStatus !== "no_change"
+            ? await evidencePreviews(consideredEvidence, CONSIDERED_PREVIEW_LIMIT)
+            : [],
+        detailSections: reflectionDetails(job),
         raw: job,
         sensitivity,
       } as const)
       .finish(),
   );
-}
-function latestJobTime(jobs: readonly DurableJobRecord[], experimentId: string): string | undefined {
-  return jobs
-    .filter((job) => jobExperimentId(job) === experimentId)
-    .map((job) => job.updatedAt)
-    .sort((left, right) => right.localeCompare(left))[0];
 }
 function sortPrimitives(primitives: readonly TuiLearningPrimitive[]): readonly TuiLearningPrimitive[] {
   return Object.freeze(
@@ -823,305 +531,17 @@ export async function loadLearningAuditSnapshot(
   source: LearningAuditSource,
   sessionId: string,
 ): Promise<TuiLearningAuditSnapshot> {
-  const [reflectionJobs, adjustments, allFeedbackSignals] = await Promise.all([
-    listProjectReflectionJobs(source.workspace, source.project.projectId),
-    source.workspace.workingAdjustments.list({
-      projectId: source.project.projectId,
-      limit: AUDIT_LIMIT,
-    }),
-    source.workspace.research.feedbackSignals.listFeedbackSignals({
-      limit: AUDIT_LIMIT,
-    }),
-  ]);
-  const projectSessionIds = [...new Set(reflectionJobs.map(jobSessionId).filter(defined))];
-  const sourceSessionJobs = await listSourceSessionJobs(source.workspace, projectSessionIds);
-  const originJobs = [...reflectionJobs, ...sourceSessionJobs];
-  const experiments = await resolveProjectExperiments(source.workspace, originJobs, adjustments);
-  const experimentIds = new Set(experiments.map((experiment) => experiment.experimentId));
-  const experimentJobs = await listExperimentJobs(source.workspace, [...experimentIds]);
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const allJobs = Object.freeze(
-    [...new Map([...originJobs, ...experimentJobs].map((job) => [job.jobId, job] as const)).values()].sort(
-      (left, right) => right.createdAt.localeCompare(left.createdAt) || right.jobId.localeCompare(left.jobId),
-    ),
-  );
-  const jobs = Object.freeze(allJobs.slice(0, AUDIT_LIMIT));
-  const referencedFeedbackSignalIds = new Set(
-    experiments.flatMap((experiment) => experiment.feedbackSignalIds),
-  );
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const listedFeedbackSignalsById = new Map(
-    allFeedbackSignals.map((signal) => [signal.signalId, signal] as const),
-  );
-  const referencedFeedbackSignals = (
-    await Promise.all(
-      [...referencedFeedbackSignalIds]
-        .filter((signalId) => !listedFeedbackSignalsById.has(signalId))
-        .map((signalId) => source.workspace.research.feedbackSignals.getFeedbackSignal(signalId)),
-    )
-  ).filter(defined);
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const feedbackSignals = [
-    ...new Map(
-      [...allFeedbackSignals, ...referencedFeedbackSignals]
-        .filter(
-          (signal) =>
-            (signal.experimentId !== undefined && experimentIds.has(signal.experimentId)) ||
-            referencedFeedbackSignalIds.has(signal.signalId),
-        )
-        .map((signal) => [signal.signalId, signal] as const),
-    ).values(),
-  ];
-  const activeAdjustment = await source.workspace.workingAdjustments.getActive(source.project.projectId);
-  const reflectionByTurnId = new Map(
-    jobs
-      .map((job) => {
-        const turnId = reflectionTurnId(job);
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        return turnId ? ([turnId, job.jobId] as const) : undefined;
-      })
-      .filter(defined),
-  );
+  const jobs = await listProjectReflectionJobs(source.workspace, source.project.projectId);
   const reflectionByCapabilityId = new Map<string, DurableJobRecord>();
   for (const job of jobs) {
     const capabilityId = stringField(job.result, "capabilityId");
     if (capabilityId && !reflectionByCapabilityId.has(capabilityId))
       reflectionByCapabilityId.set(capabilityId, job);
   }
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const adjustmentsById = new Map(
-    adjustments.map((adjustment) => [adjustment.adjustmentId, adjustment] as const),
-  );
-  const originSessions = originSessionMaps(allJobs, adjustments, experiments);
   const resolveEvidencePreviews = createEvidencePreviewResolver(source.workspace);
   const primitives: TuiLearningPrimitive[] = await Promise.all(
-    jobs.map(async (job) => await jobPrimitive(job, adjustmentsById, resolveEvidencePreviews)),
+    jobs.map(async (job) => await reflectionPrimitive(job, resolveEvidencePreviews)),
   );
-  for (const adjustment of adjustments) {
-    const active = activeAdjustment?.adjustmentId === adjustment.adjustmentId;
-    const sessionId = originSessions.sessionByAdjustmentId.get(adjustment.adjustmentId);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    primitives.push(
-      primitive(
-        createConditionalObject({
-          id: nativeId("working_adjustment", adjustment.adjustmentId),
-          kind: "working_adjustment",
-          group: "history",
-          status: active ? "active" : "inactive",
-          tone: active ? "active" : "neutral",
-          title: adjustment.strategy,
-          summary: active ? "Active project strategy" : "Inactive project strategy",
-          projectId: adjustment.scope.projectId,
-        } as const)
-          .addOptional(sessionId ? { sessionId } : undefined)
-          .add({
-            evidence: adjustment.evidenceRefs,
-            evidencePreviews: await resolveEvidencePreviews(adjustment.evidenceRefs),
-            detailSections: [
-              detailSection("Current behavior", [
-                detailEntry("Strategy", adjustment.strategy),
-                detailEntry("Success looks like", adjustment.successSignal),
-                detailEntry("Scope", "This project"),
-              ]),
-              detailSection("Origin", [
-                detailEntry("Observation", adjustment.observation),
-                detailEntry("Created from turn", adjustment.createdFromTurnId),
-              ]),
-            ].filter(defined),
-            relations: [
-              relation(
-                "source reflection",
-                "reflection",
-                reflectionByTurnId.get(adjustment.createdFromTurnId),
-              ),
-            ].filter(defined),
-            raw: adjustment,
-          } as const)
-          .finish(),
-      ),
-    );
-  }
-  const revisionRefs = new Map<string, CapabilityRevisionRef>();
-  for (const experiment of experiments) {
-    revisionRefs.set(experiment.baselineRevision.capabilityRevisionId, experiment.baselineRevision);
-    for (const candidate of experiment.candidateRevisions)
-      revisionRefs.set(candidate.capabilityRevisionId, candidate);
-    if (experiment.activatedRevision)
-      revisionRefs.set(experiment.activatedRevision.capabilityRevisionId, experiment.activatedRevision);
-    const occurredAt = latestJobTime(jobs, experiment.experimentId);
-    const experimentSession = originSessions.sessionByExperimentId.get(experiment.experimentId);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    primitives.push(
-      primitive(
-        createConditionalObject({
-          id: nativeId("experiment", experiment.experimentId),
-          kind: "experiment",
-          group: "history",
-          status: experiment.status === "completed" ? `completed · ${experiment.outcome}` : experiment.status,
-          tone:
-            experiment.status !== "completed"
-              ? "pending"
-              : experiment.outcome === "keep"
-                ? "positive"
-                : experiment.outcome === "revert"
-                  ? "negative"
-                  : "neutral",
-          title: experiment.hypothesis,
-          summary: `Scope: ${experiment.scope}`,
-        } as const)
-          .addOptional(occurredAt ? { occurredAt } : undefined)
-          .addOptional(experimentSession ? { sessionId: experimentSession } : undefined)
-          .add({
-            experimentId: experiment.experimentId,
-            capabilityId: experiment.baselineRevision.capabilityId,
-            evidence: experiment.evidenceRefs,
-            relations: [
-              relation("baseline", "capability_revision", experiment.baselineRevision.capabilityRevisionId),
-              ...experiment.candidateRevisions.map((candidate) =>
-                relation("candidate", "capability_revision", candidate.capabilityRevisionId),
-              ),
-              relation("adjustment", "working_adjustment", experiment.sourceAdjustmentId),
-              relation("follow-up", "experiment", experiment.followUpExperimentId),
-            ].filter(defined),
-            raw: experiment,
-          } as const)
-          .finish(),
-      ),
-    );
-    const [trials, evaluations] = await Promise.all([
-      source.workspace.research.trials.listTrials(experiment.experimentId),
-      source.workspace.research.evaluations.listEvaluations(experiment.experimentId),
-    ]);
-    const report = experiment.preflightRef
-      ? await source.workspace.research.preflights.getPreflightReport(experiment.preflightRef.rowId)
-      : undefined;
-    const plan = report
-      ? await source.workspace.research.preflights.getPreflightPlan(report.planId)
-      : undefined;
-    if (plan)
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      primitives.push(
-        primitive(
-          createConditionalObject({
-            id: nativeId("preflight_plan", plan.planId),
-            kind: "preflight_plan",
-            group: "evaluation",
-            status: "recorded",
-            title: "Preflight plan",
-            summary: experiment.hypothesis,
-            experimentId: experiment.experimentId,
-          } as const)
-            .addOptional(experimentSession ? { sessionId: experimentSession } : undefined)
-            .add({
-              capabilityId: plan.candidateRevision.capabilityId,
-              evidence: plan.caseRefs,
-              relations: [
-                relation("experiment", "experiment", experiment.experimentId),
-                relation("candidate", "capability_revision", plan.candidateRevision.capabilityRevisionId),
-              ].filter(defined),
-              raw: plan,
-            } as const)
-            .finish(),
-        ),
-      );
-    for (const trial of trials)
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      primitives.push(
-        primitive(
-          createConditionalObject({
-            id: nativeId("trial", trial.trialId),
-            kind: "trial",
-            group: "evaluation",
-            status: `${trial.status} · ${trial.arm}`,
-            tone:
-              trial.status === "completed" ? "positive" : trial.status === "failed" ? "negative" : "pending",
-            title: `${trial.arm} trial`,
-            summary: experiment.hypothesis,
-            experimentId: experiment.experimentId,
-          } as const)
-            .addOptional(experimentSession ? { sessionId: experimentSession } : undefined)
-            .add({
-              capabilityId: trial.capabilityRevision.capabilityId,
-              evidence: [...trial.inputRefs, ...trial.outputEvidenceRefs, ...trial.traceEvidenceRefs],
-              relations: [
-                relation("experiment", "experiment", experiment.experimentId),
-                relation("revision", "capability_revision", trial.capabilityRevision.capabilityRevisionId),
-              ].filter(defined),
-              raw: trial,
-            } as const)
-            .finish(),
-        ),
-      );
-    for (const evaluation of evaluations)
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      primitives.push(
-        primitive(
-          createConditionalObject({
-            id: nativeId("evaluation", evaluation.evaluationId),
-            kind: "evaluation",
-            group: "evaluation",
-            status: evaluation.status,
-            tone:
-              evaluation.status === "completed"
-                ? "positive"
-                : evaluation.status === "failed"
-                  ? "negative"
-                  : "pending",
-            title:
-              evaluation.status === "completed"
-                ? "Evaluation passed"
-                : evaluation.status === "failed"
-                  ? "Evaluation failed"
-                  : `Evaluation ${evaluation.status.replaceAll("_", " ")}`,
-            summary: experiment.hypothesis,
-            experimentId: experiment.experimentId,
-          } as const)
-            .addOptional(experimentSession ? { sessionId: experimentSession } : undefined)
-            .add({
-              capabilityId: evaluation.candidateRevision.capabilityId,
-              evidence: evaluation.evidenceRefs,
-              relations: [
-                relation("experiment", "experiment", experiment.experimentId),
-                relation("report", "preflight_report", evaluation.preflightId),
-                ...evaluation.trialIds.map((trialId) => relation("trial", "trial", trialId)),
-              ].filter(defined),
-              raw: evaluation,
-            } as const)
-            .finish(),
-        ),
-      );
-    if (report)
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      primitives.push(
-        primitive(
-          createConditionalObject({
-            id: nativeId("preflight_report", report.preflightId),
-            kind: "preflight_report",
-            group: "evaluation",
-            status: report.decision,
-            tone: report.decision === "pass" ? "positive" : "negative",
-            title:
-              report.decision === "pass"
-                ? "Preflight passed"
-                : `Preflight ${report.decision.replaceAll("_", " ")}`,
-            summary: experiment.hypothesis,
-            experimentId: experiment.experimentId,
-          } as const)
-            .addOptional(experimentSession ? { sessionId: experimentSession } : undefined)
-            .add({
-              capabilityId: report.candidateRevision.capabilityId,
-              evidence: [...report.trialEvidence, ...report.judgmentEvidence, report.reportEvidence],
-              relations: [
-                relation("experiment", "experiment", experiment.experimentId),
-                relation("plan", "preflight_plan", report.planId),
-                ...report.trialRowRefs.map((trial) => relation("trial", "trial", trial.rowId)),
-              ].filter(defined),
-              raw: report,
-            } as const)
-            .finish(),
-        ),
-      );
-  }
   const [capabilityDefinitions, capabilityBindings, pendingGates] = await Promise.all([
     source.workspace.capabilities.listDefinitions(),
     source.workspace.capabilities.listBindings({
@@ -1135,32 +555,6 @@ export async function loadLearningAuditSnapshot(
       limit: AUDIT_LIMIT,
     }),
   ]);
-  for (const reference of revisionRefs.values()) {
-    const [revision, capability] = await Promise.all([
-      source.resolveRevision(reference),
-      Promise.resolve(source.resolveCapability(reference.capabilityId)),
-    ]);
-    const activeRevision = capabilityBindings.some(
-      (binding) =>
-        binding.state === "active" &&
-        binding.capabilityId === reference.capabilityId &&
-        binding.revision.capabilityRevisionId === reference.capabilityRevisionId,
-    );
-    primitives.push(
-      primitive({
-        id: nativeId("capability_revision", reference.capabilityRevisionId),
-        kind: "capability_revision",
-        group: "history",
-        status: activeRevision ? "active" : "recorded",
-        tone: activeRevision ? "active" : "neutral",
-        title: capability?.name ?? reference.capabilityId,
-        summary: capability?.intent ?? "Recorded capability revision",
-        capabilityId: reference.capabilityId,
-        evidence: revision?.evidenceRefs ?? [],
-        raw: revision ?? reference,
-      }),
-    );
-  }
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const capabilityDefinitionById = new Map(
     capabilityDefinitions.map((definition) => [definition.capabilityId, definition] as const),
@@ -1437,36 +831,6 @@ export async function loadLearningAuditSnapshot(
         raw: gate,
       }),
     );
-  for (const signal of feedbackSignals) {
-    const signalSession = signal.experimentId
-      ? originSessions.sessionByExperimentId.get(signal.experimentId)
-      : undefined;
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    primitives.push(
-      primitive(
-        createConditionalObject({
-          id: nativeId("feedback_signal", signal.signalId),
-          kind: "feedback_signal",
-          group: "feedback",
-          status: signal.kind.replaceAll("_", " "),
-          title: signal.kind.replaceAll("_", " "),
-          summary: `${signal.scope} · strength ${String(signal.strength)} · novelty ${String(signal.novelty)}`,
-        } as const)
-          .addOptional(signal.experimentId ? { experimentId: signal.experimentId } : undefined)
-          .addOptional(signalSession ? { sessionId: signalSession } : undefined)
-          .add({
-            evidence: signal.evidenceRefs,
-            relations: [
-              relation("experiment", "experiment", signal.experimentId),
-              relation("revision", "capability_revision", signal.capabilityRevisionId),
-            ].filter(defined),
-            raw: signal,
-            sensitivity: signal.sensitivity,
-          } as const)
-          .finish(),
-      ),
-    );
-  }
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const deduplicated = [...new Map(primitives.map((item) => [item.id, item] as const)).values()];
   const isRoutineReflection = (item: TuiLearningPrimitive): boolean =>
@@ -1507,7 +871,6 @@ export async function loadLearningAuditSnapshot(
       sessionId,
       generatedAt: (source.now ?? (() => new Date()))().toISOString(),
     } as const)
-      .addOptional(activeAdjustment ? { activeAdjustmentId: activeAdjustment.adjustmentId } : undefined)
       .add({
         primitives: presented,
       } as const)

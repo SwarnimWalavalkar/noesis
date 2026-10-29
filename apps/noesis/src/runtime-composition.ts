@@ -1513,7 +1513,6 @@ export async function createApplicationRuntimeComposition(
   const roleRunner = options.createRoleRunner(Object.freeze(Object.values(roles)));
   const inference = createStructuredInferencePort({ runner: roleRunner, maxRepairAttempts: 1 });
   const registry = createAtomicCapabilityRegistry({
-    researchState: workspace.research,
     controlStore: createWorkspaceCapabilityControlStore(workspace),
   });
   const hydrateCapabilityLifecycle = async (): Promise<void> => {
@@ -1527,116 +1526,6 @@ export async function createApplicationRuntimeComposition(
         });
     }
   };
-  const cutoverWorkingAdjustments = async (): Promise<void> => {
-    if (await workspace.capabilities.isCutoverComplete()) return;
-    const adjustments = await workspace.capabilities.listActiveLegacyAdjustments();
-    let failed = false;
-    for (const adjustment of adjustments) {
-      const capabilityId = `legacy-adjustment-${adjustment.adjustmentId}`;
-      const capabilityRevisionId = `${capabilityId}-r1`;
-      try {
-        const existing = await workspace.capabilities.getBinding(capabilityId);
-        if (existing) {
-          await workspace.capabilities.clearCutoverFailure(adjustment);
-          continue;
-        }
-        if (await workspace.capabilities.getDefinition(capabilityId))
-          throw new Error(`Capability ${capabilityId} exists without its binding`);
-        const sourceMessage = await workspace.operational.messages.get(
-          `${adjustment.createdFromTurnId}:user`,
-        );
-        const createdAt = sourceMessage?.createdAt ?? "1970-01-01T00:00:00.000Z";
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        const actor = Object.freeze({ actorId: "capability-cutover", kind: "system" as const });
-        const [prompt, router] = await Promise.all([
-          workspace.definitions.recordWorkingDefinition({
-            workingPath: `capabilities/${capabilityId}/${capabilityRevisionId}/instructions.md`,
-            bytes: encoder.encode(`${adjustment.strategy.trim()}\n`),
-            actor,
-            reason: "Preserve the active legacy working adjustment as a Capability",
-            provenanceRefs: adjustment.evidenceRefs,
-          }),
-          workspace.definitions.recordWorkingDefinition({
-            workingPath: `capabilities/${capabilityId}/${capabilityRevisionId}/router.json`,
-            bytes: encoder.encode(
-              `${canonicalJson({ strategyId: `capability-${capabilityId}-v1`, scope: "general" })}\n`,
-            ),
-            actor,
-            reason: "Route the migrated working adjustment by semantic relevance",
-            provenanceRefs: adjustment.evidenceRefs,
-          }),
-        ]);
-        const capability = Object.freeze({
-          capabilityId,
-          name: `Migrated strategy for ${adjustment.scope.projectId}`,
-          scope: "general",
-          intent: adjustment.observation,
-        });
-        registry.registerCapability(capability);
-        const reference = registry.constructRevision({
-          definitionState: "candidate",
-          capabilityRevisionId,
-          capabilityId,
-          promptModules: Object.freeze([prompt]),
-          skills: Object.freeze([]),
-          tools: Object.freeze([]),
-          routerRevision: router,
-          routerStrategyId: `capability-${capabilityId}-v1`,
-          activationPolicy: Object.freeze({ mode: "automatic_low_risk", scope: "general" }),
-          permissionManifest: Object.freeze({
-            effects: Object.freeze([]),
-            resourcePatterns: Object.freeze([]),
-            credentialRefs: Object.freeze([]),
-          }),
-          evidenceRefs: adjustment.evidenceRefs,
-          sourceEvaluationDefinitions: Object.freeze([]),
-          requestedPermissionDelta: Object.freeze({
-            addedEffects: Object.freeze([]),
-            widenedResources: Object.freeze([]),
-            addedCredentialRefs: Object.freeze([]),
-          }),
-        });
-        const revision = registry.getRevision(reference);
-        if (!revision) throw new Error(`Cutover lost revision ${capabilityRevisionId}`);
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        await workspace.capabilities.create({
-          definition: Object.freeze({
-            capabilityId,
-            name: capability.name,
-            kind: "instruction",
-            description: adjustment.observation,
-            applicability: adjustment.successSignal,
-            createdAt,
-          }),
-          revision: Object.freeze({
-            revision,
-            reference,
-            summary: adjustment.observation,
-            rationale: adjustment.observation,
-            anticipatedEffect: adjustment.successSignal,
-            createdAt,
-          }),
-          binding: Object.freeze({
-            capabilityId,
-            revision: reference,
-            scope: Object.freeze({ kind: "project" as const, project: adjustment.scope }),
-            activationMode: "relevant",
-            state: "active",
-          }),
-        });
-        await workspace.capabilities.clearCutoverFailure(adjustment);
-      } catch (error) {
-        failed = true;
-        await workspace.capabilities.recordCutoverFailure(
-          adjustment,
-          error instanceof Error ? error.message : String(error),
-        );
-      }
-    }
-    if (!failed) await workspace.capabilities.completeCutover();
-  };
-  await hydrateCapabilityLifecycle();
-  await cutoverWorkingAdjustments();
   await hydrateCapabilityLifecycle();
   const history = createHistoryPort({
     workspace,

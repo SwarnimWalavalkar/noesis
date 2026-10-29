@@ -13,16 +13,11 @@ import type {
 import type {
   ActorRef,
   ArtifactFileRef,
-  CompoundingReplayRecord,
-  CompoundingReplayRole,
   DatabaseRowRef,
   DataSensitivity,
-  EvidenceRevisionRef,
   FileRevisionRef,
   JsonObject,
   JsonValue,
-  WorkingAdjustment,
-  WorkingAdjustmentReadPort,
   WorkspaceStore,
 } from "@noesis/domain";
 
@@ -354,50 +349,6 @@ export interface OutcomeRecord {
   readonly metadata: JsonObject;
 }
 
-export interface ClassifyOutcomeRequest {
-  readonly outcomeId: string;
-  readonly sessionId: string;
-  readonly turnId: string;
-  readonly classification: "correction" | "preference" | "other";
-  readonly reason: string;
-}
-
-export type WorkingAdjustmentApplyResult =
-  | {
-      readonly status: "applied";
-      readonly adjustment: WorkingAdjustment;
-      readonly replacedAdjustmentId: string | null;
-    }
-  | {
-      readonly status: "stale";
-      readonly adjustmentId: string;
-      readonly currentActiveAdjustmentId: string | null;
-    };
-
-export type WorkingAdjustmentUnapplyResult =
-  | {
-      readonly status: "unapplied";
-      readonly adjustmentId: string;
-    }
-  | {
-      readonly status: "stale";
-      readonly adjustmentId: string;
-      readonly currentActiveAdjustmentId: string | null;
-    };
-
-export interface ProtectedWorkingAdjustmentStore extends WorkingAdjustmentReadPort {
-  readonly apply: (request: {
-    readonly adjustment: WorkingAdjustment;
-    readonly expectedActiveAdjustmentId: string | null;
-    readonly signal?: AbortSignal;
-  }) => Promise<WorkingAdjustmentApplyResult>;
-  readonly unapply: (request: {
-    readonly projectId: string;
-    readonly expectedActiveAdjustmentId: string;
-    readonly signal?: AbortSignal;
-  }) => Promise<WorkingAdjustmentUnapplyResult>;
-}
-
 const capabilityBindingAdmissionConflicts = new WeakSet<Error>();
 
 export function capabilityBindingAdmissionConflictError(): Error {
@@ -702,8 +653,6 @@ export interface OperationalRepositories {
   readonly outcomes: {
     readonly get: (outcomeId: string) => Promise<OutcomeRecord | undefined>;
     readonly put: (record: OutcomeRecord) => Promise<void>;
-    /** Record the model's semantic observation once; only a correction advances unknown -> corrected. */
-    readonly classify: (request: ClassifyOutcomeRequest) => Promise<OutcomeRecord>;
     readonly listForSession: (sessionId: string) => Promise<readonly OutcomeRecord[]>;
   };
   readonly searchConfiguration: {
@@ -712,29 +661,10 @@ export interface OperationalRepositories {
   };
 }
 
-export interface StagedDefinition {
-  readonly stageId: string;
-  readonly targetArea: "candidate" | "active";
-  readonly relativePath: string;
-  readonly stagedPath: string;
-  readonly contentDigest: string;
-  readonly actor: ActorRef;
-  readonly reason?: string;
-  readonly createdAt: string;
-}
-
-export interface StageDefinitionRequest {
-  readonly targetArea: "candidate" | "active";
-  readonly relativePath: string;
-  readonly bytes: Uint8Array;
-  readonly actor: ActorRef;
-  readonly reason?: string;
-}
-
 export type CanonicalSearchSource =
   | {
       readonly kind: "database_row";
-      readonly table: "sessions" | "messages" | "tool_calls" | "outcomes" | "experiments";
+      readonly table: "sessions" | "messages" | "tool_calls" | "outcomes";
       readonly rowId: string;
       readonly field: string;
     }
@@ -762,7 +692,7 @@ export type SearchSessionScope =
   | { readonly kind: "exact"; readonly sessionId: string }
   | { readonly kind: "previous"; readonly currentSessionId: string };
 
-export type SearchSourceScope = "session_or_outcome" | "corrected_outcome" | "completed_experiment";
+export type SearchSourceScope = "session_or_outcome";
 
 export interface SearchIndexPort {
   readonly clear: () => Promise<void>;
@@ -833,67 +763,6 @@ export interface OperationalCutoverReport {
   readonly legacyImport: LegacyImportReport;
 }
 
-export interface CompoundingReplayBudgetRecord {
-  readonly budgetId: string;
-  readonly maximumCalls: number;
-  readonly maximumTokens: number;
-  readonly maximumCost: number;
-  readonly reservedCalls: number;
-  readonly reservedTokens: number;
-  readonly reservedCost: number;
-  readonly createdAt: string;
-}
-
-export interface CompoundingReplayRoleReservation {
-  readonly operationId: string;
-  readonly replayId: string;
-  readonly role: CompoundingReplayRole;
-  readonly requestDigest: string;
-  readonly maximumTokens: number;
-  readonly maximumCost: number;
-}
-
-export type CompoundingReplayReservationResult =
-  | { readonly status: "reserved" }
-  | { readonly status: "denied"; readonly reason: "budget_exhausted" }
-  | { readonly status: "unresolved" }
-  | {
-      readonly status: "completed";
-      readonly resultEvidence: EvidenceRevisionRef<"output" | "judgment">;
-    }
-  | { readonly status: "failed"; readonly failure: string };
-
-/**
- * Protected coordinator persistence for shadow measurement. Generated roles receive neither this
- * interface nor the workspace store.
- */
-export interface CompoundingMeasurementStore {
-  readonly putBudget: (request: {
-    readonly budgetId: string;
-    readonly maximumCalls: number;
-    readonly maximumTokens: number;
-    readonly maximumCost: number;
-  }) => Promise<CompoundingReplayBudgetRecord>;
-  readonly getBudget: (budgetId: string) => Promise<CompoundingReplayBudgetRecord | undefined>;
-  readonly beginReplay: (request: {
-    readonly replayId: string;
-    readonly planId: string;
-    readonly budgetId: string;
-  }) => Promise<void>;
-  readonly reserveRole: (
-    request: CompoundingReplayRoleReservation,
-  ) => Promise<CompoundingReplayReservationResult>;
-  readonly completeRole: (request: {
-    readonly operationId: string;
-    readonly resultEvidence: EvidenceRevisionRef<"output" | "judgment">;
-    readonly usedTokens: number;
-    readonly actualCost: number;
-  }) => Promise<void>;
-  readonly failRole: (operationId: string, failure: string) => Promise<void>;
-  readonly record: (record: CompoundingReplayRecord) => Promise<void>;
-  readonly list: () => Promise<readonly CompoundingReplayRecord[]>;
-}
-
 export interface NoesisWorkspaceStore extends WorkspaceStore {
   readonly paths: WorkspacePaths;
   readonly operational: OperationalRepositories;
@@ -904,9 +773,6 @@ export interface NoesisWorkspaceStore extends WorkspaceStore {
     actor: ActorRef,
     reason?: string,
   ) => Promise<FileRevisionRef>;
-  readonly stageDefinition: (request: StageDefinitionRequest) => Promise<StagedDefinition>;
-  readonly registerStagedDefinition: (stageId: string) => Promise<FileRevisionRef>;
-  readonly cleanupStagedDefinitions: () => Promise<number>;
   readonly inspectIntegrity: () => Promise<IntegrityReport>;
   readonly backup: (backupRoot: string) => Promise<BackupReport>;
   readonly importLegacyWorkspace: (legacyRoot: string, actor: ActorRef) => Promise<LegacyImportReport>;
@@ -1113,12 +979,4 @@ export interface CapabilityLifecycleStore {
     readonly status: "denied" | "superseded";
     readonly instruction?: string;
   }) => Promise<import("@noesis/domain").CapabilityGateRequest>;
-  readonly completeCutover: () => Promise<boolean>;
-  readonly isCutoverComplete: () => Promise<boolean>;
-  readonly listActiveLegacyAdjustments: () => Promise<readonly import("@noesis/domain").WorkingAdjustment[]>;
-  readonly recordCutoverFailure: (
-    adjustment: import("@noesis/domain").WorkingAdjustment,
-    failure: string,
-  ) => Promise<void>;
-  readonly clearCutoverFailure: (adjustment: import("@noesis/domain").WorkingAdjustment) => Promise<void>;
 }

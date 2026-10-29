@@ -1,10 +1,8 @@
 import {
   createConditionalObject,
-  type CompletedExperiment,
   canonicalJson,
   type EvidenceRef,
   EvidenceRefSchema,
-  type Experiment,
   type Result,
   sha256,
 } from "@noesis/domain";
@@ -57,12 +55,6 @@ const canonicalSearchSourceSchema = z.union([
     field: z.literal("summary"),
   }),
   z.strictObject({
-    kind: z.literal("database_row"),
-    table: z.literal("experiments"),
-    rowId: identifierSchema,
-    field: z.literal("data_json"),
-  }),
-  z.strictObject({
     kind: z.literal("file_revision"),
     revisionId: identifierSchema,
     field: z.literal("bytes"),
@@ -92,7 +84,6 @@ const citationIdentitySchema = z.discriminatedUnion("kind", [
     evidenceRevisionId: identifierSchema,
     evidenceKind: evidenceKindSchema,
   }),
-  z.strictObject({ kind: z.literal("experiment"), experimentId: identifierSchema }),
 ]);
 const unsignedCitationSchema = z.strictObject({
   documentId: identifierSchema,
@@ -214,17 +205,9 @@ const focusedSearchInputFields = {
   strategy: requestedStrategySchema.optional(),
   includePrivate: z.boolean().optional(),
 };
-export const FindCorrectionsInputSchema = z.strictObject({
-  topic: querySchema,
-  ...focusedSearchInputFields,
-});
 export const FindSimilarTasksInputSchema = z.strictObject({
   description: querySchema,
   ...focusedSearchInputFields,
-});
-export const PriorExperimentOutcomesInputSchema = z.strictObject({
-  task: querySchema,
-  maxResults: z.number().int().min(1).max(20).optional(),
 });
 export interface SessionSearchAuthorization {
   readonly currentSessionId: string;
@@ -237,7 +220,6 @@ export interface SessionToolLimits {
   readonly maxFragmentChars: number;
   readonly maxTotalContextChars: number;
   readonly maxOpenChars: number;
-  readonly maxExperimentScan: number;
 }
 export interface SessionContextFragment {
   readonly id: string;
@@ -250,7 +232,7 @@ export interface SessionContextFragment {
   readonly sensitive: boolean;
 }
 export interface RetrievalTelemetry {
-  readonly strategyId: RetrievalStrategyId | "session-search.experiment-outcomes.v1";
+  readonly strategyId: RetrievalStrategyId;
   readonly routeReason: string;
   readonly candidateCount: number;
   readonly resultCount: number;
@@ -278,13 +260,6 @@ export interface OpenSessionEvidenceOutput {
   readonly fragment: SessionContextFragment;
   readonly telemetry: RetrievalTelemetry;
 }
-export interface PriorExperimentOutcomeHit extends SessionSearchHit {
-  readonly experimentId: string;
-  readonly outcome: CompletedExperiment["outcome"];
-}
-export interface PriorExperimentOutcomesOutput extends Omit<SessionSearchOutput, "hits"> {
-  readonly hits: readonly PriorExperimentOutcomeHit[];
-}
 export type SessionToolErrorCode =
   | "invalid_input"
   | "unauthorized"
@@ -303,12 +278,7 @@ export type SessionToolResult<T> = Result<T, SessionToolError>;
 export interface SessionToolExecutionOptions {
   readonly signal?: AbortSignal;
 }
-export type SessionToolName =
-  | "search_sessions"
-  | "open_session_evidence"
-  | "find_corrections"
-  | "find_similar_tasks"
-  | "prior_experiment_outcomes";
+export type SessionToolName = "search_sessions" | "open_session_evidence" | "find_similar_tasks";
 /** BOUNDARY: The tool broker parses each session-tool input with its adjacent inputSchema. */
 export interface SessionToolDefinition {
   readonly name: SessionToolName;
@@ -331,18 +301,10 @@ export interface SessionSearchTools {
     input: unknown,
     options?: SessionToolExecutionOptions,
   ) => Promise<SessionToolResult<OpenSessionEvidenceOutput>>;
-  readonly findCorrections: (
-    input: unknown,
-    options?: SessionToolExecutionOptions,
-  ) => Promise<SessionToolResult<SessionSearchOutput>>;
   readonly findSimilarTasks: (
     input: unknown,
     options?: SessionToolExecutionOptions,
   ) => Promise<SessionToolResult<SessionSearchOutput>>;
-  readonly priorExperimentOutcomes: (
-    input: unknown,
-    options?: SessionToolExecutionOptions,
-  ) => Promise<SessionToolResult<PriorExperimentOutcomesOutput>>;
 }
 export interface CreateSessionSearchToolsOptions {
   readonly workspace: NoesisWorkspaceStore;
@@ -358,7 +320,6 @@ const DEFAULT_LIMITS: SessionToolLimits = Object.freeze({
   maxFragmentChars: 400,
   maxTotalContextChars: 3200,
   maxOpenChars: 1600,
-  maxExperimentScan: 200,
 });
 interface SourceMetadata {
   readonly identity: z.infer<typeof citationIdentitySchema>;
@@ -389,10 +350,6 @@ const fileRevisionRowSchema = z.looseObject({
   sensitivity: sensitivitySchema,
   provenance_refs_json: z.string(),
   recorded_at: z.string().min(1),
-});
-const experimentRowSchema = z.looseObject({
-  experiment_id: identifierSchema,
-  updated_at: z.string().min(1),
 });
 function maxSensitivity(left: Sensitivity, right: Sensitivity): Sensitivity {
   if (left === "secret" || right === "secret") return "secret";
@@ -559,16 +516,6 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
           : failClosed;
       }
       if (ref.table === "file_revisions") return await resolveFileRevision(ref.rowId);
-      if (ref.table === "feedback_signals") {
-        const feedback = await options.workspace.research.feedbackSignals.getFeedbackSignal(ref.rowId);
-        return feedback
-          ? merge(feedback.sensitivity, [await resolveRefs(feedback.evidenceRefs)])
-          : failClosed;
-      }
-      if (ref.table === "experiments") {
-        const experiment = await options.workspace.research.experiments.getExperiment(ref.rowId);
-        return experiment ? await resolveRefs(experiment.evidenceRefs) : failClosed;
-      }
       return failClosed;
     };
     async function resolveRef(ref: EvidenceRef): Promise<ProvenanceResolution> {
@@ -634,26 +581,6 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
   ): Promise<SourceMetadata | undefined> => {
     ensureNotCancelled(signal);
     if (source.kind === "file_revision") return await resolveFileRevisionMetadata(source.revisionId, signal);
-    if (source.table === "experiments") {
-      const experiment = await options.workspace.research.experiments.getExperiment(source.rowId);
-      if (!experiment) return undefined;
-      const raw = await options.workspace.reads.readDatabaseRow({
-        kind: "database_row",
-        table: "experiments",
-        rowId: source.rowId,
-      });
-      if (!raw) return undefined;
-      const row = experimentRowSchema.parse(raw);
-      const provenance = await resolveTransitiveProvenance(experiment.evidenceRefs, signal);
-      return {
-        identity: { kind: "experiment", experimentId: experiment.experimentId },
-        sessionIds: provenance.sessionIds,
-        messageIds: provenance.messageIds,
-        sensitivity: provenance.sensitivity,
-        provenanceRefs: experiment.evidenceRefs,
-        occurredAt: row.updated_at,
-      };
-    }
     if (source.table === "sessions") {
       const session = await options.workspace.operational.sessions.get(source.rowId);
       const sensitivity = await options.workspace.operational.sessions.sensitivity(source.rowId);
@@ -1111,39 +1038,6 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         .finish(),
     );
   };
-  const findCorrections = async (
-    input: unknown,
-    execution: SessionToolExecutionOptions = {},
-  ): Promise<SessionToolResult<SessionSearchOutput>> => {
-    const parsed = FindCorrectionsInputSchema.safeParse(input);
-    if (!parsed.success) return invalidInput(parsed.error);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    return await runSearch(
-      createConditionalObject({
-        query: parsed.data.topic,
-      } as const)
-        .addOptional(
-          !(parsed.data.sessionId === undefined) ? { sessionId: parsed.data.sessionId } : undefined,
-        )
-        .add({
-          maxResults: Math.min(parsed.data.maxResults ?? limits.maxResults, limits.maxResults),
-        } as const)
-        .addOptional(
-          !(parsed.data.strategy === undefined) ? { requestedStrategy: parsed.data.strategy } : undefined,
-        )
-        .add({
-          includePrivate: parsed.data.includePrivate ?? false,
-          sourceScope: "corrected_outcome",
-          accept: async (metadata: SourceMetadata) => {
-            if (metadata.identity.kind !== "outcome") return false;
-            const outcome = await options.workspace.operational.outcomes.get(metadata.identity.outcomeId);
-            return outcome?.status === "corrected";
-          },
-        } as const)
-        .addOptional(execution.signal ? { signal: execution.signal } : undefined)
-        .finish(),
-    );
-  };
   const findSimilarTasks = async (
     input: unknown,
     execution: SessionToolExecutionOptions = {},
@@ -1318,104 +1212,6 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       return fail("backend_failure", `Opening session evidence failed: ${message}`, true);
     }
   };
-  const priorExperimentOutcomes = async (
-    input: unknown,
-    execution: SessionToolExecutionOptions = {},
-  ): Promise<SessionToolResult<PriorExperimentOutcomesOutput>> => {
-    const parsed = PriorExperimentOutcomesInputSchema.safeParse(input);
-    if (!parsed.success) return invalidInput(parsed.error);
-    const startedAt = now();
-    try {
-      ensureNotCancelled(execution.signal);
-      const refreshedDocuments = await ensureFresh(execution.signal);
-      const requestedResults = Math.min(parsed.data.maxResults ?? limits.maxResults, limits.maxResults);
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      const searched = await options.history.search(
-        createConditionalObject({
-          query: parsed.data.task,
-          sourceScope: "completed_experiment",
-          limit: limits.maxCandidates,
-          lexicalLimit: limits.maxCandidates,
-          semanticLimit: limits.maxCandidates,
-          maxExcerptChars: limits.maxFragmentChars,
-          candidateFilter: async (source: CanonicalSearchSource) => {
-            const metadata = await resolveSourceMetadata(
-              canonicalSearchSourceSchema.parse(source),
-              execution.signal,
-            );
-            if (!metadata || !isAuthorized(metadata) || metadata.identity.kind !== "experiment") return false;
-            const experiment = await options.workspace.research.experiments.getExperiment(
-              metadata.identity.experimentId,
-            );
-            return experiment !== undefined && isCompletedExperiment(experiment);
-          },
-        } as const)
-          .addOptional(execution.signal ? { signal: execution.signal } : undefined)
-          .finish(),
-      );
-      ensureNotCancelled(execution.signal);
-      const hits: PriorExperimentOutcomeHit[] = [];
-      const fragments: SessionContextFragment[] = [];
-      for (const searchedHit of searched.hits) {
-        ensureNotCancelled(execution.signal);
-        if (hits.length >= requestedResults) break;
-        const ranked = await rankedFromHistory(searchedHit, execution.signal);
-        if (!ranked || ranked.citation.identity.kind !== "experiment") continue;
-        const experiment = await options.workspace.research.experiments.getExperiment(
-          ranked.citation.identity.experimentId,
-        );
-        if (!experiment || !isCompletedExperiment(experiment)) continue;
-        const reserved = reserveCitation(ranked.citation, ranked.excerpt, ranked.score, "search");
-        if (!reserved) break;
-        fragments.push(reserved.fragment);
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        hits.push(
-          createConditionalObject({
-            experimentId: experiment.experimentId,
-            outcome: experiment.outcome,
-            fragmentId: reserved.fragment.id,
-            score: ranked.score,
-          } as const)
-            .addOptional(
-              !(ranked.lexicalScore === undefined) ? { lexicalScore: ranked.lexicalScore } : undefined,
-            )
-            .addOptional(
-              !(ranked.semanticScore === undefined) ? { semanticScore: ranked.semanticScore } : undefined,
-            )
-            .addOptional(
-              !(ranked.rerankReason === undefined) ? { rerankReason: ranked.rerankReason } : undefined,
-            )
-            .finish(),
-        );
-      }
-      return {
-        ok: true,
-        value: {
-          query: parsed.data.task,
-          hits,
-          fragments,
-          telemetry: telemetry({
-            strategyId: "session-search.experiment-outcomes.v1",
-            routeReason: "model-ranked completed experiment outcomes",
-            candidateCount: searched.candidateCount,
-            fragments,
-            limits,
-            latencyMs: Math.max(0, now() - startedAt),
-            refreshedDocuments,
-            status: "completed",
-          }),
-        },
-      };
-    } catch (error) {
-      if (execution.signal?.aborted || errorMessage(error) === "SESSION_SEARCH_CANCELLED")
-        return fail("cancelled", "Prior experiment outcome retrieval was cancelled.", true);
-      return fail(
-        "backend_failure",
-        `Prior experiment outcome retrieval failed: ${errorMessage(error)}`,
-        true,
-      );
-    }
-  };
   const definitions: readonly SessionToolDefinition[] = Object.freeze([
     Object.freeze({
       name: "search_sessions",
@@ -1434,34 +1230,18 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       execute: openSessionEvidence,
     }),
     Object.freeze({
-      name: "find_corrections",
-      label: "Find corrections",
-      description: "Find prior corrected outcomes for a topic with exact citations.",
-      inputSchema: FindCorrectionsInputSchema,
-      execute: findCorrections,
-    }),
-    Object.freeze({
       name: "find_similar_tasks",
       label: "Find similar tasks",
       description: "Find related session titles and outcomes without exposing unrelated private history.",
       inputSchema: FindSimilarTasksInputSchema,
       execute: findSimilarTasks,
     }),
-    Object.freeze({
-      name: "prior_experiment_outcomes",
-      label: "Prior experiment outcomes",
-      description: "Find bounded completed keep, revise, or revert experiment outcomes.",
-      inputSchema: PriorExperimentOutcomesInputSchema,
-      execute: priorExperimentOutcomes,
-    }),
   ]);
   return Object.freeze({
     definitions,
     searchSessions,
     openSessionEvidence,
-    findCorrections,
     findSimilarTasks,
-    priorExperimentOutcomes,
   });
 }
 function normalizeLimits(overrides: Partial<SessionToolLimits> | undefined): SessionToolLimits {
@@ -1474,7 +1254,6 @@ function normalizeLimits(overrides: Partial<SessionToolLimits> | undefined): Ses
     maxFragmentChars: Math.min(limits.maxFragmentChars, 8192),
     maxTotalContextChars: Math.min(limits.maxTotalContextChars, 32768),
     maxOpenChars: Math.min(limits.maxOpenChars, 4096),
-    maxExperimentScan: Math.min(limits.maxExperimentScan, 1000),
   });
 }
 function documentIdForSource(source: CanonicalSearchSource): string {
@@ -1534,9 +1313,6 @@ function invalidInput(error: z.ZodError): SessionToolResult<never> {
 }
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
-}
-function isCompletedExperiment(experiment: Experiment): experiment is CompletedExperiment {
-  return experiment.status === "completed";
 }
 function telemetry(input: {
   readonly strategyId: RetrievalTelemetry["strategyId"];

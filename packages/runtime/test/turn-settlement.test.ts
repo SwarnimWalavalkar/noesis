@@ -6,13 +6,6 @@ import { DatabaseSync } from "node:sqlite";
 import type { FrozenTurnPlan } from "@noesis/agent-types";
 import { compileContext } from "@noesis/context";
 import type { CapabilityRevisionRef } from "@noesis/domain";
-import {
-  createDeterministicEmbeddingPort,
-  createDeterministicRerankPort,
-  createHistoryPort,
-  createSessionSearchTools,
-  SESSION_RETRIEVAL_STRATEGIES,
-} from "@noesis/intelligence";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createTurnSettlement } from "../src/index.ts";
@@ -330,38 +323,6 @@ describe("turn settlement", () => {
     // Every user message releases the session's held reflections, since it reacts to the last turn.
     expect(releasedSessions).toEqual(["session-1", "session-1", "session-1", "session-1"]);
     expect(observedLearningTurns.at(-1)?.outcome).toBe("unknown");
-    await workspace.operational.outcomes.classify({
-      outcomeId: "turn-corrected:outcome",
-      sessionId: "session-1",
-      turnId: "turn-corrected",
-      classification: "correction",
-      reason: "The semantic reflector identified a correction to the preceding behavior.",
-    });
-    expect(await workspace.operational.outcomes.get("turn-corrected:outcome")).toMatchObject({
-      status: "corrected",
-      metadata: {
-        semanticObservation: {
-          kind: "correction",
-          reason: "The semantic reflector identified a correction to the preceding behavior.",
-        },
-      },
-    });
-    const history = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: createDeterministicRerankPort(),
-    });
-    const sessionTools = createSessionSearchTools({
-      workspace,
-      history,
-      authorization: { currentSessionId: "consumer-session" },
-    });
-    const corrections = await sessionTools.findCorrections({
-      topic: "exact primary source corrected response",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
-    });
-    expect(corrections.ok).toBe(true);
-    if (corrections.ok) expect(corrections.value.fragments).toHaveLength(1);
   });
 });
 function seedForegroundTurn(

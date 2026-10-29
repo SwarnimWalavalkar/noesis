@@ -23,7 +23,6 @@ const isolatedRoleMessageNames = {
     "evidence",
     "active_capabilities",
     "user_preferences",
-    "working_adjustment_context",
     "pending_capability",
     "user_change_request",
   ],

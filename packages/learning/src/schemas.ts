@@ -1,10 +1,8 @@
 import {
-  canonicalJson,
   EvidenceRefSchema,
   type ExperimentVariantRef,
   FileRevisionRefSchema,
   ProjectRefSchema,
-  WORKING_ADJUSTMENT_LIMITS,
 } from "@noesis/domain";
 import { z } from "zod";
 
@@ -24,38 +22,6 @@ export const LearningRoleConfigurationSchema = z.strictObject({
 });
 export type LearningRoleConfiguration = Readonly<z.infer<typeof LearningRoleConfigurationSchema>>;
 
-const SERVED_WORKING_ADJUSTMENT_SUMMARY_CHARS = 512;
-const SERVED_WORKING_ADJUSTMENT_TOTAL_SUMMARY_CHARS = 2_048;
-const SERVED_WORKING_ADJUSTMENT_OUTCOMES = 8;
-
-const BoundedWorkingAdjustmentEvidenceRefsSchema = z
-  .array(EvidenceRefSchema)
-  .min(1)
-  .transform((references) =>
-    Object.freeze(
-      [
-        ...new Map(
-          references.map((reference) => [canonicalJson(reference), Object.freeze({ ...reference })]),
-        ).values(),
-      ].slice(0, WORKING_ADJUSTMENT_LIMITS.evidenceRefs),
-    ),
-  );
-
-export const WorkingAdjustmentOutcomeEvidenceSchema = z.strictObject({
-  adjustmentId: z.string().min(1),
-  planId: z.string().min(1),
-  sessionId: z.string().min(1),
-  turnId: z.string().min(1),
-  outcomeId: z.string().min(1),
-  outcome: z.enum(["accepted", "corrected", "failed", "unknown"]),
-  summary: z.string().transform((summary) => summary.slice(0, SERVED_WORKING_ADJUSTMENT_SUMMARY_CHARS)),
-  settledAt: z.string().datetime(),
-  evidenceRefs: BoundedWorkingAdjustmentEvidenceRefsSchema,
-});
-export type WorkingAdjustmentOutcomeEvidence = Readonly<
-  z.infer<typeof WorkingAdjustmentOutcomeEvidenceSchema>
->;
-
 /**
  * Runtime facts about how a turn ended. `failed_before_output` means the turn failed before the
  * model produced any message or tool call, e.g. a provider rejected the request.
@@ -72,40 +38,8 @@ export const LearningTurnInputSchema = z.strictObject({
   sessionId: z.string().min(1),
   turnId: z.string().min(1),
   outcomeId: z.string().min(1).optional(),
-  // Optional only so durable pre-feature reflection jobs remain decodable after upgrade. New
-  // foreground settlement always supplies both fields; adjustment decisions require them.
+  // Optional only so durable pre-feature reflection jobs remain decodable after upgrade.
   project: ProjectRefSchema.optional(),
-  expectedActiveAdjustmentId: z.string().min(1).nullable().optional(),
-  servedWorkingAdjustmentOutcomes: z
-    .array(WorkingAdjustmentOutcomeEvidenceSchema)
-    .max(SERVED_WORKING_ADJUSTMENT_OUTCOMES)
-    .default([])
-    .transform((outcomes) => {
-      let remainingSummaryChars = SERVED_WORKING_ADJUSTMENT_TOTAL_SUMMARY_CHARS;
-      let remainingEvidenceRefs = WORKING_ADJUSTMENT_LIMITS.evidenceRefs;
-      const seenEvidence = new Set<string>();
-      return Object.freeze(
-        outcomes.flatMap((outcome) => {
-          const summary = outcome.summary.slice(0, remainingSummaryChars);
-          remainingSummaryChars -= summary.length;
-          const evidenceRefs = outcome.evidenceRefs.filter((reference) => {
-            const key = canonicalJson(reference);
-            if (seenEvidence.has(key) || remainingEvidenceRefs <= 0) return false;
-            seenEvidence.add(key);
-            remainingEvidenceRefs -= 1;
-            return true;
-          });
-          if (evidenceRefs.length === 0) return [];
-          return [
-            Object.freeze({
-              ...outcome,
-              summary,
-              evidenceRefs: Object.freeze(evidenceRefs),
-            }),
-          ];
-        }),
-      );
-    }),
   scope: z.string().min(1),
   userMessage: z.string().min(1),
   assistantMessage: z.string().optional(),

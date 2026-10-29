@@ -5,19 +5,10 @@ import {
   type CapabilityLifecycleRevision,
   type CapabilityRevision,
   capabilityRevisionRef,
-  type JsonObject,
 } from "@noesis/domain";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { describe, expect, test } from "vitest";
 import { loadLearningAuditSnapshot } from "../src/learning-audit-read-model.ts";
-
-// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-const baseline = Object.freeze({
-  kind: "capability_revision" as const,
-  capabilityId: "general-collaboration",
-  capabilityRevisionId: "general-collaboration-v1",
-  bundleDigest: "a".repeat(64),
-});
 
 describe("learning audit read model", () => {
   test("projects only records whose authoritative origin belongs to the active project", async () => {
@@ -47,7 +38,7 @@ describe("learning audit read model", () => {
       const jobId = `old-project-a-reflection-${String(index).padStart(4, "0")}`;
       await workspace.jobs.enqueue({
         jobId,
-        kind: "runtime.reflect_turn",
+        kind: "runtime.reflect_capability",
         payload: Object.freeze({
           turn: Object.freeze({
             project: projects[0],
@@ -96,7 +87,7 @@ describe("learning audit read model", () => {
       });
       await workspace.jobs.enqueue({
         jobId: `reflection-${project.projectId}`,
-        kind: "runtime.reflect_turn",
+        kind: "runtime.reflect_capability",
         payload: Object.freeze({
           turn: Object.freeze({
             project,
@@ -113,46 +104,6 @@ describe("learning audit read model", () => {
         estimatedCost: 0,
         budget: 0,
       });
-      await workspace.jobs.enqueue({
-        jobId: `author-${project.projectId}`,
-        kind: "runtime.author_revision",
-        payload: Object.freeze({
-          experimentId: `experiment-${project.projectId}`,
-          sourceSessionId: sessionId,
-        }),
-        payloadRefs: Object.freeze([evidence]),
-        operationId: `author-operation-${project.projectId}`,
-        idempotencyKey: `author-operation-${project.projectId}`,
-        notBefore: "2026-08-14T00:00:00.000Z",
-        maxAttempts: 1,
-        estimatedCost: 0,
-        budget: 0,
-      });
-      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-      await workspace.research.experiments.putExperiment(
-        Object.freeze({
-          experimentId: `experiment-${project.projectId}`,
-          hypothesis: `Hypothesis for ${project.projectId}`,
-          scope: "general",
-          evidenceRefs: Object.freeze([evidence]),
-          baselineRevision: baseline,
-          candidateRevisions: Object.freeze([]),
-          feedbackSignalIds: Object.freeze([`signal-${project.projectId}`]),
-          status: "hypothesis" as const,
-        }),
-      );
-      // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-      await workspace.research.feedbackSignals.recordFeedbackSignal(
-        Object.freeze({
-          signalId: `signal-${project.projectId}`,
-          kind: "turn_observation" as const,
-          scope: "general",
-          evidenceRefs: Object.freeze([evidence]),
-          strength: 0.6,
-          novelty: 0.4,
-          sensitivity: project.projectId === "project-a" ? ("private" as const) : ("normal" as const),
-        }),
-      );
     }
 
     const snapshot = await loadLearningAuditSnapshot(
@@ -167,16 +118,7 @@ describe("learning audit read model", () => {
 
     const ids = snapshot.primitives.map((primitive) => primitive.id);
     expect(ids).toContain("reflection:reflection-project-a");
-    expect(ids).toContain("experiment:experiment-project-a");
-    expect(ids).toContain("feedback_signal:signal-project-a");
     expect(ids.some((id) => id.includes("project-b"))).toBe(false);
-    const experiment = snapshot.primitives.find(
-      (primitive) => primitive.id === "experiment:experiment-project-a",
-    );
-    expect(experiment).toMatchObject({
-      title: "Hypothesis for project-a",
-      sessionId: "session-project-a",
-    });
     const reflection = snapshot.primitives.find(
       (primitive) => primitive.id === "reflection:reflection-project-a",
     );
@@ -186,12 +128,6 @@ describe("learning audit read model", () => {
       evidence: [],
     });
     expect(reflection?.consideredEvidencePreviews).toEqual([]);
-    const privateSignal = snapshot.primitives.find(
-      (primitive) => primitive.id === "feedback_signal:signal-project-a",
-    );
-    expect(privateSignal?.rawJson).toContain('"redacted":true');
-    expect(Object.hasOwn(privateSignal ?? {}, "raw")).toBe(false);
-    expect(Object.hasOwn(privateSignal ?? {}, "sensitivity")).toBe(false);
     workspace.close();
   }, 30_000);
 
@@ -221,7 +157,7 @@ describe("learning audit read model", () => {
     });
     await workspace.jobs.enqueue({
       jobId: "reflection-readable",
-      kind: "runtime.reflect_turn",
+      kind: "runtime.reflect_capability",
       payload: Object.freeze({
         turn: Object.freeze({
           project,
@@ -245,7 +181,7 @@ describe("learning audit read model", () => {
       now: "2026-08-14T00:00:01.000Z",
       leaseUntil: "2026-08-14T00:01:00.000Z",
       maximumCost: 1,
-      kinds: Object.freeze(["runtime.reflect_turn"]),
+      kinds: Object.freeze(["runtime.reflect_capability"]),
     });
     if (!claimed?.leaseToken) throw new Error("Expected the readable reflection job to be claimed");
     await workspace.jobs.complete({
@@ -253,12 +189,8 @@ describe("learning audit read model", () => {
       leaseToken: claimed.leaseToken,
       now: "2026-08-14T00:00:02.000Z",
       result: Object.freeze({
-        status: "adjusted",
+        status: "activated",
         rationale: "The correction establishes a reusable project constraint.",
-        observation: Object.freeze({
-          kind: "correction",
-          reason: "The direct edit would bypass the protected adaptation path.",
-        }),
       }),
     });
 
@@ -283,14 +215,13 @@ describe("learning audit read model", () => {
         expect.objectContaining({
           title: "Decision",
           entries: expect.arrayContaining([
-            expect.objectContaining({ label: "Outcome", value: "Applied project strategy" }),
+            expect.objectContaining({ label: "Outcome", value: "activated" }),
             expect.objectContaining({
               label: "Why",
               value: "The correction establishes a reusable project constraint.",
             }),
           ]),
         }),
-        expect.objectContaining({ title: "Observation" }),
       ]),
     );
     expect(reflection?.consideredEvidencePreviews).toEqual([
@@ -336,7 +267,7 @@ describe("learning audit read model", () => {
     });
     await workspace.jobs.enqueue({
       jobId: "reflection-capability",
-      kind: "runtime.reflect_turn",
+      kind: "runtime.reflect_capability",
       payload: Object.freeze({
         turn: Object.freeze({
           project,
@@ -358,7 +289,7 @@ describe("learning audit read model", () => {
       now: "2026-08-18T00:00:02.000Z",
       leaseUntil: "2026-08-18T00:01:00.000Z",
       maximumCost: 1,
-      kinds: Object.freeze(["runtime.reflect_turn"]),
+      kinds: Object.freeze(["runtime.reflect_capability"]),
     });
     if (!claimed?.leaseToken) throw new Error("Expected the Capability reflection job to be claimed");
     await workspace.jobs.complete({
@@ -525,16 +456,13 @@ describe("learning audit read model", () => {
     workspace.close();
   });
 
-  test("redacts sensitive reflections and presents unapply evidence and transitions truthfully", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-learning-sensitive-unapply-"));
+  test("redacts sensitive reflections", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-learning-sensitive-"));
     const workspace = await createWorkspaceStore(home);
-    const project = Object.freeze({
-      projectId: "project-sensitive-unapply",
-      root: "/workspace/sensitive-unapply",
-    });
+    const project = Object.freeze({ projectId: "project-sensitive", root: "/workspace/sensitive" });
     await workspace.operational.sessions.put({
-      sessionId: "session-sensitive-unapply",
-      title: "Sensitive unapply decision",
+      sessionId: "session-sensitive",
+      title: "Sensitive decision",
       status: "idle",
       provider: "controlled",
       model: "controlled",
@@ -543,169 +471,77 @@ describe("learning audit read model", () => {
       updatedAt: "2026-08-14T00:00:00.000Z",
       metadata: Object.freeze({}),
     });
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const adjustmentEvidence = Object.freeze({
-      kind: "database_row" as const,
-      table: "sessions" as const,
-      rowId: "session-sensitive-unapply",
-    });
     await workspace.operational.messages.put({
-      messageId: "message-removal-evidence",
-      sessionId: "session-sensitive-unapply",
+      messageId: "message-sensitive-evidence",
+      sessionId: "session-sensitive",
       role: "user",
-      content: "The temporary strategy is no longer useful.",
+      content: "Keep this between us.",
       sensitivity: "normal",
       createdAt: "2026-08-14T00:00:01.000Z",
       metadata: Object.freeze({}),
     });
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const removalEvidence = Object.freeze({
-      kind: "database_row" as const,
-      table: "messages" as const,
-      rowId: "message-removal-evidence",
-    });
-    const adjustment = Object.freeze({
-      adjustmentId: "adjustment-to-remove",
-      scope: project,
-      observation: "A temporary workflow constraint was useful.",
-      strategy: "Always use the temporary workflow constraint.",
-      successSignal: "The temporary workflow remains reliable.",
-      evidenceRefs: Object.freeze([adjustmentEvidence]),
-      createdFromTurnId: "turn-adjustment-origin",
-    });
-    const sourceWorkspace = Object.freeze({
-      ...workspace,
-      workingAdjustments: Object.freeze({
-        ...workspace.workingAdjustments,
-        list: async (request: { readonly projectId?: string; readonly limit: number }) =>
-          Object.freeze(request.projectId === project.projectId ? [adjustment] : []),
-        getActive: async () => undefined,
-      }),
-    });
-
-    const enqueueReflection = async (
-      jobId: string,
-      sensitivity: "normal" | "private",
-      result: JsonObject,
-    ): Promise<void> => {
-      await workspace.jobs.enqueue({
-        jobId,
-        kind: "runtime.reflect_turn",
-        payload: Object.freeze({
-          turn: Object.freeze({
-            project,
-            sessionId: "session-sensitive-unapply",
-            turnId: `turn-${jobId}`,
-            sensitivity,
-          }),
-        }),
-        payloadRefs: Object.freeze([removalEvidence]),
-        operationId: `operation-${jobId}`,
-        idempotencyKey: `operation-${jobId}`,
-        notBefore: "2026-08-14T00:00:02.000Z",
-        maxAttempts: 1,
-        estimatedCost: 0,
-        budget: 1,
-      });
-      const claimed = await workspace.jobs.claim({
-        workerId: `worker-${jobId}`,
-        now: "2026-08-14T00:00:03.000Z",
-        leaseUntil: "2026-08-14T00:01:00.000Z",
-        maximumCost: 1,
-        kinds: Object.freeze(["runtime.reflect_turn"]),
-      });
-      if (!claimed?.leaseToken) throw new Error(`Expected ${jobId} to be claimed`);
-      await workspace.jobs.complete({
-        jobId: claimed.jobId,
-        leaseToken: claimed.leaseToken,
-        now: "2026-08-14T00:00:04.000Z",
-        result,
-      });
-    };
-    await enqueueReflection(
-      "reflection-unapplied",
-      "normal",
-      Object.freeze({
-        status: "unapplied",
-        adjustmentId: adjustment.adjustmentId,
-        project,
-        reason: "The temporary strategy no longer has a credible future use.",
-        evidenceRefs: Object.freeze([removalEvidence]),
-      }),
-    );
-    await enqueueReflection(
-      "reflection-private",
-      "private",
-      Object.freeze({
-        status: "adjusted",
-        adjustmentId: adjustment.adjustmentId,
-        rationale: "PRIVATE RATIONALE MUST NOT APPEAR",
-        observation: Object.freeze({
-          kind: "correction",
-          reason: "PRIVATE OBSERVATION MUST NOT APPEAR",
-        }),
-      }),
-    );
     await workspace.jobs.enqueue({
-      jobId: "author-with-evidence",
-      kind: "runtime.author_revision",
-      payload: Object.freeze({ sourceSessionId: "session-sensitive-unapply" }),
-      payloadRefs: Object.freeze([removalEvidence]),
-      operationId: "operation-author-with-evidence",
-      idempotencyKey: "operation-author-with-evidence",
-      notBefore: "2026-08-14T00:00:05.000Z",
+      jobId: "reflection-private",
+      kind: "runtime.reflect_capability",
+      payload: Object.freeze({
+        turn: Object.freeze({
+          project,
+          sessionId: "session-sensitive",
+          turnId: "turn-private",
+          sensitivity: "private",
+        }),
+      }),
+      payloadRefs: Object.freeze([
+        Object.freeze({
+          kind: "database_row" as const,
+          table: "messages" as const,
+          rowId: "message-sensitive-evidence",
+        }),
+      ]),
+      operationId: "operation-reflection-private",
+      idempotencyKey: "operation-reflection-private",
+      notBefore: "2026-08-14T00:00:02.000Z",
       maxAttempts: 1,
       estimatedCost: 0,
-      budget: 0,
+      budget: 1,
+    });
+    const claimed = await workspace.jobs.claim({
+      workerId: "worker-private",
+      now: "2026-08-14T00:00:03.000Z",
+      leaseUntil: "2026-08-14T00:01:00.000Z",
+      maximumCost: 1,
+      kinds: Object.freeze(["runtime.reflect_capability"]),
+    });
+    if (!claimed?.leaseToken) throw new Error("Expected the private reflection to be claimed");
+    await workspace.jobs.complete({
+      jobId: claimed.jobId,
+      leaseToken: claimed.leaseToken,
+      now: "2026-08-14T00:00:04.000Z",
+      result: Object.freeze({
+        status: "activated",
+        rationale: "PRIVATE RATIONALE MUST NOT APPEAR",
+      }),
     });
 
     const snapshot = await loadLearningAuditSnapshot(
       {
-        workspace: sourceWorkspace,
+        workspace,
         resolveRevision: async () => undefined,
         resolveCapability: () => undefined,
         project,
       },
-      "session-sensitive-unapply",
-    );
-    const unapplied = snapshot.primitives.find(
-      (primitive) => primitive.id === "reflection:reflection-unapplied",
-    );
-    expect(unapplied?.evidence).toEqual(["messages:message-removal-evidence"]);
-    expect(unapplied?.evidence).not.toContain("sessions:session-sensitive-unapply");
-    expect(unapplied?.detailSections).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          title: "What changed",
-          entries: expect.arrayContaining([
-            expect.objectContaining({
-              label: "Before",
-              value: "Always use the temporary workflow constraint.",
-            }),
-            expect.objectContaining({ label: "Now", value: "No project strategy is active." }),
-          ]),
-        }),
-      ]),
+      "session-sensitive",
     );
     const privateReflection = snapshot.primitives.find(
       (primitive) => primitive.id === "reflection:reflection-private",
     );
     expect(privateReflection?.summary).toContain("Sensitive reflection details are hidden");
     expect(JSON.stringify(privateReflection?.detailSections)).not.toContain("PRIVATE RATIONALE");
-    expect(JSON.stringify(privateReflection?.detailSections)).not.toContain("PRIVATE OBSERVATION");
     expect(privateReflection?.rawJson).toContain('"redacted":true');
     expect(privateReflection?.evidence).toEqual([]);
     expect(privateReflection?.evidencePreviews).toEqual([]);
     expect(privateReflection?.consideredEvidenceCount).toBe(0);
     expect(privateReflection?.consideredEvidencePreviews).toEqual([]);
-    const author = snapshot.primitives.find((primitive) => primitive.id === "job:author-with-evidence");
-    expect(author?.evidence).toEqual(["messages:message-removal-evidence"]);
-    expect(author?.evidencePreviews).toEqual([
-      expect.objectContaining({
-        identity: "messages:message-removal-evidence",
-        excerpt: "The temporary strategy is no longer useful.",
-      }),
-    ]);
     workspace.close();
   });
 });

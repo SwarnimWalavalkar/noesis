@@ -452,7 +452,6 @@ function settledTurnMessage(
         sensitivity: input.turn.sensitivity,
         telemetry: input.turn.telemetry,
         evidenceRefCount: input.turn.evidenceRefs.length,
-        priorAdjustmentOutcomeCount: input.turn.servedWorkingAdjustmentOutcomes.length,
       } as const)
       .finish(),
   );

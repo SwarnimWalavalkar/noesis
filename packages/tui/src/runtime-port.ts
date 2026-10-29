@@ -179,21 +179,18 @@ export interface TuiExecutionDetail extends TuiExecutionSummary {
 
 export interface TuiLearningActivitySummary {
   readonly jobId: string;
-  readonly stage: "reflection" | "authoring" | "preflight";
+  readonly stage: "reflection";
   readonly status:
     | "queued"
     | "running"
     | "completed"
     | "no_change"
-    | "adjusted"
     | "activated"
     | "revised"
     | "pending"
     | "paused"
     | "restored"
     | "binding_changed"
-    | "replaced"
-    | "unapplied"
     | "stale"
     | "failed";
   readonly summary: string;
@@ -201,40 +198,16 @@ export interface TuiLearningActivitySummary {
   readonly turnId?: string;
   /** The later turn whose user message reacted to `turnId` and released its reflection. */
   readonly reactionTurnId?: string;
-  readonly experimentId?: string;
   readonly capabilityId?: string;
   readonly capabilityRevisionId?: string;
   readonly capabilityBundleDigest?: string;
   readonly projectId?: string;
-  readonly adjustmentId?: string;
-  readonly activeAdjustmentId?: string;
   readonly evidenceRefs?: readonly EvidenceRef[];
-  readonly workingAdjustment?: TuiWorkingAdjustmentState;
   readonly failure?: string;
-}
-
-export interface TuiWorkingAdjustmentEvidenceSummary {
-  readonly planId: string;
-  readonly sessionId: string;
-  readonly turnId: string;
-  readonly outcomeId: string;
-  readonly outcome: "accepted" | "corrected" | "failed" | "unknown";
-  readonly summary: string;
-  readonly settledAt: string;
-}
-
-export interface TuiWorkingAdjustmentState {
-  readonly adjustmentId: string;
-  readonly projectId: string;
-  readonly status: "active" | "inactive";
-  readonly strategy: string;
-  readonly successSignal: string;
-  readonly servedEvidence: readonly TuiWorkingAdjustmentEvidenceSummary[];
 }
 
 export interface TuiLearningInspection {
   readonly activity: readonly TuiLearningActivitySummary[];
-  readonly currentWorkingAdjustment?: TuiWorkingAdjustmentState;
 }
 
 export type TuiLearningPrimitiveKind =
@@ -242,31 +215,9 @@ export type TuiLearningPrimitiveKind =
   | "capability_feedback"
   | "capability_gate"
   | "reflection"
-  | "working_adjustment"
-  | "experiment"
-  | "capability_revision"
-  | "preflight_plan"
-  | "trial"
-  | "evaluation"
-  | "preflight_report"
-  | "activation"
-  | "approval"
-  | "feedback_signal"
-  | "observation"
-  | "outcome_research"
-  | "experiment_outcome"
-  | "successor_lineage"
-  | "job";
+  | "capability_revision";
 
-export type TuiLearningPrimitiveGroup =
-  | "capabilities"
-  | "memory"
-  | "reflection"
-  | "history"
-  | "evaluation"
-  | "activation"
-  | "feedback"
-  | "operations";
+export type TuiLearningPrimitiveGroup = "capabilities" | "reflection" | "history" | "activation" | "feedback";
 
 export type TuiCapabilityKind =
   | "instruction"
@@ -317,7 +268,6 @@ export interface TuiLearningPrimitive {
   readonly occurredAt?: string;
   readonly sessionId?: string;
   readonly projectId?: string;
-  readonly experimentId?: string;
   readonly capabilityId?: string;
   readonly capabilityRevisionId?: string;
   readonly capabilityBundleDigest?: string;
@@ -343,7 +293,6 @@ export interface TuiLearningAuditSnapshot {
   readonly projectId: string;
   readonly sessionId: string;
   readonly generatedAt: string;
-  readonly activeAdjustmentId?: string;
   readonly primitives: readonly TuiLearningPrimitive[];
 }
 

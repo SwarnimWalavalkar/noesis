@@ -77,7 +77,6 @@ describe("Capability learning loop", () => {
             userMessage: "hey hey",
             outcome: "failed",
             cause: "failed_before_output",
-            servedWorkingAdjustmentOutcomes: [],
             scope: "global",
             sensitivity: "normal",
             occurredAt: "2026-10-28T14:56:48.000Z",
@@ -285,7 +284,6 @@ describe("Capability learning loop", () => {
           userMessage: "Keep future research answers concise.",
           assistantMessage: "Understood.",
           outcome: "accepted",
-          servedWorkingAdjustmentOutcomes: [],
           scope: "general",
           sensitivity: "normal",
           evidenceRefs: [
@@ -391,7 +389,6 @@ describe("Capability learning loop", () => {
           userMessage: "Teach recovery behavior, but do not apply it before I approve it.",
           assistantMessage: "Understood.",
           outcome: "accepted",
-          servedWorkingAdjustmentOutcomes: [],
           scope: "general",
           sensitivity: "normal",
           evidenceRefs: [
@@ -649,7 +646,6 @@ describe("Capability learning loop", () => {
             userMessage: "Research several providers and improve how you perform this work next time.",
             assistantMessage: assistantContent,
             outcome: "accepted",
-            servedWorkingAdjustmentOutcomes: [],
             scope: "global",
             sensitivity: "normal",
             evidenceRefs: [...evidenceRefs],
@@ -802,7 +798,6 @@ describe("Capability learning loop", () => {
             turnId: "turn-workflow",
             userMessage: "Reuse the saved evidence synthesis workflow when this comes up again.",
             outcome: "accepted",
-            servedWorkingAdjustmentOutcomes: [],
             scope: "general",
             sensitivity: "normal",
             evidenceRefs: [
@@ -969,7 +964,6 @@ describe("Capability learning loop", () => {
             userMessage: "Fix the parser bug.",
             outcome: "unknown",
             cause: "completed",
-            servedWorkingAdjustmentOutcomes: [],
             scope: "global",
             sensitivity: "normal",
             occurredAt: `2026-10-29T10:${String(minute)}0:00.000Z`,

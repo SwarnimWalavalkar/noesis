@@ -356,7 +356,7 @@ describe("first-party architecture boundaries", () => {
       "utf8",
     );
     const operationalRepositoriesStart = workspaceTypes.indexOf("export interface OperationalRepositories");
-    const operationalRepositoriesEnd = workspaceTypes.indexOf("export interface StagedDefinition");
+    const operationalRepositoriesEnd = workspaceTypes.indexOf("export type CanonicalSearchSource");
     expect(operationalRepositoriesStart).toBeGreaterThanOrEqual(0);
     expect(operationalRepositoriesEnd).toBeGreaterThan(operationalRepositoriesStart);
     const operationalRepositories = workspaceTypes.slice(

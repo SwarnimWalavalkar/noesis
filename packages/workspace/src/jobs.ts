@@ -9,7 +9,6 @@ import {
   type DurableJobEnqueueRequest,
   type DurableJobFailure,
   type DurableJobListRequest,
-  type DurableJobObservationRequest,
   type DurableJobPage,
   type DurableJobRecord,
   type DurableJobStatus,
@@ -37,11 +36,6 @@ const JobFailureSchema = z.strictObject({
   retryable: z.boolean(),
   ambiguous: z.boolean(),
 });
-const JobObservationSchema = z.strictObject({
-  sourceSessionId: z.string().min(1),
-  parentJobId: z.string().min(1),
-  observedAt: z.string().datetime(),
-});
 const EnqueueSchema = z.strictObject({
   jobId: z.string().min(1),
   kind: z.string().min(1),
@@ -53,8 +47,6 @@ const EnqueueSchema = z.strictObject({
   maxAttempts: z.number().int().positive(),
   estimatedCost: z.number().nonnegative(),
   budget: z.number().nonnegative(),
-  observations: z.array(JobObservationSchema).optional(),
-  inheritObservationsFromParentJobId: z.string().min(1).optional(),
 });
 /** BOUNDARY: Activity references are serialized by the authoritative workspace activity writer. */
 type RecordActivity = (
@@ -74,47 +66,6 @@ export function createDurableJobStore(
   const read = (jobId: string): DurableJobRecord | undefined => {
     const row = db.prepare("SELECT * FROM jobs WHERE job_id = ?").get(jobId);
     return row === undefined ? undefined : decodeDurableJob(row);
-  };
-  const recordObservation = (jobId: string, observation: DurableJobObservationRequest): void => {
-    db.prepare(`INSERT OR IGNORE INTO job_lineage(child_job_id, parent_job_id, linked_at)
-       VALUES (?, ?, ?)`).run(jobId, observation.parentJobId, observation.observedAt);
-    db.prepare(`INSERT OR IGNORE INTO job_observations(
-         child_job_id, parent_job_id, source_session_id, observed_at
-       ) VALUES (?, ?, ?, ?)`).run(
-      jobId,
-      observation.parentJobId,
-      observation.sourceSessionId,
-      observation.observedAt,
-    );
-    db.prepare(`WITH RECURSIVE descendants(child_job_id, parent_job_id) AS (
-         SELECT child_job_id, parent_job_id FROM job_lineage WHERE parent_job_id = ?
-         UNION
-         SELECT lineage.child_job_id, lineage.parent_job_id
-         FROM job_lineage AS lineage
-         JOIN descendants ON lineage.parent_job_id = descendants.child_job_id
-       )
-       INSERT OR IGNORE INTO job_observations(
-         child_job_id, parent_job_id, source_session_id, observed_at
-       )
-       SELECT child_job_id, parent_job_id, ?, ? FROM descendants`).run(
-      jobId,
-      observation.sourceSessionId,
-      observation.observedAt,
-    );
-  };
-  const inheritObservations = (jobId: string, parentJobId: string, observedAt: string): void => {
-    db.prepare(`INSERT OR IGNORE INTO job_lineage(child_job_id, parent_job_id, linked_at)
-       VALUES (?, ?, ?)`).run(jobId, parentJobId, observedAt);
-    const sessions = db
-      .prepare(`SELECT source_session_id
-         FROM job_observations
-         WHERE child_job_id = ?
-         GROUP BY source_session_id
-         ORDER BY min(observed_at), source_session_id`)
-      .all(parentJobId)
-      .map((row) => z.string().min(1).parse(row["source_session_id"]));
-    for (const sourceSessionId of sessions)
-      recordObservation(jobId, { sourceSessionId, parentJobId, observedAt });
   };
   const enqueue = async (request: DurableJobEnqueueRequest): Promise<DurableJobRecord> => {
     const value = EnqueueSchema.parse(request);
@@ -136,9 +87,6 @@ export function createDurableJobStore(
           existing.estimatedCost === value.estimatedCost;
         if (!sameRequest)
           throw new Error(`Durable job operation identity collision for ${value.operationId}`);
-        for (const observation of value.observations ?? []) recordObservation(existing.jobId, observation);
-        if (value.inheritObservationsFromParentJobId)
-          inheritObservations(existing.jobId, value.inheritObservationsFromParentJobId, value.notBefore);
         return existing;
       }
       db.prepare(`INSERT INTO jobs(
@@ -161,9 +109,6 @@ export function createDurableJobStore(
         value.estimatedCost,
       );
       recordActivity(actor, "coordinator.job_enqueued", "job", value.jobId, value.payloadRefs);
-      for (const observation of value.observations ?? []) recordObservation(value.jobId, observation);
-      if (value.inheritObservationsFromParentJobId)
-        inheritObservations(value.jobId, value.inheritObservationsFromParentJobId, value.notBefore);
       const created = read(value.jobId);
       if (!created) throw new Error(`Durable job ${value.jobId} disappeared after enqueue`);
       return created;
@@ -213,48 +158,10 @@ export function createDurableJobStore(
       clauses.push("json_extract(payload_json, '$.turn.sessionId') = ?");
       values.push(request.payloadSessionId);
     }
-    if (request.payloadSourceSessionIds !== undefined) {
-      const sessionIds = z.array(z.string().min(1)).max(250).parse(request.payloadSourceSessionIds);
-      if (sessionIds.length === 0) clauses.push("0");
-      else {
-        clauses.push(
-          `json_extract(payload_json, '$.sourceSessionId') IN (${sessionIds.map(() => "?").join(", ")})`,
-        );
-        values.push(...sessionIds);
-      }
-    }
     if (request.payloadProjectId !== undefined) {
       z.string().min(1).parse(request.payloadProjectId);
       clauses.push("json_extract(payload_json, '$.turn.project.projectId') = ?");
       values.push(request.payloadProjectId);
-    }
-    if (request.observedSessionId !== undefined) {
-      z.string().min(1).parse(request.observedSessionId);
-      clauses.push(`job_id IN (
-           WITH RECURSIVE scoped_jobs(job_id, source_session_id) AS (
-             SELECT child_job_id, source_session_id
-             FROM job_observations
-             WHERE source_session_id = ?
-             UNION
-             SELECT observations.child_job_id, observations.source_session_id
-             FROM job_observations AS observations
-             JOIN scoped_jobs
-               ON observations.parent_job_id = scoped_jobs.job_id
-              AND observations.source_session_id = scoped_jobs.source_session_id
-           )
-           SELECT job_id FROM scoped_jobs
-         )`);
-      values.push(request.observedSessionId);
-    }
-    if (request.payloadExperimentIds !== undefined) {
-      const experimentIds = z.array(z.string().min(1)).max(250).parse(request.payloadExperimentIds);
-      if (experimentIds.length === 0) clauses.push("0");
-      else {
-        clauses.push(
-          `json_extract(payload_json, '$.experimentId') IN (${experimentIds.map(() => "?").join(", ")})`,
-        );
-        values.push(...experimentIds);
-      }
     }
     if (request.after) {
       z.string().datetime().parse(request.after.createdAt);
@@ -490,17 +397,6 @@ export function createDurableJobStore(
   };
   return Object.freeze({
     enqueue,
-    recordObservation: async (jobId: string, observation: DurableJobObservationRequest) => {
-      z.string().min(1).parse(jobId);
-      const value = JobObservationSchema.parse(observation);
-      database.transaction(() => recordObservation(jobId, value));
-    },
-    inheritObservations: async (jobId: string, parentJobId: string, observedAt: string) => {
-      z.string().min(1).parse(jobId);
-      z.string().min(1).parse(parentJobId);
-      z.string().datetime().parse(observedAt);
-      database.transaction(() => inheritObservations(jobId, parentJobId, observedAt));
-    },
     get: async (jobId: string) => read(jobId),
     list,
     listPage,

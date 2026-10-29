@@ -3,12 +3,8 @@ import type { DatabaseRow } from "./database.ts";
 import { validateFrozenSubAgentPlan } from "@noesis/agent-types";
 import {
   createConditionalObject,
-  ExperimentSchema,
-  FeedbackSignalSchema,
   FileRevisionRefSchema,
   JsonValueSchema,
-  type Experiment,
-  type FeedbackSignal,
   type FileRevisionRef,
 } from "@noesis/domain";
 import { z } from "zod";
@@ -659,7 +655,7 @@ export function decodeSearchDocument(row: DatabaseRow | undefined): SearchDocume
     .discriminatedUnion("kind", [
       z.strictObject({
         kind: z.literal("database_row"),
-        table: z.enum(["sessions", "messages", "tool_calls", "outcomes", "experiments"]),
+        table: z.enum(["sessions", "messages", "tool_calls", "outcomes"]),
         rowId: z.string(),
         field: z.string(),
       }),
@@ -689,25 +685,6 @@ export function decodeOptional<T>(
   decode: (value: DatabaseRow) => T,
 ): T | undefined {
   return row === undefined ? undefined : decode(row);
-}
-export function decodeStored<T>(row: DatabaseRow | undefined, schema: z.ZodType<T>): T | undefined {
-  return row === undefined ? undefined : schema.parse(parseJson(requiredString(row, "data_json")));
-}
-export function decodeExperiment(row: DatabaseRow | undefined): Experiment | undefined {
-  if (row === undefined) return undefined;
-  const parsed = ExperimentSchema.safeParse(parseJson(requiredString(row, "data_json")));
-  if (!parsed.success) throw parsed.error;
-  // Zod's optional-property inference includes explicit undefined while the domain uses exact optionals.
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return parsed.data as Experiment;
-}
-export function decodeFeedbackSignal(row: DatabaseRow | undefined): FeedbackSignal | undefined {
-  if (row === undefined) return undefined;
-  const parsed = FeedbackSignalSchema.safeParse(parseJson(requiredString(row, "data_json")));
-  if (!parsed.success) throw parsed.error;
-  // Zod's optional-property inference includes explicit undefined while the domain uses exact optionals.
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return parsed.data as FeedbackSignal;
 }
 export function decodeVector(value: string): readonly number[] {
   return z.array(z.number().finite()).min(1).parse(JSON.parse(value));

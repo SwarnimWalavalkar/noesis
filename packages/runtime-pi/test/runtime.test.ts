@@ -53,9 +53,7 @@ import {
 const sessionToolNames = [
   "search_sessions",
   "open_session_evidence",
-  "find_corrections",
   "find_similar_tasks",
-  "prior_experiment_outcomes",
 ] as const satisfies readonly SessionToolName[];
 const TEST_TOOL_INVOCATION: AgentHarnessToolInvocation = Object.freeze({
   invocationId: "test-invocation",

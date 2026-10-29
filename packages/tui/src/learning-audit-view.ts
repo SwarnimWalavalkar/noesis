@@ -3,7 +3,6 @@ import type {
   TuiLearningEvidencePreview,
   TuiLearningPrimitive,
   TuiLearningPrimitiveGroup,
-  TuiLearningPrimitiveKind,
 } from "./runtime-port.ts";
 import { highlightCode } from "./syntax.ts";
 import { ANSI, elideText, safeTerminalText, styled } from "./theme.ts";
@@ -21,18 +20,6 @@ export const GROUP_FILTERS: readonly TuiLearningPrimitiveGroup[] = Object.freeze
   "activation",
   "reflection",
   "history",
-  "evaluation",
-  "memory",
-  "operations",
-]);
-
-const SUPPORTING_KINDS: ReadonlySet<TuiLearningPrimitiveKind> = new Set([
-  "trial",
-  "preflight_plan",
-  "feedback_signal",
-  "capability_revision",
-  "successor_lineage",
-  "outcome_research",
 ]);
 
 const CHIP_ORDER: readonly AuditFilter[] = Object.freeze([
@@ -58,13 +45,10 @@ export function pad(line: string, width: number): string {
 
 const GROUP_GLYPH: Readonly<Record<TuiLearningPrimitiveGroup, string>> = Object.freeze({
   capabilities: "◆",
-  memory: "○",
   reflection: "◇",
   history: "◌",
-  evaluation: "□",
   activation: "▹",
   feedback: "↻",
-  operations: "·",
 });
 
 export function isRoutine(record: TuiLearningPrimitive): boolean {
@@ -77,11 +61,7 @@ export function isQuietFailure(record: TuiLearningPrimitive): boolean {
 
 export function isNoteworthy(record: TuiLearningPrimitive): boolean {
   if (isRoutine(record)) return false;
-  if (record.group === "operations") return record.tone === "pending" || record.tone === "negative";
-  if (record.kind === "working_adjustment") return record.tone === "active";
-  if (record.kind === "observation") return record.tone === "positive" || record.tone === "negative";
   if (record.kind === "capability_revision") return record.tone === "active";
-  if (SUPPORTING_KINDS.has(record.kind)) return record.tone === "pending" || record.tone === "negative";
   return true;
 }
 
@@ -121,7 +101,7 @@ function groupHeader(section: string, colorEnabled: boolean): string {
 export function nextGroupFilter(current: AuditFilter): TuiLearningPrimitiveGroup {
   const currentGroup = GROUP_FILTERS.find((group) => group === current);
   const index = currentGroup ? GROUP_FILTERS.indexOf(currentGroup) : -1;
-  return GROUP_FILTERS[(index + 1) % GROUP_FILTERS.length] ?? "memory";
+  return GROUP_FILTERS[(index + 1) % GROUP_FILTERS.length] ?? "capabilities";
 }
 
 export function toggleAllActivity(current: AuditFilter): AuditFilter {
@@ -132,9 +112,7 @@ export function headlineStats(records: readonly TuiLearningPrimitive[], colorEna
   const active = records.filter(
     (record) => record.kind === "capability" && record.capabilityState === "active",
   ).length;
-  const evaluating = records.filter(
-    (record) => record.tone === "pending" && record.group !== "operations",
-  ).length;
+  const evaluating = records.filter((record) => record.tone === "pending").length;
   const attention = records.filter((record) => record.tone === "negative" && !isQuietFailure(record)).length;
   const routine = records.filter(isRoutine).length;
   const item = (tone: keyof typeof TONE_PRESENTATION, count: number, label: string): string =>

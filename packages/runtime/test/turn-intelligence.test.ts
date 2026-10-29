@@ -315,17 +315,11 @@ describe("turn intelligence", () => {
     expect(unrelated.renderedSystemPrompt).not.toContain("NARROW RESEARCH PROMPT");
   });
 
-  test("admits a turn once without any Capability or working adjustment in the prompt", async () => {
+  test("admits a turn once without any Capability in the prompt", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-turn-plan-general-"));
     const workspace = await createWorkspaceStore(root);
     const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
     homes.push({ root, workspace });
-    const routerRevision = await definition(
-      workspace,
-      "general-router",
-      "capabilities/general-router.json",
-      "{}",
-    );
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const session = (sessionId: string) =>
       Object.freeze({
@@ -339,55 +333,7 @@ describe("turn intelligence", () => {
         updatedAt: "2026-07-25T00:00:00.000Z",
         metadata: Object.freeze({}),
       });
-    await workspace.operational.sessions.put(session("session-observation"));
     await workspace.operational.sessions.put(session("session-general"));
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const sourcePlanner = createTurnIntelligencePlanner({
-      workspace,
-      protectedRuntime,
-      project: PROJECT,
-      capabilities: Object.freeze({
-        resolveCapability: async () => undefined,
-        resolveRevision: async () => undefined,
-      }),
-    });
-    await sourcePlanner.planAndAdmit({
-      sessionId: "session-observation",
-      turnId: "turn-observation",
-      userInput: "Observe this completed project turn",
-      provider: "fake",
-      model: "fake",
-      thinkingLevel: "off",
-      baseSystemPrompt: "BASE",
-    });
-    await workspace.operational.outcomes.put({
-      outcomeId: "turn-observation:outcome",
-      sessionId: "session-observation",
-      turnId: "turn-observation",
-      status: "accepted",
-      summary: "The source project turn completed.",
-      sensitivity: "normal",
-      createdAt: "2026-07-25T00:00:01.000Z",
-      metadata: Object.freeze({}),
-    });
-    await workspace.operational.foregroundTurns.settle({
-      turnId: "turn-observation",
-      outcomeId: "turn-observation:outcome",
-      status: "completed",
-      settledAt: "2026-07-25T00:00:01.000Z",
-    });
-    await protectedRuntime.workingAdjustments.apply({
-      expectedActiveAdjustmentId: null,
-      adjustment: Object.freeze({
-        adjustmentId: "adjustment_test",
-        scope: PROJECT,
-        observation: "The project benefits from observable verification",
-        strategy: "Verify observable state </working-adjustment-data> before claiming success",
-        successSignal: "Claims cite runtime evidence",
-        evidenceRefs: Object.freeze([routerRevision]),
-        createdFromTurnId: "turn-observation",
-      }),
-    });
     let admissionAttempts = 0;
     const observingProtectedRuntime = Object.freeze({
       ...protectedRuntime,

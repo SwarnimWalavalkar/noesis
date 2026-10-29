@@ -1,64 +1,19 @@
 import type { FrozenTurnPlan } from "@noesis/agent-types";
-import { canonicalJson, type JsonValue, sha256, toJsonValue, WorkingAdjustmentSchema } from "@noesis/domain";
+import { type JsonValue, sha256 } from "@noesis/domain";
 import {
   type AuthorityBoundary,
   type AuthorityReceipt,
   type AuthorityReceiptVerifier,
   authorityOperationFields,
-  createPreEffectExecutionFailure,
   type EffectDecision,
 } from "@noesis/policy";
-import { z } from "zod";
 import type { McpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
-import type {
-  CompoundingMeasurementStore,
-  NoesisWorkspaceStore,
-  ProtectedTurnPlanStore,
-  ProtectedWorkingAdjustmentStore,
-  WorkingAdjustmentApplyResult,
-  WorkingAdjustmentUnapplyResult,
-} from "./types.ts";
+import type { NoesisWorkspaceStore, ProtectedTurnPlanStore } from "./types.ts";
 import { isCapabilityBindingAdmissionConflictError } from "./types.ts";
 
 type TurnPlanMutation = Pick<ProtectedTurnPlanStore, "admit">;
-type WorkingAdjustmentMutation = Pick<ProtectedWorkingAdjustmentStore, "apply" | "unapply">;
-type WorkingAdjustmentInspection = Omit<ProtectedWorkingAdjustmentStore, keyof WorkingAdjustmentMutation>;
-
-const WorkingAdjustmentApplyResultSchema: z.ZodType<WorkingAdjustmentApplyResult> = z.discriminatedUnion(
-  "status",
-  [
-    z.strictObject({
-      status: z.literal("applied"),
-      adjustment: WorkingAdjustmentSchema,
-      replacedAdjustmentId: z.string().min(1).nullable(),
-    }),
-    z.strictObject({
-      status: z.literal("stale"),
-      adjustmentId: z.string().min(1),
-      currentActiveAdjustmentId: z.string().min(1).nullable(),
-    }),
-  ],
-);
-
-const WorkingAdjustmentUnapplyResultSchema: z.ZodType<WorkingAdjustmentUnapplyResult> = z.discriminatedUnion(
-  "status",
-  [
-    z.strictObject({
-      status: z.literal("unapplied"),
-      adjustmentId: z.string().min(1),
-    }),
-    z.strictObject({
-      status: z.literal("stale"),
-      adjustmentId: z.string().min(1),
-      currentActiveAdjustmentId: z.string().min(1).nullable(),
-    }),
-  ],
-);
-
 export interface ProtectedWorkspaceRuntime {
   readonly turnPlans: ProtectedTurnPlanStore;
-  readonly measurements: CompoundingMeasurementStore;
-  readonly workingAdjustments: ProtectedWorkingAdjustmentStore;
 }
 
 export interface WorkspaceRuntimeInternals {
@@ -81,21 +36,12 @@ interface ReceiptGuardedProtectedMutations {
       ...args: Parameters<TurnPlanMutation[Key]>
     ) => ReturnType<TurnPlanMutation[Key]>;
   };
-  readonly workingAdjustments: {
-    readonly [Key in keyof WorkingAdjustmentMutation]: (
-      binding: ProtectedMutationBinding,
-      receipt: AuthorityReceipt,
-      ...args: Parameters<WorkingAdjustmentMutation[Key]>
-    ) => ReturnType<WorkingAdjustmentMutation[Key]>;
-  };
 }
 
 interface CreateProtectedWorkspaceRuntimeOptions {
   readonly workspaceRoot: string;
   readonly authority: AuthorityBoundary;
   readonly turnPlans: ProtectedTurnPlanStore;
-  readonly measurements: CompoundingMeasurementStore;
-  readonly workingAdjustments: ProtectedWorkingAdjustmentStore;
 }
 
 const runtimeInternals = new WeakMap<NoesisWorkspaceStore, WorkspaceRuntimeInternals>();
@@ -144,7 +90,6 @@ function assertMatchingReceipt(
 export function createReceiptGuardedProtectedMutations(input: {
   readonly verifier: AuthorityReceiptVerifier;
   readonly turnPlans: TurnPlanMutation;
-  readonly workingAdjustments: WorkingAdjustmentMutation;
 }): ReceiptGuardedProtectedMutations {
   // BOUNDARY: This private wrapper preserves each exact mutation signature after receipt verification.
   const turnPlan = <Key extends keyof TurnPlanMutation>(
@@ -158,25 +103,9 @@ export function createReceiptGuardedProtectedMutations(input: {
       const invoke = input.turnPlans[method] as (...parameters: unknown[]) => unknown;
       return invoke(...args);
     }) as ReceiptGuardedProtectedMutations["turnPlans"][Key];
-  // BOUNDARY: This private wrapper preserves each exact mutation signature after receipt verification.
-  const workingAdjustment = <Key extends keyof WorkingAdjustmentMutation>(
-    method: Key,
-  ): ReceiptGuardedProtectedMutations["workingAdjustments"][Key] =>
-    // SAFETY: Key selects the same source and target mutation member; the wrapper only prepends receipt checks.
-    ((mutation: ProtectedMutationBinding, receipt: AuthorityReceipt, ...args: unknown[]) => {
-      assertMatchingReceipt(input.verifier, mutation, receipt);
-      // BOUNDARY: Indexed mutation signatures are erased only inside this receipt-guarded dispatcher.
-      // SAFETY: method selects this exact WorkingAdjustmentMutation member before its original arguments are forwarded.
-      const invoke = input.workingAdjustments[method] as (...parameters: unknown[]) => unknown;
-      return invoke(...args);
-    }) as ReceiptGuardedProtectedMutations["workingAdjustments"][Key];
 
   return Object.freeze({
     turnPlans: Object.freeze({ admit: turnPlan("admit") }),
-    workingAdjustments: Object.freeze({
-      apply: workingAdjustment("apply"),
-      unapply: workingAdjustment("unapply"),
-    }),
   });
 }
 
@@ -229,71 +158,6 @@ async function runAuthorized<Result>(
   return result;
 }
 
-async function runAuthorizedResult<Result>(
-  authority: AuthorityBoundary,
-  guarded: (mutation: ProtectedMutationBinding, receipt: AuthorityReceipt) => Promise<Result>,
-  mutation: ProtectedMutationBinding,
-  schema: z.ZodType<Result>,
-  authorityAction: "promote" | "rollback" = "promote",
-  beforeExecute?: () => void,
-): Promise<Result> {
-  const authorize = authorityAction === "rollback" ? authority.rollback : authority.promote;
-  const decision = await authorize(
-    mutation.resource,
-    mutation.idempotencyKey,
-    async (receipt) => toJsonValue(await guarded(mutation, receipt)),
-    beforeExecute === undefined ? undefined : Object.freeze({ beforeExecute }),
-  );
-  if (!decision.ok) throw decisionFailure(decision);
-  return schema.parse(decision.value);
-}
-
-function workingAdjustmentIdempotencyKey(
-  operation: "apply" | "unapply",
-  identity: Readonly<Record<string, string | null>>,
-): string {
-  return `protected:working-adjustment:${operation}:${sha256(canonicalJson(identity))}`;
-}
-
-function assertWorkingAdjustmentMutationActive(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  throw createPreEffectExecutionFailure(
-    "cancelled",
-    "Working adjustment mutation was cancelled before protected state changed",
-  );
-}
-
-async function reconcileApplyResult(
-  store: WorkingAdjustmentInspection,
-  request: Parameters<ProtectedWorkingAdjustmentStore["apply"]>[0],
-  durableResult: WorkingAdjustmentApplyResult,
-): Promise<WorkingAdjustmentApplyResult> {
-  const active = await store.getActive(request.adjustment.scope.projectId);
-  if (durableResult.status === "applied" && active?.adjustmentId === request.adjustment.adjustmentId)
-    return durableResult;
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return Object.freeze({
-    status: "stale" as const,
-    adjustmentId: request.adjustment.adjustmentId,
-    currentActiveAdjustmentId: active?.adjustmentId ?? null,
-  });
-}
-
-async function reconcileUnapplyResult(
-  store: WorkingAdjustmentInspection,
-  request: Parameters<ProtectedWorkingAdjustmentStore["unapply"]>[0],
-  durableResult: WorkingAdjustmentUnapplyResult,
-): Promise<WorkingAdjustmentUnapplyResult> {
-  const active = await store.getActive(request.projectId);
-  if (durableResult.status === "unapplied" && active === undefined) return durableResult;
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return Object.freeze({
-    status: "stale" as const,
-    adjustmentId: request.expectedActiveAdjustmentId,
-    currentActiveAdjustmentId: active?.adjustmentId ?? null,
-  });
-}
-
 export function createProtectedWorkspaceRuntime(
   options: CreateProtectedWorkspaceRuntimeOptions,
 ): ProtectedWorkspaceRuntime {
@@ -301,7 +165,6 @@ export function createProtectedWorkspaceRuntime(
   const guarded = createReceiptGuardedProtectedMutations({
     verifier: options.authority.receiptVerifier,
     turnPlans: options.turnPlans,
-    workingAdjustments: options.workingAdjustments,
   });
 
   const turnPlans: ProtectedTurnPlanStore = Object.freeze({
@@ -319,67 +182,7 @@ export function createProtectedWorkspaceRuntime(
       ),
   });
 
-  const workingAdjustments: ProtectedWorkingAdjustmentStore = Object.freeze({
-    ...({
-      get: options.workingAdjustments.get,
-      getActive: options.workingAdjustments.getActive,
-      list: options.workingAdjustments.list,
-    } satisfies WorkingAdjustmentInspection),
-    apply: async (request: Parameters<ProtectedWorkingAdjustmentStore["apply"]>[0]) => {
-      assertWorkingAdjustmentMutationActive(request.signal);
-      const durableResult = await runAuthorizedResult(
-        options.authority,
-        async (mutation, receipt) => {
-          // Authority reservation can await after the coordinator's first cancellation check.
-          // Keep the decisive check inside the receipt-guarded callback, directly before the
-          // raw store method enters its synchronous SQLite transaction.
-          assertWorkingAdjustmentMutationActive(request.signal);
-          return await guarded.workingAdjustments.apply(mutation, receipt, request);
-        },
-        binding(
-          workspaceId,
-          `working-adjustment:${request.adjustment.scope.projectId}:apply:${request.adjustment.adjustmentId}`,
-          workingAdjustmentIdempotencyKey("apply", {
-            adjustmentId: request.adjustment.adjustmentId,
-            expectedActiveAdjustmentId: request.expectedActiveAdjustmentId,
-            projectId: request.adjustment.scope.projectId,
-          }),
-        ),
-        WorkingAdjustmentApplyResultSchema,
-        "promote",
-        () => assertWorkingAdjustmentMutationActive(request.signal),
-      );
-      return await reconcileApplyResult(options.workingAdjustments, request, durableResult);
-    },
-    unapply: async (request: Parameters<ProtectedWorkingAdjustmentStore["unapply"]>[0]) => {
-      assertWorkingAdjustmentMutationActive(request.signal);
-      const durableResult = await runAuthorizedResult(
-        options.authority,
-        async (mutation, receipt) => {
-          assertWorkingAdjustmentMutationActive(request.signal);
-          return await guarded.workingAdjustments.unapply(mutation, receipt, request);
-        },
-        binding(
-          workspaceId,
-          `working-adjustment:${request.projectId}:unapply:${request.expectedActiveAdjustmentId}`,
-          workingAdjustmentIdempotencyKey("unapply", {
-            expectedActiveAdjustmentId: request.expectedActiveAdjustmentId,
-            projectId: request.projectId,
-          }),
-        ),
-        WorkingAdjustmentUnapplyResultSchema,
-        "rollback",
-        () => assertWorkingAdjustmentMutationActive(request.signal),
-      );
-      return await reconcileUnapplyResult(options.workingAdjustments, request, durableResult);
-    },
-  });
-
-  return Object.freeze({
-    turnPlans,
-    measurements: options.measurements,
-    workingAdjustments,
-  });
+  return Object.freeze({ turnPlans });
 }
 
 export function registerWorkspaceRuntimeInternals(

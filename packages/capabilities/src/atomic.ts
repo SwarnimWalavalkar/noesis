@@ -10,12 +10,10 @@ import {
   type CapabilityRevision,
   type CapabilityRevisionRef,
   capabilityRevisionRef,
-  type DatabaseRowRef,
   type EvidenceRef,
   type FileRevisionRef,
   type PermissionDelta,
   type PermissionManifest,
-  type ResearchStatePort,
   type Result,
   type WorkspaceStore,
   sameCapabilityRevisionRef,
@@ -40,13 +38,6 @@ export interface CapabilityRevisionConstruction {
   readonly evidenceRefs: readonly EvidenceRef[];
   readonly sourceEvaluationDefinitions: readonly FileRevisionRef[];
   readonly requestedPermissionDelta: PermissionDelta;
-}
-export interface CapabilityRevisionResearchRefs {
-  readonly experimentId: string;
-  readonly trialRefs: readonly DatabaseRowRef<"experiment_trials">[];
-  readonly preflightPlanRef?: DatabaseRowRef<"preflight_plans">;
-  readonly preflightReportRef?: DatabaseRowRef<"preflight_reports">;
-  readonly evaluationRefs: readonly DatabaseRowRef<"evaluations">[];
 }
 export interface CapabilityPinMetadata {
   readonly capabilityId: string;
@@ -93,7 +84,6 @@ export interface CapabilityRevisionReadModel {
   readonly revision: CapabilityRevision;
   readonly revisionRef: CapabilityRevisionRef;
   readonly definitionState: "candidate";
-  readonly researchRefs?: CapabilityRevisionResearchRefs;
   readonly pinned: boolean;
   readonly vetoed: boolean;
 }
@@ -108,7 +98,6 @@ export interface CapabilityActivationReader {
 }
 export interface AtomicCapabilityRegistryOptions {
   readonly activationReader?: CapabilityActivationReader;
-  readonly researchState?: ResearchStatePort;
   readonly controlStore?: CapabilityControlStorePort;
 }
 export interface AtomicCapabilityRegistry {
@@ -118,10 +107,6 @@ export interface AtomicCapabilityRegistry {
   readonly getRevision: (ref: CapabilityRevisionRef) => CapabilityRevision | undefined;
   readonly listRevisionLineage: (capabilityId: string) => readonly CapabilityRevisionRef[];
   readonly discover: (scope: string) => readonly Capability[];
-  readonly recordResearchRefs: (
-    revision: CapabilityRevisionRef,
-    refs: CapabilityRevisionResearchRefs,
-  ) => Promise<void>;
   readonly pin: (
     metadata: CapabilityPinMetadata,
   ) => Promise<Result<CapabilityPinMetadata, CapabilityControlError>>;
@@ -335,21 +320,11 @@ function freezeRevision(construction: CapabilityRevisionConstruction): Capabilit
       .finish(),
   );
 }
-function assertRowTable(ref: DatabaseRowRef, table: DatabaseRowRef["table"]): void {
-  if (ref.table !== table) throw new Error(`Expected ${table} row reference, received ${ref.table}`);
-}
-function includesRevision(
-  revisions: readonly CapabilityRevisionRef[],
-  target: CapabilityRevisionRef,
-): boolean {
-  return revisions.some((revision) => sameCapabilityRevisionRef(revision, target));
-}
 export function createAtomicCapabilityRegistry(
   options: AtomicCapabilityRegistryOptions = {},
 ): AtomicCapabilityRegistry {
   const capabilities = new Map<string, Capability>();
   const revisions = new Map<string, CapabilityRevision>();
-  const researchRefs = new Map<string, CapabilityRevisionResearchRefs>();
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const controlStore: CapabilityControlStorePort =
     options.controlStore ??
@@ -417,56 +392,6 @@ export function createAtomicCapabilityRegistry(
         (capability) => capability.scope === scope || scope.startsWith(`${capability.scope}/`),
       ),
     );
-  const recordResearchRefs = async (
-    revisionRef: CapabilityRevisionRef,
-    refs: CapabilityRevisionResearchRefs,
-  ): Promise<void> => {
-    if (!getRevision(revisionRef)) throw new Error("Unknown or digest-mismatched capability revision");
-    for (const ref of refs.trialRefs) assertRowTable(ref, "experiment_trials");
-    for (const ref of refs.evaluationRefs) assertRowTable(ref, "evaluations");
-    if (refs.preflightPlanRef) assertRowTable(refs.preflightPlanRef, "preflight_plans");
-    if (refs.preflightReportRef) assertRowTable(refs.preflightReportRef, "preflight_reports");
-    if (options.researchState) {
-      const experiment = await options.researchState.experiments.getExperiment(refs.experimentId);
-      if (!experiment || !includesRevision(experiment.candidateRevisions, revisionRef)) {
-        throw new Error("Research references must belong to the canonical Experiment candidate revision");
-      }
-      const trials = await options.researchState.trials.listTrials(refs.experimentId);
-      for (const trialRef of refs.trialRefs) {
-        if (!trials.some((trial) => trial.trialId === trialRef.rowId)) {
-          throw new Error(`Unknown ExperimentTrial ${trialRef.rowId}`);
-        }
-      }
-      for (const evaluationRef of refs.evaluationRefs) {
-        const evaluation = await options.researchState.evaluations.getEvaluation(evaluationRef.rowId);
-        if (!evaluation || evaluation.experimentId !== refs.experimentId) {
-          throw new Error(`Evaluation ${evaluationRef.rowId} does not belong to the Experiment`);
-        }
-      }
-      if (refs.preflightPlanRef) {
-        const plan = await options.researchState.preflights.getPreflightPlan(refs.preflightPlanRef.rowId);
-        if (!plan || !sameCapabilityRevisionRef(plan.candidateRevision, revisionRef)) {
-          throw new Error("Preflight plan is not pinned to this capability revision");
-        }
-      }
-      if (refs.preflightReportRef) {
-        const report = await options.researchState.preflights.getPreflightReport(
-          refs.preflightReportRef.rowId,
-        );
-        if (!report || !sameCapabilityRevisionRef(report.candidateRevision, revisionRef)) {
-          throw new Error("Preflight report is not pinned to this capability revision");
-        }
-      }
-    }
-    researchRefs.set(
-      revisionRef.capabilityRevisionId,
-      Object.freeze({
-        ...refs,
-        trialRefs: Object.freeze(refs.trialRefs.map((ref) => Object.freeze({ ...ref }))),
-        evaluationRefs: Object.freeze(refs.evaluationRefs.map((ref) => Object.freeze({ ...ref }))),
-      }),
-    );
-  };
   const pin = async (
     metadata: CapabilityPinMetadata,
   ): Promise<Result<CapabilityPinMetadata, CapabilityControlError>> => {
@@ -558,21 +483,14 @@ export function createAtomicCapabilityRegistry(
       .filter((revision) => revision.capabilityId === capabilityId)
       .map((revision) => {
         const revisionRef = capabilityRevisionRef(revision);
-        const refs = researchRefs.get(revision.capabilityRevisionId);
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        const model: CapabilityRevisionReadModel = Object.freeze(
-          createConditionalObject({
-            revision,
-            revisionRef,
-            definitionState: "candidate",
-          } as const)
-            .addOptional(refs ? { researchRefs: refs } : undefined)
-            .add({
-              pinned: pinMetadata ? sameCapabilityRevisionRef(pinMetadata.revision, revisionRef) : false,
-              vetoed: isVetoed(revision, controls),
-            } as const)
-            .finish(),
-        );
+        const model: CapabilityRevisionReadModel = Object.freeze({
+          revision,
+          revisionRef,
+          definitionState: "candidate",
+          pinned: pinMetadata ? sameCapabilityRevisionRef(pinMetadata.revision, revisionRef) : false,
+          vetoed: isVetoed(revision, controls),
+        } as const);
         return model;
       });
     return Object.freeze({
@@ -589,7 +507,6 @@ export function createAtomicCapabilityRegistry(
     getRevision,
     listRevisionLineage,
     discover,
-    recordResearchRefs,
     pin,
     veto,
     readControls,
