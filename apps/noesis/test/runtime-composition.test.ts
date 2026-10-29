@@ -748,6 +748,97 @@ describe("apps/noesis production control-plane composition", () => {
     });
     await reopened.shutdown();
   });
+  test("resumes a conversation written by the removed importer after migration 58", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-app-imported-history-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const controlled = createControlledPiModels();
+    const requests: AgentRuntimeRequest[] = [];
+    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const agent: NoesisAgentRuntime = Object.freeze({
+      name: runtimeIdentity,
+      run: async (request: AgentRuntimeRequest) => {
+        requests.push(request);
+        return Object.freeze({
+          outcome: "completed" as const,
+          stopReason: "stop" as const,
+          text: `reply:${request.prompt}`,
+          provider: request.provider,
+          model: request.model,
+        });
+      },
+      steer: async () =>
+        Object.freeze({
+          status: "consumed" as const,
+          timelineSequence: 1,
+          consumedAt: "2026-01-01T00:00:00.000Z",
+        }),
+      abort: async () => undefined,
+    });
+    const create = async () =>
+      createApplicationRuntimeComposition({
+        config,
+        agent,
+        createRoleRunner: (configurations) =>
+          createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
+      });
+    await (await create()).shutdown();
+
+    // Write the rows exactly as the removed importer did, then run migration 58 again on reopen.
+    const trail = { trailId: "session-imported" };
+    const database = new DatabaseSync(join(home, "database", "noesis.sqlite"));
+    database
+      .prepare(`INSERT INTO sessions(
+          session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+        ) VALUES (?, 'Imported conversation', 'idle', ?, ?, ?, '2026-07-01T00:00:00.000Z',
+          '2026-07-01T00:00:02.000Z', '{}')`)
+      .run(trail.trailId, CONTROLLED_PI_PROVIDER, CONTROLLED_PI_MODEL, runtimeIdentity);
+    const legacy = '{"legacyEventId":"event-1"}';
+    database
+      .prepare(`INSERT INTO outcomes(outcome_id, session_id, turn_id, status, summary, created_at, metadata_json)
+        VALUES ('event-1:outcome', ?, 'event-1', 'unknown', '', '2026-07-01T00:00:02.000Z', ?)`)
+      .run(trail.trailId, legacy);
+    const message = database.prepare(`INSERT INTO messages(
+        message_id, session_id, role, content, created_at, metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?)`);
+    message.run(
+      "event-1:user",
+      trail.trailId,
+      "user",
+      "imported question",
+      "2026-07-01T00:00:01.000Z",
+      legacy,
+    );
+    message.run(
+      "event-1:assistant",
+      trail.trailId,
+      "assistant",
+      "imported answer",
+      "2026-07-01T00:00:02.000Z",
+      legacy,
+    );
+    database.prepare("DELETE FROM schema_migrations WHERE version = 58").run();
+    database.close();
+
+    const reopened = await create();
+    expect(reopened.getTrail(trail.trailId).turns).toEqual([
+      { input: "imported question", output: "imported answer" },
+    ]);
+    await reopened.resumeTrail(trail.trailId);
+    await reopened.debug.runTurn(trail.trailId, "continue");
+    expect(
+      requests.at(-1)?.frozenTurnPlan?.conversationHistory?.map(({ role, content }) => ({ role, content })),
+    ).toEqual([
+      { role: "user", content: "imported question" },
+      { role: "assistant", content: "imported answer" },
+    ]);
+    await reopened.shutdown();
+  });
   test("retains an aborted partial pair in the visible transcript and future frozen context", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-aborted-replay-"));
     roots.push(home);
