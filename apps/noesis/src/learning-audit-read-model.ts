@@ -332,8 +332,8 @@ function reflectionStatusLabel(status: string): string {
   return status.replaceAll("_", " ");
 }
 function reflectionReason(job: DurableJobRecord): string {
-  const rationale = stringField(job.result, "rationale");
-  if (rationale) return rationale;
+  const message = stringField(job.result, "message");
+  if (message) return message;
   const reason = stringField(job.result, "reason");
   if (reason === "reflector_no_change")
     return "The reflector found no durable lesson with a credible future use.";
@@ -408,8 +408,8 @@ function jobSummary(job: DurableJobRecord): string {
 function reflectionTitle(job: DurableJobRecord): string {
   const status = stringField(job.result, "status") ?? job.status;
   if (jobSensitivity(job) !== "normal") return reflectionStatusLabel(status);
-  const rationale = stringField(job.result, "rationale");
-  if (rationale && status !== "no_change") return rationale;
+  const message = stringField(job.result, "message");
+  if (message && status !== "no_change") return message;
   return reflectionStatusLabel(status);
 }
 async function reflectionPrimitive(

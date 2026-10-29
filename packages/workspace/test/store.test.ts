@@ -1260,6 +1260,30 @@ describe("WorkspaceStore", () => {
     });
     store.close();
   });
+  test("admits a turn plan only for an existing session and returns it again on re-admission", async () => {
+    const root = await temporary("turn-plan-admission");
+    const store = await createWorkspaceStore(root, { now: () => "2026-07-26T00:00:00.000Z" });
+    const protectedRuntime = createWorkspaceRuntimeInternals(store).protectedRuntime;
+    await expect(
+      protectedRuntime.turnPlans.admit(runningTurnPlan("session-missing", "turn-orphan")),
+    ).rejects.toThrow("Session session-missing does not exist");
+    expect(await protectedRuntime.turnPlans.get("session-missing", "turn-orphan")).toBeUndefined();
+    await store.operational.sessions.put({
+      sessionId: "session-present",
+      title: "Present",
+      status: "idle",
+      provider: "controlled",
+      model: "controlled",
+      runtime: "pi",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      updatedAt: "2026-07-26T00:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    const plan = runningTurnPlan("session-present", "turn-present");
+    const admitted = await protectedRuntime.turnPlans.admit(plan);
+    expect(await protectedRuntime.turnPlans.admit(plan)).toEqual(admitted);
+    store.close();
+  });
   test("recovers orphaned foreground turns and their actions under the successor runtime owner", async () => {
     const root = await temporary("foreground-turn-recovery");
     const first = await createWorkspaceStore(root, {

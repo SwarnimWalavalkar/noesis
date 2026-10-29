@@ -188,7 +188,7 @@ describe("learning audit read model", () => {
       now: "2026-08-14T00:00:02.000Z",
       result: Object.freeze({
         status: "activated",
-        rationale: "The correction establishes a reusable project constraint.",
+        message: "The correction establishes a reusable project constraint.",
       }),
     });
 
@@ -295,7 +295,7 @@ describe("learning audit read model", () => {
       result: Object.freeze({
         status: "activated",
         capabilityId: "capability-adaptation-path",
-        rationale: "The correction is likely to recur.",
+        message: "The correction is likely to recur.",
       }),
     });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
@@ -484,7 +484,7 @@ describe("learning audit read model", () => {
       now: "2026-08-14T00:00:04.000Z",
       result: Object.freeze({
         status: "activated",
-        rationale: "PRIVATE RATIONALE MUST NOT APPEAR",
+        message: "PRIVATE RATIONALE MUST NOT APPEAR",
       }),
     });
 

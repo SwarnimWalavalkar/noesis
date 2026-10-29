@@ -116,7 +116,7 @@ Each Capability has a history that the user can inspect. A Capability describes 
 - the observation and exact evidence
 - the intended future use and where the change applies
 - the old behavior and proposed change
-- the exact instruction, skill, saved script, or saved workflow revision involved
+- the exact Capability file revision involved, and any saved script or workflow revision it attaches
 - its immediate activation or pending consequence decision
 - the exact version frozen into any turn, derivable from that turn plan
 - later feedback and successor revisions

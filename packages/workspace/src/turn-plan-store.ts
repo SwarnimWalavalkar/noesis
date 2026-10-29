@@ -38,7 +38,7 @@ export function createProtectedTurnPlanStore(
 ): ProtectedTurnPlanStore {
   const db = options.database.connection;
 
-  const get = async (sessionId: string, turnId: string): Promise<FrozenTurnPlan | undefined> => {
+  const read = (sessionId: string, turnId: string): FrozenTurnPlan | undefined => {
     const row = db
       .prepare("SELECT plan_json FROM frozen_turn_plans WHERE session_id = ? AND turn_id = ?")
       .get(sessionId, turnId);
@@ -46,6 +46,8 @@ export function createProtectedTurnPlanStore(
       ? undefined
       : validateFrozenTurnPlan(parseJson(requiredString(row, "plan_json")));
   };
+  const get = async (sessionId: string, turnId: string): Promise<FrozenTurnPlan | undefined> =>
+    read(sessionId, turnId);
 
   const bindingAdmits = (plan: FrozenTurnPlan, selection: FrozenTurnPlan["selectedCapabilities"][number]) => {
     const bindingRow = db
@@ -72,12 +74,6 @@ export function createProtectedTurnPlanStore(
 
   const admit = async (input: FrozenTurnPlan): Promise<FrozenTurnPlan> => {
     const plan = validateFrozenTurnPlan(input);
-    const existing = await get(plan.sessionId, plan.turnId);
-    if (existing) {
-      if (existing.planId !== plan.planId || existing.canonicalDigest !== plan.canonicalDigest)
-        throw new Error(`Turn ${plan.turnId} was already admitted with a different frozen plan`);
-      return existing;
-    }
     for (const selection of plan.selectedCapabilities) {
       for (const material of selection.effects.map((effect) =>
         effect.kind === "instruction" ? effect.material : effect.definition,
@@ -89,7 +85,15 @@ export function createProtectedTurnPlanStore(
           );
       }
     }
-    options.database.transaction(() => {
+    // The lookup and the insert share one transaction, so a concurrent admission of the same turn
+    // either finds this plan or is refused.
+    const existing = options.database.transaction(() => {
+      const recorded = read(plan.sessionId, plan.turnId);
+      if (recorded) {
+        if (recorded.planId !== plan.planId || recorded.canonicalDigest !== plan.canonicalDigest)
+          throw new Error(`Turn ${plan.turnId} was already admitted with a different frozen plan`);
+        return recorded;
+      }
       for (const selection of plan.selectedCapabilities)
         if (!bindingAdmits(plan, selection)) throw capabilityBindingAdmissionConflictError();
       db.prepare(
@@ -106,20 +110,19 @@ export function createProtectedTurnPlanStore(
         plan.createdAt,
       );
       const session = db.prepare("SELECT status FROM sessions WHERE session_id = ?").get(plan.sessionId);
-      if (session !== undefined) {
-        const sessionStatus = requiredString(session, "status");
-        if (sessionStatus !== "idle" && sessionStatus !== "running")
-          throw new Error(`Session ${plan.sessionId} cannot admit a turn from status ${sessionStatus}`);
-        db.prepare(
-          `INSERT INTO foreground_turns(
-            turn_id, session_id, plan_id, status, outcome_id, admitted_at, settled_at
-          ) VALUES (?, ?, ?, 'running', NULL, ?, NULL)`,
-        ).run(plan.turnId, plan.sessionId, plan.planId, plan.createdAt);
-        db.prepare("UPDATE sessions SET status = 'running', updated_at = ? WHERE session_id = ?").run(
-          plan.createdAt,
-          plan.sessionId,
-        );
-      }
+      if (session === undefined) throw new Error(`Session ${plan.sessionId} does not exist`);
+      const sessionStatus = requiredString(session, "status");
+      if (sessionStatus !== "idle" && sessionStatus !== "running")
+        throw new Error(`Session ${plan.sessionId} cannot admit a turn from status ${sessionStatus}`);
+      db.prepare(
+        `INSERT INTO foreground_turns(
+          turn_id, session_id, plan_id, status, outcome_id, admitted_at, settled_at
+        ) VALUES (?, ?, ?, 'running', NULL, ?, NULL)`,
+      ).run(plan.turnId, plan.sessionId, plan.planId, plan.createdAt);
+      db.prepare("UPDATE sessions SET status = 'running', updated_at = ? WHERE session_id = ?").run(
+        plan.createdAt,
+        plan.sessionId,
+      );
       options.recordActivity(
         { actorId: "runtime-turn-planner", kind: "system" },
         "turn.plan_admitted",
@@ -127,7 +130,9 @@ export function createProtectedTurnPlanStore(
         plan.planId,
         plan.selectedCapabilities.map((selection) => selection.revision),
       );
+      return undefined;
     });
+    if (existing) return existing;
     const admitted = await get(plan.sessionId, plan.turnId);
     if (!admitted) throw new Error(`Frozen turn plan ${plan.planId} was not recorded`);
     return admitted;

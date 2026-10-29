@@ -29,7 +29,7 @@ Load the `noesis` skill. I want to bring back my learned Capabilities from the p
    - `scope`: `global`, unless the guidance names a saved script or workflow of this project. In that case use `current_project` and also attach that saved Program as a `program` effect if `programs` lists it.
    - `activationMode`: `relevant`, unless the guidance clearly must apply to every turn. Then use `always`, but only if the guidance is at most 2,000 characters.
    - `consequence`: `ordinary`, with a `consequenceDescription` that says only model guidance changes.
-   - `evidence`: kind `explicit_request`, quote "Migrated from the previous Capability format", and a `wouldOtherwise` that says I would have to repeat this guidance.
+   - `evidence`: kind `explicit_request`, quote my exact words "I want to bring back my learned Capabilities from the previous format.", and a `wouldOtherwise` that says I would have to repeat this guidance.
 5. Report what you recreated and what you skipped, with the reason for each skip. List the Capabilities that are still left. When I reply `next`, repeat steps 3 to 5 for the next one.
 ```
 

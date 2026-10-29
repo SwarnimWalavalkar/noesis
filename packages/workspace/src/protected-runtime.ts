@@ -178,7 +178,12 @@ export function createProtectedWorkspaceRuntime(
           `turn:${plan.sessionId}:${plan.turnId}:admit`,
           `protected:turn:admit:${plan.planId}:${plan.canonicalDigest}`,
         ),
-        async () => await options.turnPlans.get(plan.sessionId, plan.turnId),
+        async () => {
+          const existing = await options.turnPlans.get(plan.sessionId, plan.turnId);
+          return existing?.planId === plan.planId && existing.canonicalDigest === plan.canonicalDigest
+            ? existing
+            : undefined;
+        },
       ),
   });
 

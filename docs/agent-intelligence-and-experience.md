@@ -96,13 +96,13 @@ The foreground agent is an equally capable semantic author. When the task or use
 
 Ambient reflection and foreground authoring share one protected Capability publisher. That publisher records the Capability's file as an exact revision, resolves exact saved-program revisions, validates scope and consequence, compares the expected binding revision, preserves predecessor lineage, and either activates or creates the same small protected gate. A foreground publication changes later frozen turn plans, never the already-admitted current plan. Subagents may inspect and advise but cannot publish.
 
-Reflection also receives an exact foreground Capability surface. It distinguishes material injected into the initial system prompt, effect skills exposed only as name-and-description metadata, completed `skills.load` calls that later exposed a full frozen body, and exact saved-program adapters. Complete predecessor materials remain available separately for revision authoring; their presence in reflector context is not evidence that the foreground model saw them.
+Reflection also receives an exact foreground Capability surface. It distinguishes material injected into the initial system prompt, learned skills exposed only as name-and-description metadata, completed `skills.load` calls that later exposed a Capability's full frozen guidance, and exact saved-program adapters. Complete predecessor materials remain available separately for revision authoring; their presence in reflector context is not evidence that the foreground model saw them.
 
 An ordinary exact revision becomes active after SQLite validates its evidence and compare-and-swap binding. User feedback may produce a successor immediately.
 
 Credential export, recovery or audit control, and irreversible external actions without foreground intent create a pending gate. `/learning` offers approve, deny, and change for these requests.
 
-A Capability states when an ability should help, why the evidence supports it, what behavior changes, and its anticipated effect. Its revision contains one or more exact effects rather than a mechanism label.
+A Capability states when an ability should help, why the evidence supports it, what behavior changes, and its anticipated effect. Its revision contains exactly one instruction effect, the Capability's Markdown file, and optionally one saved Program effect.
 
 New Capabilities are globally eligible and relevant by default. The foreground model sees each one's name and "when" text with the other skills and loads it when it applies. The user may narrow the scope or make one always active.
 
