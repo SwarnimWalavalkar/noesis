@@ -48,6 +48,7 @@ import {
   type CapabilityRevisionRef,
   type ComposerAttachment,
   canonicalJson,
+  capabilityGuidance,
   capabilityRevisionRef,
   createId,
   EvidenceRevisionRefSchema,
@@ -1207,6 +1208,7 @@ function rolePrompt(name: RoleName): string {
       "Noesis protected role: reflector.",
       "Return only the requested structured JSON.",
       "You review one exchange: a settled foreground turn and the user's reaction to it. The reaction is the user's next message, or none when the session went idle. Decide whether Noesis should change how it behaves in future sessions.",
+      "Use the reaction only to judge the reflected turn. When the reaction itself asks for something new, including a change to a Capability, the foreground turn that answers it handles that request; do not act on it here.",
       "no_change is the normal result. Most exchanges teach nothing lasting. A wrong Capability costs more than a missed one, because it affects many later turns.",
       "Create or revise a Capability only when one of these supports it, and name it in evidence.kind:",
       "- explicit_request: the user asked Noesis to remember something or to behave differently from now on.",
@@ -1843,7 +1845,7 @@ export async function createApplicationRuntimeComposition(
         // An on-demand Capability is served as a loadable skill, not through the system prompt.
         if (selection.delivery === "on_demand") continue;
         for (const skill of selection.skills) {
-          const content = skill.content.trim();
+          const content = capabilityGuidance(skill.content).trim();
           if (content && !plan.renderedSystemPrompt.includes(content))
             throw new Error(
               `Frozen skill ${skill.revision.revisionId} is absent from the served system prompt`,

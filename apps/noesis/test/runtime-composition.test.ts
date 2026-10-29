@@ -2408,6 +2408,27 @@ describe("apps/noesis production control-plane composition", () => {
       )?.delivery,
     ).toBe("on_demand");
     expect(served.frozenTurnPlan?.renderedSystemPrompt).not.toContain(strategy);
+    // An always-active Capability puts its guidance, not its whole file, into the prompt.
+    const servedBinding = await resumed.debug.workspace.capabilities.getBinding(definition.capabilityId);
+    if (!servedBinding) throw new Error("Expected the served Capability binding");
+    await resumed.manageCapability?.({
+      type: "set-activation-mode",
+      capabilityId: definition.capabilityId,
+      mode: "always",
+      expectedBindingRevision: servedBinding.revisionNumber,
+    });
+    const always = await resumed.debug.runTurn(resumedTrail.trailId, "Report the project state.");
+    expect(always.output).toBe("Controlled completion for: Report the project state.");
+    expect(always.frozenTurnPlan?.renderedSystemPrompt).toContain(strategy);
+    expect(always.frozenTurnPlan?.renderedSystemPrompt).not.toContain("## History");
+    const alwaysBinding = await resumed.debug.workspace.capabilities.getBinding(definition.capabilityId);
+    if (!alwaysBinding) throw new Error("Expected the always-active Capability binding");
+    await resumed.manageCapability?.({
+      type: "set-activation-mode",
+      capabilityId: definition.capabilityId,
+      mode: "relevant",
+      expectedBindingRevision: alwaysBinding.revisionNumber,
+    });
     const next = await resumed.debug.runTurn(resumedTrail.trailId, "Check the prior result and continue.");
     expect(
       next.frozenTurnPlan?.selectedCapabilities.some(

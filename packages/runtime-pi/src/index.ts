@@ -158,7 +158,8 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | und
     // An on-demand Capability reaches the model as a skill, so its text is not in the prompt.
     if (selection.delivery === "on_demand") continue;
     for (const prompt of selection.promptModules) {
-      const content = prompt.content.trim();
+      // A Capability file reaches the prompt as its guidance only.
+      const content = capabilityGuidance(prompt.content).trim();
       if (content && !plan.renderedSystemPrompt.includes(content))
         throw new Error(
           `Frozen turn plan ${plan.planId} does not serve prompt material ${prompt.revision.revisionId}`,
