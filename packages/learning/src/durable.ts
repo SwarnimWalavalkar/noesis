@@ -1,6 +1,7 @@
 import {
   createConditionalObject,
   ArtifactFileRefSchema,
+  type Capability,
   type CapabilityRevision,
   type CapabilityRevisionRef,
   CapabilityRevisionRefSchema,
@@ -8,6 +9,7 @@ import {
   CapabilitySchema,
   canonicalJson,
   capabilityRevisionRef,
+  type EvidenceRef,
   EvidenceRefSchema,
   type Experiment,
   type FileRevisionRef,
@@ -15,19 +17,49 @@ import {
   sameCapabilityRevisionRef,
   type WorkspaceStore,
 } from "@noesis/domain";
+import type { AgentRole, AgentTrace } from "@noesis/agent-types";
 import { z } from "zod";
-import {
-  type AutomaticLearningOrgan,
-  type AutomaticLearningOrganOptions,
-  createAutomaticLearningOrgan,
-  experimentBriefPublicationCollisionError,
-  type ExperimentBrief,
-  type ExperimentBriefStore,
-  type LearningCandidateManifestStore,
-} from "./organ.ts";
+import type { LearningCitation, LearningSourceCase, RoleResearchMetadata } from "./schemas.ts";
+export interface LearningRoleResearchRun {
+  readonly runId: string;
+  readonly role: AgentRole;
+  readonly research: RoleResearchMetadata;
+  readonly trace: AgentTrace;
+}
+/** Legacy experiment-era brief embedded in recorded candidate manifests. */
+export interface ExperimentBrief {
+  readonly experimentId: string;
+  readonly title: string;
+  readonly hypothesis: string;
+  readonly hypothesisDedupeKey: string;
+  readonly scope: string;
+  readonly anticipatedFutureUse: string;
+  readonly scopeRelationship: "same" | "narrower" | "broader";
+  readonly scopeRationale: string;
+  readonly staleOrContradictionConditions: readonly string[];
+  readonly verifiedScopeRelationship: "same" | "narrower" | "broader";
+  readonly scopeVerificationReason: string;
+  readonly scopeVerificationRun?: LearningRoleResearchRun;
+  readonly capability: Capability;
+  readonly baselineRevision: CapabilityRevisionRef;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly feedbackSignalIds: readonly string[];
+  readonly citations: readonly LearningCitation[];
+  readonly recurrenceCitations: readonly LearningCitation[];
+  readonly sourceCases: readonly LearningSourceCase[];
+  readonly recurrenceCount: number;
+  readonly reflectionRun?: LearningRoleResearchRun;
+  readonly sourceAdjustmentId?: string;
+}
+export interface LearningCandidateManifestStore {
+  readonly persist: (input: {
+    readonly brief: ExperimentBrief;
+    readonly revision: CapabilityRevision;
+    readonly revisionRef: CapabilityRevisionRef;
+  }) => Promise<FileRevisionRef>;
+}
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const namespace = "learning_experiment_brief";
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const actor = Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" as const });
 const CitationSchema = z.strictObject({
@@ -197,9 +229,6 @@ type DurableWorkspace = Pick<
   WorkspaceStore,
   "reads" | "definitions" | "definitionMetadata" | "definitionPublications" | "research"
 >;
-function briefPath(key: string): string {
-  return `evals/learning-briefs/${key}.json`;
-}
 function manifestPath(reference: CapabilityRevisionRef): string {
   return `${reference.capabilityId}/${reference.capabilityRevisionId}/manifest.json`;
 }
@@ -215,85 +244,6 @@ function parseCapabilityRevision(value: unknown): CapabilityRevision {
       .addOptional(!(dependencyLock === undefined) ? { dependencyLock } : undefined)
       .finish(),
   );
-}
-async function readBrief(workspace: DurableWorkspace, reference: FileRevisionRef): Promise<ExperimentBrief> {
-  return ExperimentBriefSchema.parse(
-    JSON.parse(decoder.decode(await workspace.reads.readRevision(reference))),
-  );
-}
-export function createWorkspaceExperimentBriefStore(workspace: DurableWorkspace): ExperimentBriefStore {
-  const requireSamePublication = (existing: ExperimentBrief, requested: ExperimentBrief) => {
-    if (canonicalJson(existing) !== canonicalJson(requested))
-      throw experimentBriefPublicationCollisionError(requested.hypothesisDedupeKey);
-    return existing;
-  };
-  return Object.freeze({
-    findByDedupeKey: async (key: string) => {
-      const current = await workspace.definitionMetadata.getCurrent(namespace, key);
-      return current ? await readBrief(workspace, current.definitionRevision) : undefined;
-    },
-    put: async (brief: ExperimentBrief) => {
-      const value = ExperimentBriefSchema.parse(brief);
-      const current = await workspace.definitionMetadata.getCurrent(namespace, value.hypothesisDedupeKey);
-      if (current) {
-        const existing = await readBrief(workspace, current.definitionRevision);
-        return requireSamePublication(existing, value);
-      }
-      const result = await workspace.definitionPublications.publish({
-        namespace,
-        definitionId: value.hypothesisDedupeKey,
-        revision: 1,
-        workingPath: briefPath(value.hypothesisDedupeKey),
-        bytes: encoder.encode(canonicalJson(value)),
-        sensitivity: "private",
-        provenanceRefs: value.evidenceRefs,
-        activity: {
-          kind: "learning.brief_publish",
-          actor,
-          reason: `Durable experiment brief ${value.experimentId}`,
-        },
-      });
-      if (!result.ok) {
-        const winner = await workspace.definitionMetadata.getCurrent(namespace, value.hypothesisDedupeKey);
-        if (!winner) throw new Error(result.error.message);
-        return requireSamePublication(await readBrief(workspace, winner.definitionRevision), value);
-      }
-      return value;
-    },
-    replace: async (input: { readonly expectedExperimentId: string; readonly brief: ExperimentBrief }) => {
-      const { expectedExperimentId, brief } = input;
-      const value = ExperimentBriefSchema.parse(brief);
-      const current = await workspace.definitionMetadata.getCurrent(namespace, value.hypothesisDedupeKey);
-      if (!current) throw new Error(`Experiment brief replacement has no current publication`);
-      const existing = await readBrief(workspace, current.definitionRevision);
-      if (existing.experimentId !== expectedExperimentId)
-        throw experimentBriefPublicationCollisionError(value.hypothesisDedupeKey);
-      const result = await workspace.definitionPublications.publish({
-        namespace,
-        definitionId: value.hypothesisDedupeKey,
-        revision: current.revision + 1,
-        workingPath: briefPath(value.hypothesisDedupeKey),
-        bytes: encoder.encode(canonicalJson(value)),
-        expectedCurrentRevisionId: current.definitionRevision.revisionId,
-        sensitivity: "private",
-        provenanceRefs: value.evidenceRefs,
-        activity: {
-          kind: "learning.brief_replace",
-          actor,
-          reason: `Revise durable experiment brief ${value.experimentId}`,
-        },
-      });
-      if (!result.ok) {
-        const winner = await workspace.definitionMetadata.getCurrent(namespace, value.hypothesisDedupeKey);
-        if (winner) {
-          const published = await readBrief(workspace, winner.definitionRevision);
-          if (canonicalJson(published) === canonicalJson(value)) return published;
-        }
-        throw experimentBriefPublicationCollisionError(value.hypothesisDedupeKey, result.error);
-      }
-      return value;
-    },
-  });
 }
 export function createWorkspaceLearningCandidateManifestStore(
   workspace: DurableWorkspace,
@@ -371,23 +321,4 @@ export function createWorkspaceLearningCandidateManifestStore(
     });
   };
   return Object.freeze({ persist, rehydrate });
-}
-export interface DurableAutomaticLearningOrganOptions extends Omit<
-  AutomaticLearningOrganOptions,
-  "briefs" | "candidateDefinitions" | "experiments" | "feedbackSignals" | "candidateManifests"
-> {
-  readonly workspace: DurableWorkspace;
-}
-export function createDurableAutomaticLearningOrgan(
-  options: DurableAutomaticLearningOrganOptions,
-): AutomaticLearningOrgan {
-  const manifests = createWorkspaceLearningCandidateManifestStore(options.workspace);
-  return createAutomaticLearningOrgan({
-    ...options,
-    feedbackSignals: options.workspace.research.feedbackSignals,
-    briefs: createWorkspaceExperimentBriefStore(options.workspace),
-    candidateDefinitions: options.workspace.definitions,
-    experiments: options.workspace.research.experiments,
-    candidateManifests: manifests,
-  });
 }

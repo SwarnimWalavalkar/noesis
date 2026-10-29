@@ -13,11 +13,7 @@ import {
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
-import {
-  createTurnIntelligencePlanner,
-  type TurnCapabilityResolver,
-  type TurnCapabilityRoutingRequest,
-} from "../src/index.ts";
+import { createTurnIntelligencePlanner, type TurnCapabilityResolver } from "../src/index.ts";
 
 const homes: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
 const encoder = new TextEncoder();
@@ -54,7 +50,7 @@ async function definition(
 
 describe("turn intelligence", () => {
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-  test("admits exact immutable material while a narrow adaptation abstains from unrelated work", async () => {
+  test("admits exact immutable material and lists a relevant Capability for the model to load", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-turn-plan-"));
     const workspace = await createWorkspaceStore(root);
     const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
@@ -190,42 +186,11 @@ describe("turn intelligence", () => {
         });
       },
     });
-    const routingRequests: unknown[] = [];
-    const routingDecisions = [
-      Object.freeze({
-        selections: Object.freeze([
-          Object.freeze({
-            capabilityId: "research-brief",
-            reason: "The prior conversation establishes that review-only refers to the research brief",
-          }),
-        ]),
-        learningAttribution: Object.freeze({
-          capabilityId: "research-brief",
-          reason: "This capability is the primary behavioral context for the follow-up",
-        }),
-      }),
-      Object.freeze({ selections: Object.freeze([]) }),
-    ];
     const planner = createTurnIntelligencePlanner({
       workspace,
       protectedRuntime,
       project: PROJECT,
       capabilities: resolver,
-      capabilityRouter: Object.freeze({
-        route: async (request: TurnCapabilityRoutingRequest) => {
-          routingRequests.push(request);
-          const decision = routingDecisions.shift();
-          if (!decision) throw new Error("Unexpected semantic routing call");
-          return Object.freeze({
-            strategyId: "controlled-semantic-router-v1",
-            reason:
-              decision.selections.length === 0
-                ? "No narrow capability applies"
-                : "A narrow capability applies",
-            ...decision,
-          });
-        },
-      }),
       basePermissionManifest: Object.freeze({
         effects: Object.freeze(["read", "execute"]),
         resourcePatterns: Object.freeze(["*"]),
@@ -256,18 +221,6 @@ describe("turn intelligence", () => {
       updatedAt: "2026-07-24T23:58:00.000Z",
       metadata: Object.freeze({}),
     });
-    for (const sessionId of ["session-invalid", "session-duplicate", "session-misattributed"])
-      await workspace.operational.sessions.put({
-        sessionId,
-        title: `${sessionId} routing fixture`,
-        status: "idle",
-        provider: "fake",
-        model: "fake",
-        runtime: "fake",
-        createdAt: "2026-07-24T23:58:00.000Z",
-        updatedAt: "2026-07-24T23:58:00.000Z",
-        metadata: Object.freeze({}),
-      });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const priorHistory = Object.freeze([
       Object.freeze({
@@ -308,18 +261,11 @@ describe("turn intelligence", () => {
       "general",
       "research-brief",
     ]);
-    expect(related.selectedCapabilities[1]?.selectionReason).toBe(
-      "The prior conversation establishes that review-only refers to the research brief",
-    );
-    expect(related.routing).toEqual({
-      strategyId: "controlled-semantic-router-v1",
-      reason: "A narrow capability applies",
-      learningAttribution: {
-        capabilityId: "research-brief",
-        reason: "This capability is the primary behavioral context for the follow-up",
-      },
-    });
-    expect(related.renderedSystemPrompt).toContain("NARROW RESEARCH PROMPT");
+    expect(related.selectedCapabilities.map((item) => item.delivery)).toEqual(["prompt", "on_demand"]);
+    expect(related.routing.strategyId).toBe("capability-skill-index-v1");
+    // The model loads an on-demand Capability as a skill, so its text stays out of the prompt.
+    expect(related.renderedSystemPrompt).toContain("GENERAL PROMPT");
+    expect(related.renderedSystemPrompt).not.toContain("NARROW RESEARCH PROMPT");
     expect(related.conversationHistory).toEqual([
       {
         ...priorUser,
@@ -389,144 +335,15 @@ describe("turn intelligence", () => {
       thinkingLevel: "off",
       baseSystemPrompt: "BASE",
     });
-    expect(unrelated.selectedCapabilities.map((item) => item.capabilityId)).toEqual(["general"]);
-    expect(unrelated.renderedSystemPrompt).not.toContain("NARROW RESEARCH PROMPT");
-    expect(routingRequests).toEqual([
-      {
-        sessionId: "session-related",
-        turnId: "turn-related",
-        userInput: "No, keep it review-only",
-        priorConversation: [
-          {
-            messageId: "history-user",
-            role: "user",
-            content: "Prepare a research brief about the current repository",
-            createdAt: "2026-07-24T23:59:00.000Z",
-          },
-          {
-            messageId: "history-assistant",
-            role: "assistant",
-            content: "I will implement the proposed changes.",
-            createdAt: "2026-07-24T23:59:30.000Z",
-          },
-        ],
-        candidates: [research],
-      },
-      {
-        sessionId: "session-unrelated",
-        turnId: "turn-unrelated",
-        userInput: "Explain monads with a tiny example",
-        priorConversation: [],
-        candidates: [research],
-      },
+    // Every turn lists the same relevant Capability. The model decides whether to load it.
+    expect(unrelated.selectedCapabilities.map((item) => item.capabilityId)).toEqual([
+      "general",
+      "research-brief",
     ]);
-
-    const invalidPlanner = createTurnIntelligencePlanner({
-      workspace,
-      protectedRuntime,
-      project: PROJECT,
-      capabilities: resolver,
-      capabilityRouter: Object.freeze({
-        route: async () =>
-          Object.freeze({
-            strategyId: "controlled-semantic-router-v1",
-            reason: "Invalid fixture decision",
-            selections: Object.freeze([
-              Object.freeze({ capabilityId: "not-active", reason: "Invalid fixture selection" }),
-            ]),
-            learningAttribution: Object.freeze({
-              capabilityId: "not-active",
-              reason: "Invalid fixture attribution",
-            }),
-          }),
-      }),
-    });
-    await expect(
-      invalidPlanner.planAndAdmit({
-        sessionId: "session-invalid",
-        turnId: "turn-invalid",
-        userInput: "Try an invalid route",
-        provider: "fake",
-        model: "fake",
-        thinkingLevel: "off",
-        baseSystemPrompt: "BASE",
-      }),
-    ).rejects.toThrow("selected inactive capability not-active");
-    expect(await protectedRuntime.activations.getTurnPlan("session-invalid", "turn-invalid")).toBeUndefined();
-
-    const duplicatePlanner = createTurnIntelligencePlanner({
-      workspace,
-      protectedRuntime,
-      project: PROJECT,
-      capabilities: resolver,
-      capabilityRouter: Object.freeze({
-        route: async () =>
-          Object.freeze({
-            strategyId: "controlled-semantic-router-v1",
-            reason: "Duplicate fixture decision",
-            selections: Object.freeze([
-              Object.freeze({ capabilityId: "research-brief", reason: "First selection" }),
-              Object.freeze({ capabilityId: "research-brief", reason: "Second selection" }),
-            ]),
-            learningAttribution: Object.freeze({
-              capabilityId: "research-brief",
-              reason: "Duplicate fixture attribution",
-            }),
-          }),
-      }),
-    });
-    await expect(
-      duplicatePlanner.planAndAdmit({
-        sessionId: "session-duplicate",
-        turnId: "turn-duplicate",
-        userInput: "Try a duplicate route",
-        provider: "fake",
-        model: "fake",
-        thinkingLevel: "off",
-        baseSystemPrompt: "BASE",
-      }),
-    ).rejects.toThrow("selected capability research-brief more than once");
-    expect(
-      await protectedRuntime.activations.getTurnPlan("session-duplicate", "turn-duplicate"),
-    ).toBeUndefined();
-
-    const misattributedPlanner = createTurnIntelligencePlanner({
-      workspace,
-      protectedRuntime,
-      project: PROJECT,
-      capabilities: resolver,
-      capabilityRouter: Object.freeze({
-        route: async () =>
-          Object.freeze({
-            strategyId: "controlled-semantic-router-v1",
-            reason: "Misattributed fixture decision",
-            selections: Object.freeze([
-              Object.freeze({ capabilityId: "research-brief", reason: "Selected fixture" }),
-            ]),
-            learningAttribution: Object.freeze({
-              capabilityId: "not-active",
-              reason: "Invalid primary capability",
-            }),
-          }),
-      }),
-    });
-    await expect(
-      misattributedPlanner.planAndAdmit({
-        sessionId: "session-misattributed",
-        turnId: "turn-misattributed",
-        userInput: "Try a misattributed route",
-        provider: "fake",
-        model: "fake",
-        thinkingLevel: "off",
-        baseSystemPrompt: "BASE",
-      }),
-    ).rejects.toThrow("attributed learning to unselected capability not-active");
-    expect(
-      await protectedRuntime.activations.getTurnPlan("session-misattributed", "turn-misattributed"),
-    ).toBeUndefined();
+    expect(unrelated.renderedSystemPrompt).not.toContain("NARROW RESEARCH PROMPT");
   });
 
-  test("keeps the protected genesis baseline without spending a semantic routing call", async () => {
+  test("keeps the protected genesis baseline in the prompt", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-turn-plan-general-"));
     const workspace = await createWorkspaceStore(root);
     const protectedRuntime = createWorkspaceRuntimeInternals(workspace).protectedRuntime;
@@ -598,11 +415,6 @@ describe("turn intelligence", () => {
         resolveRevision: async () => revision,
         resolveBaseline: async () => Object.freeze({ kind: "genesis" as const }),
       }),
-      capabilityRouter: Object.freeze({
-        route: async () => {
-          throw new Error("The genesis-only source plan must not call the semantic router");
-        },
-      }),
     });
     await sourcePlanner.planAndAdmit({
       sessionId: "session-observation",
@@ -641,7 +453,6 @@ describe("turn intelligence", () => {
         createdFromTurnId: "turn-observation",
       }),
     });
-    let routingCalls = 0;
     let admissionAttempts = 0;
     const observingProtectedRuntime = Object.freeze({
       ...protectedRuntime,
@@ -663,12 +474,6 @@ describe("turn intelligence", () => {
         resolveRevision: async () => revision,
         resolveBaseline: async () => Object.freeze({ kind: "genesis" as const }),
       }),
-      capabilityRouter: Object.freeze({
-        route: async () => {
-          routingCalls += 1;
-          throw new Error("The genesis-only plan must not call the semantic router");
-        },
-      }),
     });
 
     const plan = await planner.planAndAdmit({
@@ -681,15 +486,12 @@ describe("turn intelligence", () => {
       baseSystemPrompt: "BASE",
     });
 
-    expect(routingCalls).toBe(0);
     expect(admissionAttempts).toBe(1);
     expect(plan.selectedCapabilities.map((item) => item.capabilityId)).toEqual(["general"]);
     expect(plan.project).toEqual(PROJECT);
     expect(plan.workingAdjustmentId).toBeUndefined();
     expect(plan.renderedSystemPrompt).not.toContain("project-working-adjustment-v1");
-    expect(plan.routing).toEqual({
-      strategyId: "semantic-capability-router-v1",
-      reason: "No narrow active capabilities required semantic routing",
-    });
+    expect(plan.routing.strategyId).toBe("capability-skill-index-v1");
+    expect(plan.selectedCapabilities.map((item) => item.delivery)).toEqual(["prompt"]);
   });
 });

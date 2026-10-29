@@ -176,7 +176,7 @@ describe("first-party architecture boundaries", () => {
   });
 
   test("keeps protected mutation contracts internal at package and manifest boundaries", async () => {
-    const researchRolePackages = ["agent-types", "learning", "evals", "runtime-pi"];
+    const researchRolePackages = ["agent-types", "learning", "runtime-pi"];
     const dependencyViolations: string[] = [];
     const relativeImportViolations: string[] = [];
     for (const name of researchRolePackages) {

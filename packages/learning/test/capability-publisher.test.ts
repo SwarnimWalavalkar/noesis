@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capabilityEffects, createAtomicCapabilityRegistry } from "@noesis/capabilities";
+import { parseCapabilityDocument } from "@noesis/domain";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { CapabilityProposalSchema, createCapabilityPublisher } from "../src/capability-publisher.ts";
@@ -135,12 +136,23 @@ describe("Capability publisher", () => {
     const initial = await workspace.capabilities.getRevision(initialBinding.revision);
     if (!initial) throw new Error("Expected the exact foreground Capability revision");
     const initialEffects = capabilityEffects(initial.revision);
-    expect(initialEffects.map((effect) => effect.kind)).toEqual(["instruction", "skill"]);
+    // The instruction and the skill become the guidance of one readable Capability file.
+    expect(initialEffects.map((effect) => effect.kind)).toEqual(["instruction"]);
     const instruction = initialEffects[0];
     if (instruction?.kind !== "instruction") throw new Error("Expected an instruction effect");
-    expect(new TextDecoder().decode(await workspace.reads.readRevision(instruction.material))).toBe(
-      "Ground review findings in exact repository evidence.\n",
+    expect(instruction.material.workingPath).toMatch(
+      /^definitions\/capabilities\/evidence-led-review-[a-f0-9]{6}\.md$/u,
     );
+    const document = new TextDecoder().decode(await workspace.reads.readRevision(instruction.material));
+    const parsed = parseCapabilityDocument(document);
+    if (!parsed.ok) throw new Error(parsed.error);
+    expect(parsed.content).toMatchObject({ name: "Evidence-led review" });
+    expect(parsed.content.guidance).toContain("Ground review findings in exact repository evidence.");
+    expect(document).toContain("## Why");
+    // The working file is the same document, so the user can open and edit it.
+    expect(
+      new TextDecoder().decode(await workspace.reads.readWorkingFile(instruction.material.workingPath)),
+    ).toBe(document);
 
     await expect(
       publisher.publish(
@@ -178,20 +190,29 @@ describe("Capability publisher", () => {
           expectedBindingRevision: 2,
           proposal: {
             name: "Evidence-led review",
-            description: "Silently changed definition metadata.",
-            applicability: "Repository reviews and implementation audits.",
-            summary: "Attempt to change stable metadata.",
-            rationale: "The revision boundary must reject this mismatch.",
-            anticipatedEffect: "No revision should be authored.",
-            effects: [{ kind: "instruction", content: "Unreachable content." }],
+            description: "Review changes against direct evidence and trace consumers.",
+            applicability: "Repository reviews, implementation audits, and pull request checks.",
+            summary: "Widen when the review method applies.",
+            rationale: "The method also helped on pull request checks.",
+            anticipatedEffect: "Pull request checks also use the method.",
+            effects: [
+              {
+                kind: "instruction",
+                content: "Ground review findings in exact evidence and trace every changed consumer.",
+              },
+            ],
             consequence: "ordinary",
-            consequenceDescription: "This must remain unapplied.",
+            consequenceDescription: "This changes only reversible agent guidance.",
           },
         },
         context,
         new AbortController().signal,
       ),
-    ).rejects.toThrow("definition fields are immutable");
+    ).resolves.toMatchObject({ status: "revised", capabilityId: "capability-foreground" });
+    await expect(workspace.capabilities.getDefinition("capability-foreground")).resolves.toMatchObject({
+      name: "Evidence-led review",
+      applicability: "Repository reviews, implementation audits, and pull request checks.",
+    });
 
     await expect(
       publisher.publish(
@@ -219,7 +240,7 @@ describe("Capability publisher", () => {
       capabilityId: "capability-foreground",
       message: "Capability changed concurrently",
     });
-    expect(await workspace.capabilities.listRevisions("capability-foreground")).toHaveLength(2);
+    expect(await workspace.capabilities.listRevisions("capability-foreground")).toHaveLength(3);
   });
 
   test("uses the foreground turn's exact saved-program resolver instead of the live library", async () => {
@@ -293,6 +314,7 @@ describe("Capability publisher", () => {
     const lifecycle = await workspace.capabilities.getRevision(binding.revision);
     if (!lifecycle) throw new Error("Expected a pinned Capability revision");
     expect(capabilityEffects(lifecycle.revision)).toMatchObject([
+      { kind: "instruction" },
       {
         kind: "program",
         program: { mode: "script", name: "pinned-script", definitionRevision: frozenDefinition },

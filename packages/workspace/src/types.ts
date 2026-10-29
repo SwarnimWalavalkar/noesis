@@ -1237,6 +1237,19 @@ export interface CapabilityLifecycleCounts {
 }
 
 export interface CapabilityLifecycleStore {
+  /** Records judged outcomes. A revision keeps only its first judgment for each turn. */
+  readonly recordOutcomes: (
+    outcomes: readonly import("@noesis/domain").CapabilityOutcome[],
+  ) => Promise<readonly import("@noesis/domain").CapabilityOutcome[]>;
+  /** Helped, hurt, and unclear counts for each requested revision. */
+  readonly trackRecords: (
+    capabilityRevisionIds: readonly string[],
+  ) => Promise<ReadonlyMap<string, import("@noesis/domain").CapabilityTrackRecord>>;
+  /** The newest judged outcomes for one Capability, across its revisions. */
+  readonly listOutcomes: (
+    capabilityId: string,
+    limit: number,
+  ) => Promise<readonly import("@noesis/domain").CapabilityOutcome[]>;
   readonly create: (request: {
     readonly definition: import("@noesis/domain").CapabilityDefinition;
     readonly revision: import("@noesis/domain").CapabilityLifecycleRevision;
@@ -1336,6 +1349,8 @@ export interface CapabilityLifecycleStore {
   >;
   readonly applyRevision: (request: {
     readonly revision: import("@noesis/domain").CapabilityLifecycleRevision;
+    /** Replaces the name, description, and applicability in the same transaction as the binding. */
+    readonly definition?: import("@noesis/domain").CapabilityDefinition;
     readonly feedback: import("@noesis/domain").CapabilityFeedback;
     readonly expectedBindingRevision: number;
     readonly scope: import("@noesis/domain").CapabilityScope;

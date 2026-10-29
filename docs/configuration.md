@@ -35,6 +35,10 @@ Noesis stores local state under `~/.noesis/` by default. Set model options and t
   "titles": {
     "enabled": true,
     "thinkingLevel": "off"
+  },
+  "reflection": {
+    "thinkingLevel": "low",
+    "idleMinutes": 10
   }
 }
 ```
@@ -43,21 +47,23 @@ Noesis stores local state under `~/.noesis/` by default. Set model options and t
 
 `titles` configures automatic session titles. When you send the first message in a new session, Noesis asks a model for a short title in the background, and `/resume` lists the session by that title. Set `provider` and `model` to use a smaller, faster model for titles. Without them, the title model is the session's own. Reasoning defaults to `off`, because a title needs none. Set `"enabled": false` to keep the default titles. A title you or Noesis set with `session.update` is never replaced.
 
+`reflection` configures the model that reviews each exchange for lasting lessons. An exchange is one turn and your reaction to it. Noesis reflects on a turn when you send your next message, or after the session has been idle for `idleMinutes`. Set `provider` and `model` to use a smaller model. Without them, reflection uses the foreground route. Reasoning defaults to `low`, because most exchanges teach nothing lasting. Changes apply when Noesis next starts.
+
 Earlier versions also accepted `learning`, `autonomy`, and `experiments` sections. Noesis never applied them. Files that still contain them load normally, and the next configuration change removes them.
 
 ### Ask Noesis to change its configuration
 
 You can ask Noesis what it can change about itself, or ask for a specific change, such as "use Claude for subagents" or "lower the context budget to 96k". The bundled `noesis` skill guides the agent. It uses these tools through codemode:
 
-| Tool                     | What it does                                                                                                                                                                                       |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `config.inspect`         | Shows the stored settings, the effective values, where each foreground model value came from, and what each setting does.                                                                          |
-| `config.update`          | Validates and writes one change. `null` clears a field: foreground fields fall back to their defaults, subagent fields inherit the foreground route, and title fields use the session's own model. |
-| `providers.list`         | Lists providers and their sign-in status. With a provider, lists its models and reasoning levels.                                                                                                  |
-| `providers.authenticate` | Opens the same sign-in overlay as `/provider` and waits for you to finish.                                                                                                                         |
-| `providers.logout`       | Removes stored credentials for a provider.                                                                                                                                                         |
-| `session.inspect`        | Shows the current session's title, the model it runs, the reasoning level the next turn will use, how full its context is, its compaction history, and this turn's permissions.                    |
-| `session.update`         | Changes the current session's reasoning level, from the next turn, or its title. The model, provider, and compaction stay with you: use `/model`, `/provider`, and `/compact`.                     |
+| Tool                     | What it does                                                                                                                                                                                                      |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `config.inspect`         | Shows the stored settings, the effective values, where each foreground model value came from, and what each setting does.                                                                                         |
+| `config.update`          | Validates and writes one change. `null` clears a field: foreground fields fall back to their defaults, subagent fields inherit the foreground route, and title and reflection fields use the session's own model. |
+| `providers.list`         | Lists providers and their sign-in status. With a provider, lists its models and reasoning levels.                                                                                                                 |
+| `providers.authenticate` | Opens the same sign-in overlay as `/provider` and waits for you to finish.                                                                                                                                        |
+| `providers.logout`       | Removes stored credentials for a provider.                                                                                                                                                                        |
+| `session.inspect`        | Shows the current session's title, the model it runs, the reasoning level the next turn will use, how full its context is, its compaction history, and this turn's permissions.                                   |
+| `session.update`         | Changes the current session's reasoning level, from the next turn, or its title. The model, provider, and compaction stay with you: use `/model`, `/provider`, and `/compact`.                                    |
 
 Changes made this way apply without a restart where possible:
 

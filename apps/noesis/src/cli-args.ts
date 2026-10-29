@@ -37,6 +37,7 @@ const COMMANDS = new Set([
   "config",
   "auth",
   "skills",
+  "learning",
   "update",
   "help",
 ]);
@@ -159,6 +160,10 @@ export function parseArgs(argv: readonly string[]): CliInput {
     if ((subcommand === "install" || subcommand === "remove") && !skillSource)
       throw new Error(`skills ${subcommand} requires a package, Git, URL, or local path source`);
     if (operands[2]) throw new Error(`Unexpected skills argument ${operands[2]}`);
+  } else if (command === "learning") {
+    subcommand = operands[0] ?? "report";
+    if (subcommand !== "report") throw new Error("Unknown learning command. Use learning report.");
+    if (operands[1]) throw new Error(`Unexpected learning argument ${operands[1]}`);
   } else if (operands[0]) {
     throw new Error(`Unexpected ${command} argument ${operands[0]}`);
   }

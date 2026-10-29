@@ -364,16 +364,11 @@ export function createAtomicCapabilityRegistry(
     });
   const registerCapability = (input: Capability): Capability => {
     const existing = capabilities.get(input.capabilityId);
-    if (existing) {
-      if (
-        existing.name !== input.name ||
-        existing.scope !== input.scope ||
-        existing.intent !== input.intent
-      ) {
-        throw new Error(`Capability identity collision for ${input.capabilityId}`);
-      }
-      return existing;
-    }
+    if (existing && existing.scope !== input.scope)
+      throw new Error(`Capability identity collision for ${input.capabilityId}`);
+    // A revision may refine the name and intent. Revisions stay pinned by exact reference, so
+    // replacing the descriptive fields here does not change any recorded revision.
+    if (existing && existing.name === input.name && existing.intent === input.intent) return existing;
     const capability = freezeCapability(input);
     capabilities.set(capability.capabilityId, capability);
     return capability;

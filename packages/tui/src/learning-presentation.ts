@@ -152,8 +152,14 @@ export async function settledTurnPresentation(
       { type: "execution-changed", execution: "idle" },
       { type: "system-message", text: "Turn interrupted." },
     );
+  // A turn's own reflection waits for the user's reply. This turn's message released the
+  // previous turn's reflection, so its result belongs with this turn.
+  const releasedByThisTurn = (activity: TuiLearningActivitySummary): boolean =>
+    activity.reactionTurnId === request.turnId;
   const focusActivity = learning.activities.find(
-    (activity) => activity.turnId === request.turnId && workingAdjustmentNotice(activity) !== undefined,
+    (activity) =>
+      (releasedByThisTurn(activity) || activity.turnId === request.turnId) &&
+      workingAdjustmentNotice(activity) !== undefined,
   );
   const learningNotice = focusActivity ? workingAdjustmentNotice(focusActivity) : undefined;
   if (focusActivity && learningNotice)
@@ -164,7 +170,7 @@ export async function settledTurnPresentation(
     });
   const pendingReflectionJobId = learning.activities.find(
     (activity) =>
-      activity.turnId === request.turnId &&
+      releasedByThisTurn(activity) &&
       activity.stage === "reflection" &&
       (activity.status === "queued" || activity.status === "running"),
   )?.jobId;

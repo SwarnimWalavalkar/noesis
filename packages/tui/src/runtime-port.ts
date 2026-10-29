@@ -199,6 +199,8 @@ export interface TuiLearningActivitySummary {
   readonly summary: string;
   readonly updatedAt: string;
   readonly turnId?: string;
+  /** The later turn whose user message reacted to `turnId` and released its reflection. */
+  readonly reactionTurnId?: string;
   readonly experimentId?: string;
   readonly capabilityId?: string;
   readonly capabilityRevisionId?: string;

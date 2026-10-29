@@ -1,6 +1,12 @@
 import { imageBlocks } from "./image-input.ts";
 import { installPromptCacheKey } from "./prompt-cache.ts";
-import { canonicalJson, createConditionalObject, sha256 } from "@noesis/domain";
+import {
+  canonicalJson,
+  capabilityGuidance,
+  createConditionalObject,
+  learnedCapabilitySkillName,
+  sha256,
+} from "@noesis/domain";
 import { AgentHarness, TODO_CONTEXT, type AgentLane, type Skill } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, Models, UserMessage } from "@earendil-works/pi-ai";
 import {
@@ -149,6 +155,8 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | und
   )
     throw new Error(`Runtime request does not match frozen turn plan ${plan.planId}`);
   for (const selection of plan.selectedCapabilities) {
+    // An on-demand Capability reaches the model as a skill, so its text is not in the prompt.
+    if (selection.delivery === "on_demand") continue;
     for (const prompt of selection.promptModules) {
       const content = prompt.content.trim();
       if (content && !plan.renderedSystemPrompt.includes(content))
@@ -158,7 +166,7 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | und
     }
     for (const effect of selection.effects ?? []) {
       if (effect.kind !== "instruction") continue;
-      const content = effect.material.content.trim();
+      const content = capabilityGuidance(effect.material.content).trim();
       if (content && !plan.renderedSystemPrompt.includes(content))
         throw new Error(
           `Frozen turn plan ${plan.planId} does not serve instruction effect ${effect.material.revision.revisionId}`,
@@ -167,11 +175,44 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | und
   }
   return plan;
 }
+/**
+ * An on-demand Capability's instructions as one skill. The model sees its name and "when" text
+ * and loads the body when the Capability applies.
+ */
+function onDemandCapabilitySkill(
+  selection: FrozenTurnPlan["selectedCapabilities"][number],
+): PiSkillResource | undefined {
+  const instructions =
+    selection.effects !== undefined
+      ? selection.effects.flatMap((effect) => (effect.kind === "instruction" ? [effect.material] : []))
+      : [...selection.promptModules, ...selection.skills];
+  const first = instructions[0];
+  if (!first) return undefined;
+  const content = [
+    `# ${selection.name}`,
+    `Use when: ${selection.applicability}`,
+    ...instructions.map((material) => capabilityGuidance(material.content).trim()),
+  ].join("\n\n");
+  return Object.freeze({
+    name: learnedCapabilitySkillName(selection.capabilityId, selection.name),
+    description: `Learned Capability "${selection.name}". Use when: ${selection.applicability}`,
+    content,
+    filePath: first.revision.workingPath,
+    contentDigest: sha256(content),
+    capabilityRevision: first.revision,
+    disableModelInvocation: false,
+  });
+}
 function capabilitySkillResources(plan: FrozenTurnPlan | undefined): readonly PiSkillResource[] {
   if (!plan) return Object.freeze([]);
   return Object.freeze(
-    plan.selectedCapabilities.flatMap((selection) =>
-      (selection.effects ?? []).flatMap((effect) =>
+    plan.selectedCapabilities.flatMap((selection) => [
+      ...(selection.delivery === "on_demand"
+        ? [onDemandCapabilitySkill(selection)].filter(
+            (skill): skill is PiSkillResource => skill !== undefined,
+          )
+        : []),
+      ...(selection.effects ?? []).flatMap((effect) =>
         effect.kind === "skill"
           ? [
               Object.freeze({
@@ -186,7 +227,7 @@ function capabilitySkillResources(plan: FrozenTurnPlan | undefined): readonly Pi
             ]
           : [],
       ),
-    ),
+    ]),
   );
 }
 function mergeSkillResources(

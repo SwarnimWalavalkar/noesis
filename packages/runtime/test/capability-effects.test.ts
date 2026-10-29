@@ -180,14 +180,6 @@ describe("effects-first Capability turn planning", () => {
       workspace,
       protectedRuntime,
       capabilities: resolver,
-      capabilityRouter: Object.freeze({
-        route: async () =>
-          Object.freeze({
-            strategyId: "semantic-capability-router-v1",
-            reason: "No relevance candidates remain after always-active selection.",
-            selections: Object.freeze([]),
-          }),
-      }),
       project,
       now: () => "2026-08-21T00:01:00.000Z",
     });

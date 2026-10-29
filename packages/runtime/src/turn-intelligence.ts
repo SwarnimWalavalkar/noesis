@@ -31,6 +31,7 @@ import type {
   WorkingAdjustment,
 } from "@noesis/domain";
 import {
+  capabilityGuidance,
   ComposerAttachmentsSchema,
   createConditionalObject,
   canonicalJson,
@@ -317,12 +318,6 @@ async function freezeContextDocument(
 export interface TurnIntelligencePlanner {
   readonly planAndAdmit: (request: TurnPlanningRequest) => Promise<FrozenTurnPlan>;
 }
-export interface TurnCapabilityRoutingCandidate {
-  readonly capabilityId: string;
-  readonly name: string;
-  readonly scope: string;
-  readonly intent: string;
-}
 export interface TurnRoutingHistoryMessage {
   readonly attachments?: readonly ComposerAttachment[];
   readonly messageId: string;
@@ -331,35 +326,10 @@ export interface TurnRoutingHistoryMessage {
   readonly createdAt: string;
   readonly turnStatus?: "completed" | "failed" | "aborted";
 }
-export interface TurnCapabilityRoutingRequest {
-  readonly sessionId: string;
-  readonly turnId: string;
-  readonly userInput: string;
-  readonly priorConversation: readonly TurnRoutingHistoryMessage[];
-  readonly candidates: readonly TurnCapabilityRoutingCandidate[];
-}
-export interface TurnCapabilityRoutingSelection {
-  readonly capabilityId: string;
-  readonly reason: string;
-}
-export interface TurnCapabilityRoutingDecision {
-  readonly strategyId: string;
-  readonly reason: string;
-  readonly selections: readonly TurnCapabilityRoutingSelection[];
-  readonly learningAttribution?: {
-    readonly capabilityId: string;
-    readonly reason: string;
-  };
-}
-/** Semantic relevance is supplied by a capable-model adapter at the composition root. */
-export interface TurnCapabilityRouter {
-  readonly route: (request: TurnCapabilityRoutingRequest) => Promise<TurnCapabilityRoutingDecision>;
-}
 export interface TurnIntelligencePlannerOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly protectedRuntime: ProtectedWorkspaceRuntime;
   readonly capabilities: TurnCapabilityResolver;
-  readonly capabilityRouter: TurnCapabilityRouter;
   /** Canonical host-derived active directory identity, resolved once at startup. */
   readonly project: ProjectRef;
   readonly basePermissionManifest?: PermissionManifest;
@@ -607,89 +577,26 @@ export function createTurnIntelligencePlanner(
         item.baseline.kind !== "genesis" &&
         (lifecycleModes.get(item.reference.capabilityId) ?? "relevant") === "relevant",
     );
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const routing: TurnCapabilityRoutingDecision =
-      candidates.length === 0
-        ? Object.freeze({
-            strategyId: "semantic-capability-router-v1",
-            reason: "No narrow active capabilities required semantic routing",
-            selections: Object.freeze([]),
-          })
-        : await options.capabilityRouter.route({
-            sessionId: request.sessionId,
-            turnId: request.turnId,
-            userInput: request.userInput,
-            priorConversation: Object.freeze([
-              ...(contextCheckpoint
-                ? [
-                    Object.freeze({
-                      messageId: `context-checkpoint:${contextCheckpoint.checkpointId}`,
-                      role: "assistant" as const,
-                      content: contextCheckpoint.summary,
-                      createdAt: contextCheckpoint.createdAt,
-                    }),
-                  ]
-                : []),
-              ...conversationHistory.map(
-                ({ messageId, role, content, attachmentText, createdAt, turnStatus }) =>
-                  Object.freeze(
-                    createConditionalObject({
-                      messageId,
-                      role,
-                      content: [content, attachmentText].filter(Boolean).join("\n"),
-                      createdAt,
-                    } as const)
-                      .addOptional(!(turnStatus === undefined) ? { turnStatus } : undefined)
-                      .finish(),
-                  ),
-              ),
-            ]),
-            candidates: Object.freeze(
-              candidates.map(({ capability }) =>
-                Object.freeze({
-                  capabilityId: capability.capabilityId,
-                  name: capability.name,
-                  scope: capability.scope,
-                  intent: capability.intent,
-                }),
-              ),
-            ),
-          });
-    if (routing.strategyId.trim().length === 0) throw new Error("Capability router returned no strategy ID");
-    if (routing.reason.trim().length === 0) throw new Error("Capability router returned no decision reason");
-    const candidatesById = new Map(candidates.map((item) => [item.capability.capabilityId, item]));
-    const selectedReasons = new Map<string, string>();
-    for (const selection of routing.selections) {
-      if (!candidatesById.has(selection.capabilityId))
-        throw new Error(`Capability router selected inactive capability ${selection.capabilityId}`);
-      if (selectedReasons.has(selection.capabilityId))
-        throw new Error(`Capability router selected capability ${selection.capabilityId} more than once`);
-      if (selection.reason.trim().length === 0)
-        throw new Error(`Capability router returned no reason for ${selection.capabilityId}`);
-      selectedReasons.set(selection.capabilityId, selection.reason);
-    }
-    const learningAttribution = routing.learningAttribution;
-    if (routing.selections.length > 0 && learningAttribution === undefined)
-      throw new Error("Capability router selected narrow capabilities without learning attribution");
-    if (routing.selections.length === 0 && learningAttribution !== undefined)
-      throw new Error("Capability router attributed learning without selecting a narrow capability");
-    if (learningAttribution !== undefined && !selectedReasons.has(learningAttribution.capabilityId))
-      throw new Error(
-        `Capability router attributed learning to unselected capability ${learningAttribution.capabilityId}`,
-      );
-    if (learningAttribution !== undefined && learningAttribution.reason.trim().length === 0)
-      throw new Error(
-        `Capability router returned no learning-attribution reason for ${learningAttribution.capabilityId}`,
-      );
+    // `relevant` Capabilities are listed by name and "when" text, the same way skills are. The
+    // foreground model chooses which to load, so planning makes no separate routing model call.
     const selectedResolved = [
-      ...general.map((item) => Object.freeze({ ...item, selectionReason: "protected genesis baseline" })),
-      ...always.map((item) => Object.freeze({ ...item, selectionReason: "always active" })),
-      ...routing.selections.map((selection) => {
-        const item = candidatesById.get(selection.capabilityId);
-        if (!item)
-          throw new Error(`Capability router selected inactive capability ${selection.capabilityId}`);
-        return Object.freeze({ ...item, selectionReason: selection.reason });
-      }),
+      ...general.map((item) =>
+        Object.freeze({
+          ...item,
+          selectionReason: "protected genesis baseline",
+          delivery: "prompt" as const,
+        }),
+      ),
+      ...always.map((item) =>
+        Object.freeze({ ...item, selectionReason: "always active", delivery: "prompt" as const }),
+      ),
+      ...candidates.map((item) =>
+        Object.freeze({
+          ...item,
+          selectionReason: "listed for the model to load when relevant",
+          delivery: "on_demand" as const,
+        }),
+      ),
     ];
     const selections: FrozenCapabilitySelection[] = [];
     for (const {
@@ -699,6 +606,7 @@ export function createTurnIntelligencePlanner(
       revision,
       baseline,
       selectionReason,
+      delivery,
     } of selectedResolved) {
       const currentEffects = capabilityEffects(revision);
       if (currentEffects.length > 0) {
@@ -740,6 +648,7 @@ export function createTurnIntelligencePlanner(
             applicability: definition?.applicability ?? capability.intent,
             scope: capability.scope,
             selectionReason,
+            delivery,
             revision: reference,
             baseline,
           } as const)
@@ -756,14 +665,16 @@ export function createTurnIntelligencePlanner(
       );
     }
     const promptLayers = selections.flatMap((selection) =>
-      selection.effects
-        ? selection.effects.flatMap((effect) =>
-            effect.kind === "instruction" ? [effect.material.content.trim()] : [],
-          )
-        : [
-            ...selection.promptModules.map((material) => material.content.trim()),
-            ...selection.skills.map((material) => material.content.trim()),
-          ],
+      selection.delivery === "on_demand"
+        ? []
+        : selection.effects
+          ? selection.effects.flatMap((effect) =>
+              effect.kind === "instruction" ? [capabilityGuidance(effect.material.content).trim()] : [],
+            )
+          : [
+              ...selection.promptModules.map((material) => material.content.trim()),
+              ...selection.skills.map((material) => material.content.trim()),
+            ],
     );
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const unsigned = Object.freeze(
@@ -808,20 +719,11 @@ export function createTurnIntelligencePlanner(
           thinkingLevel: request.thinkingLevel,
           permissionSnapshot: mergedPermissions(selections, options.basePermissionManifest),
           retrievalCitations: Object.freeze([...(request.retrievalCitations ?? [])]),
-          routing: Object.freeze(
-            createConditionalObject({
-              strategyId: routing.strategyId,
-              reason: routing.reason,
-            } as const)
-              .addOptional(
-                learningAttribution
-                  ? {
-                      learningAttribution: Object.freeze({ ...learningAttribution }),
-                    }
-                  : undefined,
-              )
-              .finish(),
-          ),
+          routing: Object.freeze({
+            strategyId: "capability-skill-index-v1",
+            reason:
+              "Relevant Capabilities are listed as skills; the foreground model loads them when they apply",
+          }),
           createdAt: now(),
         } as const)
         .finish(),

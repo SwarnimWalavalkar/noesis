@@ -29,7 +29,7 @@ export interface TurnSettlementResult {
 }
 export interface TurnSettlementOptions {
   readonly workspace: NoesisWorkspaceStore;
-  readonly coordinator: Pick<CapabilityCoordinator, "observeSettledTurn">;
+  readonly coordinator: Pick<CapabilityCoordinator, "observeSettledTurn" | "releaseSession">;
   readonly project: ProjectRef;
   readonly now?: () => string;
   readonly onReflectionFailure?: (
@@ -75,6 +75,22 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         timelineSequence: 0,
       }),
     );
+    if (request.inputOrigin === undefined) {
+      // This user message is the reaction to the session's previous turn, so that turn's
+      // reflection no longer needs to wait for the session to go idle.
+      try {
+        await options.coordinator.releaseSession(request.sessionId);
+      } catch (error) {
+        try {
+          await options.onReflectionFailure?.(
+            error,
+            Object.freeze({ sessionId: request.sessionId, turnId: request.turnId }),
+          );
+        } catch {
+          // Reflection diagnostics must never fail the foreground turn.
+        }
+      }
+    }
     const serving = request.plan.selectedCapabilities.map((selection) => selection.revision);
     const record = async (
       status: "corrected" | "failed" | "unknown",
@@ -178,6 +194,13 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         ),
       );
       const toolFailureCount = toolCalls.filter((toolCall) => toolCall.status === "failed").length;
+      const cause = aborted
+        ? ("user_aborted" as const)
+        : status !== "failed"
+          ? ("completed" as const)
+          : settledAssistantMessages.length === 0 && toolCalls.length === 0
+            ? ("failed_before_output" as const)
+            : ("failed_after_output" as const);
       const evidenceRefs: readonly EvidenceRef[] = Object.freeze([userRef, ...assistantRefs, ...toolRefs]);
       // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
       await options.workspace.operational.outcomes.put(
@@ -191,6 +214,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
           createdAt: now(),
           metadata: Object.freeze({
             source: "turn-settlement",
+            cause,
             aborted,
             replayEligible: !aborted,
             frozenTurnPlanId: request.plan.planId,
@@ -204,6 +228,8 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
         settledAt: now(),
       });
       const outcomeId = `${request.turnId}:outcome`;
+      // A turn that failed before the model produced anything shows nothing about behavior.
+      if (cause === "failed_before_output") return undefined;
       try {
         type SettledLearningTurn = Parameters<CapabilityCoordinator["observeSettledTurn"]>[0]["turn"];
         // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
@@ -230,6 +256,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
               .addOptional(assistantMessage ? { assistantMessage } : undefined)
               .add({
                 outcome: status === "failed" ? "failed" : "unknown",
+                cause,
                 occurredAt: request.occurredAt,
                 evidenceRefs: [...evidenceRefs],
                 sensitivity: "normal" as const,
@@ -240,7 +267,7 @@ export function createTurnSettlement(options: TurnSettlementOptions): TurnSettle
                 }),
               } satisfies Pick<
                 SettledLearningTurn,
-                "outcome" | "occurredAt" | "evidenceRefs" | "sensitivity" | "telemetry"
+                "outcome" | "cause" | "occurredAt" | "evidenceRefs" | "sensitivity" | "telemetry"
               >)
               .finish(),
           ),

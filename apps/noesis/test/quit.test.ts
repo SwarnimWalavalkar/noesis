@@ -414,7 +414,7 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
     ["completed-turn-quit-lf", "/quit"],
     ["completed-turn-ctrl-c", "Ctrl+C"],
   ] as const)(
-    "%s (%s) exits after a completed turn returns to IDLE and launches ambient reflection",
+    "%s (%s) exits after a completed turn returns to IDLE and keeps its held reflection",
     { timeout: PTY_TEST_TIMEOUT_MS },
     async ([action, _input], { runPtyExit }) => {
       const { home, output, result } = await runPtyExit(action);
@@ -427,8 +427,10 @@ describe.skipIf(process.platform === "win32")("Noesis TUI process lifecycle", { 
 
       expect(output).toContain("Controlled Pi completion for: No, keep this research brief concise.");
       expect(output).toContain("● IDLE");
+      // The turn's reflection waits for the user's reply. Quitting leaves it scheduled, so the
+      // next launch runs it once the idle wait has passed.
       expect(reflectionJobs).toHaveLength(1);
-      expect(reflectionJobs[0]?.attempt).toBeGreaterThan(0);
+      expect(reflectionJobs[0]).toMatchObject({ status: "scheduled", attempt: 0 });
       expect(result).toEqual({ code: 0, signal: null });
     },
   );

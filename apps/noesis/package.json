@@ -13,7 +13,6 @@
     "@noesis/config": "workspace:*",
     "@noesis/context": "workspace:*",
     "@noesis/domain": "workspace:*",
-    "@noesis/evals": "workspace:*",
     "@noesis/intelligence": "workspace:*",
     "@noesis/learning": "workspace:*",
     "@noesis/mcp": "workspace:*",

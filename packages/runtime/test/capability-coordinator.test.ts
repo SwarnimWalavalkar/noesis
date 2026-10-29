@@ -81,6 +81,9 @@ describe("Capability coordinator", () => {
       project: Object.freeze({ projectId: "project-1", root }),
       selectedCapabilities: Object.freeze([]),
     });
+    // The reflection waits for the user's reaction. The next user message releases it.
+    expect(observed.job.notBefore > timestamp).toBe(true);
+    await coordinator.releaseSession("session-1");
     await started;
     const stopped = coordinator.stop();
     releaseReflection?.();
@@ -91,5 +94,77 @@ describe("Capability coordinator", () => {
       status: "completed",
       result: { status: "no_change", reason: "Lifecycle mutation committed" },
     });
+  });
+
+  test("holds a reflection until the session goes idle when the user does not reply", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-capability-coordinator-idle-"));
+    const workspace = await createWorkspaceStore(root);
+    opened.push({ root, workspace });
+    const start = new Date("2026-10-29T10:00:00.000Z");
+    let current = start;
+    await workspace.operational.sessions.put({
+      sessionId: "session-idle",
+      title: "Idle reflection",
+      status: "idle",
+      provider: "fake",
+      model: "fake",
+      runtime: "fake",
+      createdAt: start.toISOString(),
+      updatedAt: start.toISOString(),
+      metadata: Object.freeze({}),
+    });
+    const evidence = await workspace.operational.messages.put({
+      messageId: "turn-idle:user",
+      sessionId: "session-idle",
+      role: "user",
+      content: "Summarize the plan.",
+      sensitivity: "normal",
+      createdAt: start.toISOString(),
+      metadata: Object.freeze({ turnId: "turn-idle" }),
+    });
+    let reflectCalls = 0;
+    const coordinator = createCapabilityCoordinator({
+      workspace,
+      authority: createWorkspaceRuntimeInternals(workspace).authority,
+      learning: Object.freeze({
+        reflectSettledTurn: async () => {
+          reflectCalls += 1;
+          // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+          return Object.freeze({ status: "no_change" as const, reason: "Nothing lasting" });
+        },
+      }),
+      now: () => current,
+      exchangeIdleMs: 60_000,
+      workerId: "capability-coordinator-idle-test",
+    });
+    try {
+      const observed = await coordinator.observeSettledTurn({
+        turn: Object.freeze({
+          sessionId: "session-idle",
+          turnId: "turn-idle",
+          userMessage: "Summarize the plan.",
+          outcome: "unknown",
+          cause: "completed",
+          servedWorkingAdjustmentOutcomes: Object.freeze([]),
+          scope: "general",
+          sensitivity: "normal",
+          evidenceRefs: [evidence],
+          telemetry: Object.freeze({ retryCount: 0, toolFailureCount: 0, aborted: false }),
+          occurredAt: start.toISOString(),
+        }),
+        project: Object.freeze({ projectId: "project-1", root }),
+        selectedCapabilities: Object.freeze([]),
+      });
+      await coordinator.runAvailable();
+      expect(reflectCalls).toBe(0);
+      expect((await workspace.jobs.get(observed.job.jobId))?.status).toBe("scheduled");
+
+      current = new Date(start.getTime() + 60_000);
+      await coordinator.runAvailable();
+      expect(reflectCalls).toBe(1);
+      expect((await workspace.jobs.get(observed.job.jobId))?.status).toBe("completed");
+    } finally {
+      await coordinator.stop();
+    }
   });
 });

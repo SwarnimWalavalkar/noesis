@@ -88,13 +88,13 @@ Every proposed lasting lesson must answer:
 
 If Noesis cannot answer these questions well, it should make no lasting change.
 
-New learning is globally eligible and relevant by default. A capable router selects it only for requests that match its recorded applicability.
+New learning is globally eligible and relevant by default. Noesis lists it with its skills by name and "when" text, and the model loads it only for requests where it applies.
 
 The reflector or the user may choose project or session scope. The user may also make a Capability always active. Every scope or mode change creates a binding revision instead of rewriting history.
 
 ### Quiet, not compulsory
 
-Reflection runs automatically after every settled foreground turn. It should stay quiet and accept `no_change` as a normal result. The user should not have to run learning commands or manage an experiment pipeline.
+Reflection runs automatically on every settled foreground turn once the user has reacted to it, by replying or by leaving the session idle. It should stay quiet and accept `no_change` as a normal result. `/learning` shows how each Capability has done in the turns that used it. The user should not have to run learning commands or manage an experiment pipeline.
 
 The user may nevertheless ask Noesis to improve itself explicitly, or invoke `/refine`. Both load the built-in `noesis` skill, which progressively explains how to choose a lasting form, inspect current state, and publish an exact Capability decision. Program authoring guidance lives in the separate `execute` skill. This guidance is not repeated in the default system prompt.
 

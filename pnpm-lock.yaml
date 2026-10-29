@@ -104,9 +104,6 @@ importers:
       '@noesis/domain':
         specifier: workspace:*
         version: link:../../packages/domain
-      '@noesis/evals':
-        specifier: workspace:*
-        version: link:../../packages/evals
       '@noesis/intelligence':
         specifier: workspace:*
         version: link:../../packages/intelligence
@@ -207,31 +204,6 @@ importers:
         specifier: 5.9.3
         version: 5.9.3
 
-  packages/evals:
-    dependencies:
-      '@noesis/agent-types':
-        specifier: workspace:*
-        version: link:../agent-types
-      '@noesis/config':
-        specifier: workspace:*
-        version: link:../config
-      '@noesis/domain':
-        specifier: workspace:*
-        version: link:../domain
-      zod:
-        specifier: 4.6.7
-        version: 4.6.7
-    devDependencies:
-      '@noesis/learning':
-        specifier: workspace:*
-        version: link:../learning
-      '@noesis/runtime-pi':
-        specifier: workspace:*
-        version: link:../runtime-pi
-      '@noesis/workspace':
-        specifier: workspace:*
-        version: link:../workspace
-
   packages/intelligence:
     dependencies:
       '@noesis/domain':
@@ -303,9 +275,6 @@ importers:
       '@noesis/domain':
         specifier: workspace:*
         version: link:../domain
-      '@noesis/evals':
-        specifier: workspace:*
-        version: link:../evals
       '@noesis/intelligence':
         specifier: workspace:*
         version: link:../intelligence

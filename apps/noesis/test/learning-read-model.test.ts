@@ -6,10 +6,10 @@ import {
 } from "@noesis/domain";
 import type {
   AuthorRevisionJobPayload,
+  CoordinatorJobPageReader,
   CoordinatorJobView,
   PreflightJobPayload,
   ReflectTurnJobPayload,
-  RuntimeCoordinator,
 } from "@noesis/runtime";
 import { describe, expect, test } from "vitest";
 import {
@@ -313,7 +313,7 @@ describe("ambient learning read model", () => {
       outcomes: { get: async () => undefined },
     });
     expect(inactive[0]?.workingAdjustment?.status).toBe("inactive");
-    const emptyCoordinator: Pick<RuntimeCoordinator, "listJobPage"> = {
+    const emptyCoordinator: CoordinatorJobPageReader = {
       listJobPage: async () => Object.freeze({ jobs: Object.freeze([]), exhausted: true }),
     };
     const source = {
@@ -335,7 +335,7 @@ describe("ambient learning read model", () => {
     expect(fresh.currentWorkingAdjustment).toEqual(
       expect.objectContaining({ adjustmentId: "adjustment-1", status: "active" }),
     );
-    const representedCoordinator: Pick<RuntimeCoordinator, "listJobPage"> = {
+    const representedCoordinator: CoordinatorJobPageReader = {
       listJobPage: async ({ kind } = {}) =>
         Object.freeze({
           jobs: Object.freeze(
@@ -734,8 +734,8 @@ describe("ambient learning read model", () => {
         parentJobId: "other-reflection",
       }),
     ]);
-    const requests: Array<NonNullable<Parameters<RuntimeCoordinator["listJobPage"]>[0]>> = [];
-    const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
+    const requests: Array<NonNullable<Parameters<CoordinatorJobPageReader["listJobPage"]>[0]>> = [];
+    const listJobPage: CoordinatorJobPageReader["listJobPage"] = async (request = {}) => {
       requests.push(request);
       const ordered = jobs
         .filter(({ kind }) => !request.kind || kind === request.kind)
@@ -825,7 +825,7 @@ describe("ambient learning read model", () => {
       createdAt: "2026-08-01T00:00:00.000Z",
       jobId: "legacy-undecodable-row",
     });
-    const listJobPage: RuntimeCoordinator["listJobPage"] = async ({ kind, after, sessionId } = {}) => {
+    const listJobPage: CoordinatorJobPageReader["listJobPage"] = async ({ kind, after, sessionId } = {}) => {
       if (kind !== "runtime.reflect_turn") return Object.freeze({ jobs: Object.freeze([]), exhausted: true });
       expect(sessionId).toBe("target-session");
       if (!after)
@@ -869,7 +869,7 @@ describe("ambient learning read model", () => {
     const requestedChunkSizes: number[] = [];
     let concurrentExperimentQueries = 0;
     let maximumConcurrentExperimentQueries = 0;
-    const listJobPage: RuntimeCoordinator["listJobPage"] = async (request = {}) => {
+    const listJobPage: CoordinatorJobPageReader["listJobPage"] = async (request = {}) => {
       if (request.kind === "runtime.reflect_turn")
         return Object.freeze({ jobs: Object.freeze(reflections), exhausted: true });
       if (request.experimentIds) requestedChunkSizes.push(request.experimentIds.length);

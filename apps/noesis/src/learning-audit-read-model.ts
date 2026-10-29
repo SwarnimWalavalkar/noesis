@@ -8,6 +8,7 @@ import {
   type CapabilityRevisionRef,
   type CapabilityScope,
   canonicalJson,
+  capabilityEvidenceLabel,
   type DurableJobRecord,
   type EvidenceRef,
   EvidenceRefSchema,
@@ -17,11 +18,14 @@ import {
   isJsonObject,
   type JsonObject,
   JsonValueSchema,
+  parseCapabilityDocument,
   sha256,
   toJsonValue,
   type WorkingAdjustment,
 } from "@noesis/domain";
-import { CAPABILITY_REFLECTION_JOB_KIND, type ContinuousFeedbackController } from "@noesis/runtime";
+import { capabilityDocumentRevision } from "@noesis/learning";
+import { join } from "node:path";
+import { CAPABILITY_REFLECTION_JOB_KIND } from "@noesis/runtime";
 import type {
   TuiCapabilityFacet,
   TuiLearningAuditSnapshot,
@@ -32,7 +36,7 @@ import type {
   TuiLearningPrimitiveKind,
   TuiLearningRelation,
 } from "@noesis/tui";
-import type { NoesisWorkspaceStore } from "@noesis/workspace";
+import type { ExperimentObservationRecord, NoesisWorkspaceStore } from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../../packages/workspace/src/protected-runtime.ts";
 const AUDIT_LIMIT = 1000;
 const RAW_JSON_LIMIT = 64000;
@@ -46,6 +50,8 @@ function isReflectionJob(job: DurableJobRecord): boolean {
 }
 interface LearningAuditSource {
   readonly workspace: NoesisWorkspaceStore;
+  /** The Noesis home, used to show where each Capability file lives. */
+  readonly home?: string;
   readonly criteria: Pick<UserCriterionRepository, "list">;
   readonly activations: Pick<
     ProtectedWorkspaceRuntime["activations"],
@@ -55,7 +61,11 @@ interface LearningAuditSource {
     ProtectedWorkspaceRuntime["feedback"],
     "listObservations" | "listResearchRuns" | "getOutcome" | "getSuccessorInput"
   >;
-  readonly continuousFeedback?: Pick<ContinuousFeedbackController, "experimentComparison">;
+  readonly continuousFeedback?: Readonly<{
+    readonly experimentComparison: (
+      experimentId: string,
+    ) => Promise<Readonly<{ readonly observations: readonly ExperimentObservationRecord[] }>>;
+  }>;
   readonly resolveRevision: (reference: CapabilityRevisionRef) => Promise<CapabilityRevision | undefined>;
   readonly resolveCapability: (capabilityId: string) =>
     | Readonly<{
@@ -1439,7 +1449,7 @@ export async function loadLearningAuditSnapshot(
   );
   const capabilityHistory = await Promise.all(
     capabilityBindings.map(async (binding) => {
-      const [listedRevisions, currentRevision, feedback] = await Promise.all([
+      const [listedRevisions, currentRevision, feedback, records, outcomes] = await Promise.all([
         source.workspace.capabilities.listRevisions(binding.capabilityId, {
           limit: perCapabilityLimit,
         }),
@@ -1447,7 +1457,10 @@ export async function loadLearningAuditSnapshot(
         source.workspace.capabilities.listFeedback(binding.capabilityId, {
           limit: perCapabilityLimit,
         }),
+        source.workspace.capabilities.trackRecords([binding.revision.capabilityRevisionId]),
+        source.workspace.capabilities.listOutcomes(binding.capabilityId, 5),
       ]);
+      const trackRecord = records.get(binding.revision.capabilityRevisionId);
       const revisions = Object.freeze(
         [
           ...new Map(
@@ -1458,10 +1471,15 @@ export async function loadLearningAuditSnapshot(
           ).values(),
         ].slice(0, perCapabilityLimit),
       );
-      return Object.freeze({ binding, currentRevision, revisions, feedback });
+      return Object.freeze({ binding, currentRevision, revisions, feedback, trackRecord, outcomes });
     }),
   );
-  for (const { binding, currentRevision, revisions, feedback } of capabilityHistory) {
+  for (const { binding, currentRevision, revisions, feedback, trackRecord, outcomes } of capabilityHistory) {
+    const used = (trackRecord?.helped ?? 0) + (trackRecord?.hurt ?? 0) + (trackRecord?.unclear ?? 0);
+    const trackRecordLabel =
+      used === 0
+        ? "not judged in use yet"
+        : `used ${String(used)}× · helped ${String(trackRecord?.helped ?? 0)} · hurt ${String(trackRecord?.hurt ?? 0)}`;
     const definition = capabilityDefinitionById.get(binding.capabilityId);
     const sourceReflection = reflectionByCapabilityId.get(binding.capabilityId);
     const sourceSessionId = sourceReflection ? jobSessionId(sourceReflection) : undefined;
@@ -1473,6 +1491,16 @@ export async function loadLearningAuditSnapshot(
       currentRevision,
     );
     const currentFacets = capabilityFacets(currentRevision?.revision);
+    const document = currentRevision ? capabilityDocumentRevision(currentRevision) : undefined;
+    const workingDocumentPath = document?.workingPath.replace(/^definitions\/candidates\//u, "definitions/");
+    const workingDocument = workingDocumentPath
+      ? await source.workspace.reads.readWorkingFile(workingDocumentPath)
+      : undefined;
+    // An edit that differs from the current revision and still exists was not readable.
+    const unreadableEdit =
+      document && workingDocument && sha256(workingDocument) !== document.contentDigest
+        ? parseCapabilityDocument(new TextDecoder().decode(workingDocument))
+        : undefined;
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     primitives.push(
       primitive(
@@ -1480,7 +1508,7 @@ export async function loadLearningAuditSnapshot(
           id: nativeId("capability", binding.capabilityId),
           kind: "capability",
           group: "capabilities",
-          status: `${binding.state} · ${binding.activationMode}`,
+          status: `${binding.state} · ${binding.activationMode} · ${trackRecordLabel}`,
           tone: binding.state === "active" ? "active" : "neutral",
           title: definition?.name ?? binding.capabilityId,
           summary: definition?.description ?? "Durable capability",
@@ -1518,6 +1546,20 @@ export async function loadLearningAuditSnapshot(
                 ),
             ].filter(defined),
             detailSections: [
+              detailSection("FILE", [
+                detailEntry(
+                  "edit here",
+                  workingDocumentPath
+                    ? source.home
+                      ? join(source.home, workingDocumentPath)
+                      : workingDocumentPath
+                    : "Moves into a file the next time Noesis starts",
+                ),
+                detailEntry(
+                  "your last edit",
+                  unreadableEdit && !unreadableEdit.ok ? `Not applied. ${unreadableEdit.error}.` : undefined,
+                ),
+              ]),
               detailSection("WHAT CHANGED", currentMaterialEntries),
               detailSection("BEHAVIOR", [
                 detailEntry("applies when", definition?.applicability),
@@ -1526,8 +1568,22 @@ export async function loadLearningAuditSnapshot(
                 detailEntry("state", binding.state === "active" ? "Active" : "Paused"),
               ]),
               detailSection("WHY", [
+                detailEntry(
+                  "evidence",
+                  currentRevision?.evidence
+                    ? capabilityEvidenceLabel(currentRevision.evidence.kind)
+                    : undefined,
+                ),
+                detailEntry("in their words", currentRevision?.evidence?.quote),
+                detailEntry("without it", currentRevision?.evidence?.wouldOtherwise),
                 detailEntry("reason", currentRevision?.rationale),
                 detailEntry("expected effect", currentRevision?.anticipatedEffect),
+              ]),
+              detailSection("TRACK RECORD", [
+                detailEntry("this revision", trackRecordLabel),
+                ...outcomes.map((outcome) =>
+                  detailEntry(`${outcome.result} · ${outcome.createdAt.slice(0, 10)}`, outcome.reason),
+                ),
               ]),
               detailSection("PROVENANCE", [
                 detailEntry(

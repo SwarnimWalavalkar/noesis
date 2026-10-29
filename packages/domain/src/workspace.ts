@@ -479,6 +479,8 @@ export interface DurableJobStorePort {
     readonly failure: DurableJobFailure;
   }) => Promise<DurableJobRecord>;
   readonly cancel: (jobId: string, now: string) => Promise<DurableJobRecord | undefined>;
+  /** Makes a scheduled job claimable now instead of at its later `notBefore` time. */
+  readonly release: (jobId: string, now: string) => Promise<DurableJobRecord | undefined>;
   readonly retry: (request: {
     readonly jobId: string;
     readonly now: string;

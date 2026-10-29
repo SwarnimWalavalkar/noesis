@@ -9,9 +9,9 @@ import {
 import type {
   CoordinatorEvidenceRef,
   CoordinatorJobKind,
+  CoordinatorJobPageReader,
   CoordinatorJobView,
   ReflectTurnJobPayload,
-  RuntimeCoordinator,
 } from "@noesis/runtime";
 import { CoordinatorEvidenceRefsSchema } from "@noesis/runtime";
 import type {
@@ -316,7 +316,7 @@ export async function enrichLearningActivityWithWorkingAdjustments(
 }
 /** Combines session-local learning jobs with the current authoritative project adjustment. */
 export async function loadLearningInspectionForSession(
-  coordinator: Pick<RuntimeCoordinator, "listJobPage">,
+  coordinator: CoordinatorJobPageReader,
   sessionId: string,
   projectId: string,
   inspection: WorkingAdjustmentInspectionSource,
@@ -383,7 +383,7 @@ export function learningActivityForSession(
 const JOB_PAGE_SIZE = 1000;
 const EXPERIMENT_QUERY_CHUNK_SIZE = 250;
 async function listAllScopedJobs(
-  coordinator: Pick<RuntimeCoordinator, "listJobPage">,
+  coordinator: CoordinatorJobPageReader,
   request: Readonly<{
     kind: CoordinatorJobKind;
     sessionId?: string;
@@ -421,7 +421,7 @@ function chunks<Value>(values: readonly Value[], size: number): readonly (readon
 }
 /** Reads complete coordinator job chains before applying the pure session projection above. */
 export async function loadLearningActivityForSession(
-  coordinator: Pick<RuntimeCoordinator, "listJobPage">,
+  coordinator: CoordinatorJobPageReader,
   sessionId: string,
   inspection?: WorkingAdjustmentInspectionSource,
 ): Promise<readonly TuiLearningActivitySummary[]> {

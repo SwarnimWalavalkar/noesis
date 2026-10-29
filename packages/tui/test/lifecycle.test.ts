@@ -1194,9 +1194,11 @@ describe("Noesis TUI lifecycle", () => {
             jobId: "job-late-adjustment",
             stage: "reflection" as const,
             status: "running" as const,
-            summary: "Running reflection on the completed turn",
+            summary: "Running reflection on the previous turn",
             updatedAt: "2026-08-01T00:00:00.000Z",
-            turnId: `${sessionId}:interaction:2`,
+            turnId: "previous-turn",
+            // This turn's message released the previous turn's reflection.
+            reactionTurnId: `${sessionId}:interaction:2`,
           }),
         ]);
       },

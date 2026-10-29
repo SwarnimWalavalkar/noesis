@@ -7,6 +7,7 @@ import {
 import {
   createConditionalObject,
   type CapabilityActivationMode,
+  CapabilityEvidenceClaimSchema,
   type CapabilityDefinition,
   type CapabilityLifecycleRevision,
   type CapabilityRevisionRef,
@@ -19,6 +20,7 @@ import {
   JsonValueSchema,
   type ProjectRef,
   isJsonObject,
+  learnedCapabilitySkillSuffix,
   sha256,
 } from "@noesis/domain";
 import type { ExactCitation, HistoryPort } from "@noesis/intelligence";
@@ -38,7 +40,7 @@ import {
   createCapabilityPublisher,
 } from "./capability-publisher.ts";
 import type { LearningRoleConfiguration, LearningTurnInput } from "./schemas.ts";
-const CapabilityReflectionProposalSchema = z
+export const CapabilityReflectionProposalSchema = z
   .strictObject({
     name: z.string().min(1).max(160),
     /** Accepted only for compatibility with controlled responders written before effects-first authoring. */
@@ -54,6 +56,9 @@ const CapabilityReflectionProposalSchema = z
     activationMode: z.enum(["relevant", "always"]).optional(),
     consequence: CapabilityConsequenceSchema,
     consequenceDescription: z.string().min(1).max(2048),
+    evidence: CapabilityEvidenceClaimSchema.describe(
+      "What supports this lesson: the user's explicit request or correction, the same need in several sessions, or a method that worked. Quote the user's words or the observed result, and say what the user would otherwise have to repeat or correct.",
+    ),
     evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(16),
   })
   .superRefine((proposal, context) => {
@@ -68,24 +73,46 @@ const CapabilityGateChangeSchema = z.strictObject({
   consequence: CapabilityConsequenceSchema,
   consequenceDescription: z.string().min(1).max(2048),
 });
+const CapabilityOutcomeJudgmentSchema = z.strictObject({
+  capabilityId: z.string().min(1),
+  result: z.enum(["helped", "hurt", "unclear"]),
+  reason: z.string().min(1).max(1024),
+});
+/** Judgments for the Capabilities listed in capabilities_in_use. Allowed with every decision. */
+const OutcomeFields = {
+  outcomes: z
+    .array(CapabilityOutcomeJudgmentSchema)
+    .max(16)
+    .optional()
+    .describe(
+      "One judgment for each Capability in capabilities_in_use that the reaction lets you judge: helped, hurt, or unclear.",
+    ),
+};
 export const CapabilityReflectionOutputSchema = z.discriminatedUnion("decision", [
-  z.strictObject({ decision: z.literal("no_change"), reason: z.string().min(1).max(2048) }),
-  z.strictObject({ decision: z.literal("create"), proposal: CapabilityReflectionProposalSchema }),
+  z.strictObject({ decision: z.literal("no_change"), reason: z.string().min(1).max(2048), ...OutcomeFields }),
+  z.strictObject({
+    decision: z.literal("create"),
+    proposal: CapabilityReflectionProposalSchema,
+    ...OutcomeFields,
+  }),
   z.strictObject({
     decision: z.literal("revise"),
     capabilityId: z.string().min(1),
     proposal: CapabilityReflectionProposalSchema,
+    ...OutcomeFields,
   }),
   z.strictObject({
     decision: z.literal("pause"),
     capabilityId: z.string().min(1),
     reason: z.string().min(1).max(2048),
+    ...OutcomeFields,
   }),
   z.strictObject({
     decision: z.literal("restore"),
     capabilityId: z.string().min(1),
     capabilityRevisionId: z.string().min(1),
     reason: z.string().min(1).max(2048),
+    ...OutcomeFields,
   }),
   z.strictObject({
     decision: z.literal("change_binding"),
@@ -93,8 +120,11 @@ export const CapabilityReflectionOutputSchema = z.discriminatedUnion("decision",
     scope: CapabilityScopeDecisionSchema,
     activationMode: z.enum(["relevant", "always"]),
     reason: z.string().min(1).max(2048),
+    ...OutcomeFields,
   }),
 ]);
+/** A revision with this many harmful uses and no helpful use is paused without waiting for the user. */
+const AUTOMATIC_PAUSE_HURT_COUNT = 2;
 export type CapabilityReflectionOutput = Readonly<z.infer<typeof CapabilityReflectionOutputSchema>>;
 export type { CapabilityProgramLibrary } from "./capability-publisher.ts";
 export interface CapabilityLearningTurn {
@@ -191,7 +221,7 @@ function roleRequest(
     signal,
   });
 }
-function publicationProposal(
+export function publicationProposal(
   proposal: z.infer<typeof CapabilityReflectionProposalSchema>,
 ): CapabilityProposal {
   const effects =
@@ -211,6 +241,7 @@ function publicationProposal(
       effects,
       consequence: proposal.consequence,
       consequenceDescription: proposal.consequenceDescription,
+      evidence: proposal.evidence,
     } as const)
       .addOptional(proposal.scope ? { scope: proposal.scope } : undefined)
       .addOptional(proposal.activationMode ? { activationMode: proposal.activationMode } : undefined)
@@ -283,7 +314,7 @@ function currentCapabilitiesMessage(
   }
   return canonicalJson({ capabilities: [], omittedCount: definitions.length });
 }
-function citedEvidence(
+export function citedEvidence(
   indexes: readonly number[],
   citations: readonly ExactCitation[],
 ): readonly EvidenceRef[] {
@@ -342,10 +373,41 @@ function boundedText(value: string, maximumCharacters: number): string | JsonObj
     truncated: true,
   });
 }
+interface ExchangeReaction {
+  readonly messageId: string;
+  readonly content: string;
+  readonly createdAt: string;
+}
+/**
+ * The user's next message in the session after the reflected turn. It is the user's reaction to
+ * that turn, so the reflector can judge the turn by what the user did next.
+ */
+async function exchangeReaction(
+  workspace: NoesisWorkspaceStore,
+  turn: LearningTurnInput,
+): Promise<ExchangeReaction | undefined> {
+  const messages = await workspace.operational.messages.listForSession(turn.sessionId);
+  const next = messages
+    .filter(
+      (message) =>
+        message.role === "user" &&
+        message.sensitivity === "normal" &&
+        message.metadata["turnId"] !== turn.turnId &&
+        message.metadata["origin"] !== "collaboration" &&
+        message.createdAt > turn.occurredAt,
+    )
+    .sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) || left.messageId.localeCompare(right.messageId),
+    )[0];
+  if (!next) return undefined;
+  return Object.freeze({ messageId: next.messageId, content: next.content, createdAt: next.createdAt });
+}
 function settledTurnMessage(
   input: CapabilityLearningTurn & {
     readonly feedback?: string;
   },
+  reaction: ExchangeReaction | undefined,
 ): string {
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const encoded = canonicalJson(
@@ -371,6 +433,13 @@ function settledTurnMessage(
       .addOptional(input.feedback ? { explicitFeedback: boundedText(input.feedback, 1000) } : undefined)
       .add({
         outcome: input.turn.outcome,
+        cause: input.turn.cause ?? "unrecorded",
+        reaction: reaction
+          ? { kind: "next_user_message", content: boundedText(reaction.content, 3000) }
+          : {
+              kind: "none",
+              note: "The user has not replied. The session went idle or ended after this turn.",
+            },
         occurredAt: input.turn.occurredAt,
         sensitivity: input.turn.sensitivity,
         telemetry: input.turn.telemetry,
@@ -693,6 +762,7 @@ function foregroundCapabilitySurfaceMessage(
     readonly lifecycle?: CapabilityLifecycleRevision;
   }[],
   currentTurnEvidence: readonly ReflectionCitationCandidate[],
+  onDemandCapabilityIds: ReadonlySet<string>,
 ): string {
   const loadedSkillNames = new Set(
     currentTurnEvidence.flatMap((candidate) =>
@@ -707,7 +777,7 @@ function foregroundCapabilitySurfaceMessage(
   const contract = Object.freeze({
     authority: "Derived from the exact Capability revisions selected for the settled foreground turn.",
     instruction:
-      "A selected effect skill starts as name-and-description metadata only. One completed skills.load is the expected transition that exposes its full frozen body; immutable bytes in the turn plan or reflector context do not make that load redundant.",
+      "A relevant Capability starts as name-and-description metadata only: its instructions form one learned-capability skill, and its skill effects are separate skills. One completed skills.load exposes a full frozen body. An always Capability's instructions are in the system prompt. Immutable bytes in the turn plan or reflector context do not mean the foreground model read them.",
   });
   const capabilities: unknown[] = [];
   const encode = (projected: readonly unknown[]): string =>
@@ -738,10 +808,21 @@ function foregroundCapabilitySurfaceMessage(
       effects.length > 0
         ? effects.map((effect) => {
             if (effect.kind === "instruction")
-              return Object.freeze({
-                kind: effect.kind,
-                initialForegroundExposure: "full_content_in_system_prompt",
-              });
+              return onDemandCapabilityIds.has(lifecycle.reference.capabilityId)
+                ? Object.freeze({
+                    kind: effect.kind,
+                    initialForegroundExposure: "name_and_description_only",
+                    fullBodyExposure: "after_completed_skills.load",
+                    loadedDuringSettledTurn: [...loadedSkillNames].some(
+                      (name) =>
+                        name.startsWith("learned-") &&
+                        name.endsWith(`-${learnedCapabilitySkillSuffix(lifecycle.reference.capabilityId)}`),
+                    ),
+                  })
+                : Object.freeze({
+                    kind: effect.kind,
+                    initialForegroundExposure: "full_content_in_system_prompt",
+                  });
             if (effect.kind === "skill")
               return Object.freeze({
                 kind: effect.kind,
@@ -831,6 +912,102 @@ export function createCapabilityLearningModule(
       now,
       nextId,
     });
+  /**
+   * Records the reflector's judgments for Capabilities the turn used, then pauses a revision that
+   * has hurt twice and never helped. Judgments about Capabilities the turn did not use are ignored.
+   */
+  const recordOutcomes = async (request: {
+    readonly input: CapabilityLearningTurn;
+    readonly decision: CapabilityReflectionOutput;
+    readonly inUse: readonly { readonly reference: CapabilityRevisionRef }[];
+    readonly reaction: ExchangeReaction | undefined;
+    readonly bindingById: ReadonlyMap<string, import("@noesis/domain").CapabilityBinding>;
+    readonly definitionNames: ReadonlyMap<string, string>;
+  }): Promise<CapabilityReflectionResult | undefined> => {
+    const usedRevisions = new Map(
+      request.inUse.map((used) => [used.reference.capabilityId, used.reference] as const),
+    );
+    const judged = (request.decision.outcomes ?? []).filter((outcome) =>
+      usedRevisions.has(outcome.capabilityId),
+    );
+    if (judged.length === 0) return undefined;
+    const evidenceRefs: readonly EvidenceRef[] = Object.freeze([
+      ...request.input.turn.evidenceRefs,
+      ...(request.reaction
+        ? [
+            Object.freeze({
+              kind: "database_row" as const,
+              table: "messages" as const,
+              rowId: request.reaction.messageId,
+            }),
+          ]
+        : []),
+    ]);
+    await options.store.recordOutcomes(
+      judged.flatMap((outcome) => {
+        const revision = usedRevisions.get(outcome.capabilityId);
+        if (!revision) return [];
+        return [
+          Object.freeze({
+            outcomeId: nextId("capability_outcome"),
+            capabilityId: outcome.capabilityId,
+            capabilityRevisionId: revision.capabilityRevisionId,
+            sessionId: request.input.turn.sessionId,
+            turnId: request.input.turn.turnId,
+            result: outcome.result,
+            reason: outcome.reason,
+            evidenceRefs,
+            createdAt: now(),
+          }),
+        ];
+      }),
+    );
+    // The model is already deciding about this Capability, so leave its lifecycle to that decision.
+    const decidedCapabilityId =
+      request.decision.decision === "no_change" || request.decision.decision === "create"
+        ? undefined
+        : request.decision.capabilityId;
+    const hurt = judged.filter(
+      (outcome) => outcome.result === "hurt" && outcome.capabilityId !== decidedCapabilityId,
+    );
+    const records = await options.store.trackRecords(
+      hurt.flatMap((outcome) => {
+        const revision = usedRevisions.get(outcome.capabilityId);
+        return revision ? [revision.capabilityRevisionId] : [];
+      }),
+    );
+    let paused: CapabilityReflectionResult | undefined;
+    for (const outcome of hurt) {
+      const binding = request.bindingById.get(outcome.capabilityId);
+      const revision = usedRevisions.get(outcome.capabilityId);
+      if (!binding || !revision || binding.state !== "active") continue;
+      if (binding.revision.capabilityRevisionId !== revision.capabilityRevisionId) continue;
+      const record = records.get(revision.capabilityRevisionId);
+      if (!record || record.hurt < AUTOMATIC_PAUSE_HURT_COUNT || record.helped > 0) continue;
+      const name = request.definitionNames.get(outcome.capabilityId) ?? outcome.capabilityId;
+      const updated = await options.store.updateBindingWithFeedback({
+        capabilityId: outcome.capabilityId,
+        expectedRevisionNumber: binding.revisionNumber,
+        state: "paused",
+        feedback: Object.freeze({
+          feedbackId: nextId("capability_feedback"),
+          capabilityId: outcome.capabilityId,
+          revision: binding.revision,
+          evidenceRefs,
+          interpretation: `Paused automatically after ${String(record.hurt)} uses that caused problems and none that helped. Latest: ${outcome.reason}`,
+          disposition: "regression" as const,
+          createdAt: now(),
+        }),
+      });
+      if (updated.status === "updated")
+        paused ??= Object.freeze({
+          status: "paused" as const,
+          capabilityId: outcome.capabilityId,
+          message: `Paused "${name}" after ${String(record.hurt)} uses that caused problems`,
+        });
+    }
+    return paused;
+  };
   const reflect = async (
     input: CapabilityLearningTurn & {
       readonly feedback?: string;
@@ -842,6 +1019,11 @@ export function createCapabilityLearningModule(
       return Object.freeze({
         status: "no_change",
         reason: "Secret turns are excluded from ambient capability authoring",
+      });
+    if (input.turn.cause === "failed_before_output" && input.feedback === undefined)
+      return Object.freeze({
+        status: "no_change",
+        reason: "The turn failed before the model produced any output, so it shows nothing about behavior",
       });
     const [history, bindings] = await Promise.all([
       options.history.search({
@@ -882,18 +1064,69 @@ export function createCapabilityLearningModule(
         ),
       );
     }
-    const currentEvidence = await currentTurnCitations(options.workspace, input.turn);
+    const reaction = await exchangeReaction(options.workspace, input.turn);
+    const turnEvidence = await currentTurnCitations(options.workspace, input.turn);
+    const currentEvidence: readonly ReflectionCitationCandidate[] = reaction
+      ? Object.freeze([
+          ...turnEvidence,
+          Object.freeze({
+            citation: exactCitation(
+              Object.freeze({
+                kind: "database_row",
+                table: "messages",
+                rowId: reaction.messageId,
+                field: "content",
+              }),
+              reaction.createdAt,
+              reaction.content,
+            ),
+            kind: "message" as const,
+            priority: 0,
+          }),
+        ])
+      : turnEvidence;
     const evidence = reflectionEvidencePacket(
       currentEvidence,
       history.hits.map((hit) => hit.citation),
     );
     const citations = evidence.citations;
+    const bindingById = new Map(bindings.map((binding) => [binding.capabilityId, binding] as const));
+    const definitionNames = new Map(
+      definitions.map((definition) => [definition.capabilityId, definition.name] as const),
+    );
+    const loadedSkillNames = new Set(
+      currentEvidence.flatMap((candidate) =>
+        candidate.kind === "tool_call" &&
+        candidate.toolName === "skills.load" &&
+        candidate.toolStatus === "completed" &&
+        candidate.skillName
+          ? [candidate.skillName]
+          : [],
+      ),
+    );
+    // A Capability was used when its text was in the prompt, or when the model loaded its skill.
+    const inUse = exactSelectedTurnRevisions.flatMap(({ reference, lifecycle }) => {
+      const binding = bindingById.get(reference.capabilityId);
+      if (!binding || !lifecycle) return [];
+      const suffix = `-${learnedCapabilitySkillSuffix(reference.capabilityId)}`;
+      const loaded =
+        [...loadedSkillNames].some((name) => name.startsWith("learned-") && name.endsWith(suffix)) ||
+        capabilityEffects(lifecycle.revision).some(
+          (effect) => effect.kind === "skill" && loadedSkillNames.has(effect.name),
+        );
+      const how =
+        binding.activationMode === "always" ? "always_in_prompt" : loaded ? "loaded_by_model" : undefined;
+      return how === undefined ? [] : [Object.freeze({ reference, how })];
+    });
+    const inUseRecords = await options.store.trackRecords(
+      inUse.map((used) => used.reference.capabilityRevisionId),
+    );
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const messages: readonly AgentMessage[] = Object.freeze([
       Object.freeze({
         role: "user" as const,
         name: "settled_turn",
-        content: settledTurnMessage(input),
+        content: settledTurnMessage(input, reaction),
       }),
       Object.freeze({
         role: "user" as const,
@@ -908,7 +1141,15 @@ export function createCapabilityLearningModule(
       Object.freeze({
         role: "user" as const,
         name: "foreground_capability_surface",
-        content: foregroundCapabilitySurfaceMessage(exactSelectedTurnRevisions, currentEvidence),
+        content: foregroundCapabilitySurfaceMessage(
+          exactSelectedTurnRevisions,
+          currentEvidence,
+          new Set(
+            bindings
+              .filter((binding) => binding.activationMode === "relevant")
+              .map((binding) => binding.capabilityId),
+          ),
+        ),
       }),
       Object.freeze({
         role: "user" as const,
@@ -923,6 +1164,25 @@ export function createCapabilityLearningModule(
         role: "user" as const,
         name: "available_saved_programs",
         content: availableProgramsMessage(availablePrograms),
+      }),
+      Object.freeze({
+        role: "user" as const,
+        name: "capabilities_in_use",
+        content: canonicalJson({
+          instruction:
+            "These Capabilities shaped the settled turn. Judge each one from the reaction in outcomes. An empty list means the turn used none.",
+          capabilities: inUse.map((used) => ({
+            capabilityId: used.reference.capabilityId,
+            capabilityRevisionId: used.reference.capabilityRevisionId,
+            name: definitionNames.get(used.reference.capabilityId) ?? used.reference.capabilityId,
+            how: used.how,
+            trackRecord: {
+              helped: inUseRecords.get(used.reference.capabilityRevisionId)?.helped ?? 0,
+              hurt: inUseRecords.get(used.reference.capabilityRevisionId)?.hurt ?? 0,
+              unclear: inUseRecords.get(used.reference.capabilityRevisionId)?.unclear ?? 0,
+            },
+          })),
+        }),
       }),
       Object.freeze({
         role: "user" as const,
@@ -952,7 +1212,7 @@ export function createCapabilityLearningModule(
     };
     const publicationDecision: CapabilityDecision =
       decision.decision === "no_change"
-        ? decision
+        ? Object.freeze({ decision: "no_change" as const, reason: decision.reason })
         : decision.decision === "create"
           ? Object.freeze({
               decision: "create" as const,
@@ -965,10 +1225,37 @@ export function createCapabilityLearningModule(
                 ...existingDecision(decision.capabilityId),
                 proposal: publicationProposal(decision.proposal),
               })
-            : Object.freeze({
-                ...decision,
-                ...existingDecision(decision.capabilityId),
-              });
+            : decision.decision === "pause"
+              ? Object.freeze({
+                  decision: "pause" as const,
+                  capabilityId: decision.capabilityId,
+                  ...existingDecision(decision.capabilityId),
+                  reason: decision.reason,
+                })
+              : decision.decision === "restore"
+                ? Object.freeze({
+                    decision: "restore" as const,
+                    capabilityId: decision.capabilityId,
+                    ...existingDecision(decision.capabilityId),
+                    capabilityRevisionId: decision.capabilityRevisionId,
+                    reason: decision.reason,
+                  })
+                : Object.freeze({
+                    decision: "change_binding" as const,
+                    capabilityId: decision.capabilityId,
+                    ...existingDecision(decision.capabilityId),
+                    scope: decision.scope,
+                    activationMode: decision.activationMode,
+                    reason: decision.reason,
+                  });
+    const automaticPause = await recordOutcomes({
+      input,
+      decision,
+      inUse,
+      reaction,
+      bindingById,
+      definitionNames,
+    });
     const proposal =
       decision.decision === "create" || decision.decision === "revise" ? decision.proposal : undefined;
     const evidenceRefs = proposal
@@ -1002,7 +1289,7 @@ export function createCapabilityLearningModule(
         });
       },
     });
-    return await publisher.publish(
+    const published = await publisher.publish(
       publicationDecision,
       {
         project: input.project,
@@ -1014,6 +1301,8 @@ export function createCapabilityLearningModule(
       },
       signal,
     );
+    // An automatic pause is the change the user most needs to hear about when nothing else changed.
+    return published.status === "no_change" && automaticPause ? automaticPause : published;
   };
   const manage: CapabilityLearningModule["manage"] = async (intent, signal) => {
     signal.throwIfAborted();
@@ -1040,6 +1329,7 @@ export function createCapabilityLearningModule(
           capabilityId: gate.capabilityId,
           message: "Binding changed",
         });
+      await publisher.syncWorkingDocument(gate.capabilityId);
       return Object.freeze({
         status: "activated",
         capabilityId: gate.capabilityId,
@@ -1141,6 +1431,8 @@ export function createCapabilityLearningModule(
               };
     signal.throwIfAborted();
     const updated = await options.store.updateBinding(request);
+    if (intent.type === "restore" && updated.status !== "stale")
+      await publisher.syncWorkingDocument(intent.capabilityId);
     return Object.freeze({
       status:
         updated.status === "stale"

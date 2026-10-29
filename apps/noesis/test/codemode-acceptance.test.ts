@@ -2228,7 +2228,8 @@ describe("production codemode journey", () => {
       env: Object.freeze({}),
       cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
     });
-    const config = resolved;
+    // This test checks that reflection observes the publication, so it skips the reply wait.
+    const config = { ...resolved, reflection: { ...resolved.reflection, idleMinutes: 0 } };
     const controlled = createControlledPiModels({
       respond: ({ context, lastUserText }) => {
         const lastMessage = context.messages.at(-1);

@@ -8,6 +8,7 @@ const DEFAULT_TOTAL_CHARACTERS = 64000;
 const DEFAULT_EVIDENCE_REFS = 64;
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const isolatedRoleMessageNames = {
+  // No longer run. The role stays so older recorded role runs still type-check.
   capability_router: ["turn", "prior_conversation"],
   session_compactor: ["compaction_input"],
   session_titler: ["first_message"],
@@ -19,6 +20,7 @@ const isolatedRoleMessageNames = {
     "foreground_capability_surface",
     "current_capability_materials",
     "available_saved_programs",
+    "capabilities_in_use",
     "current_turn",
     "signals",
     "evidence",
@@ -28,6 +30,7 @@ const isolatedRoleMessageNames = {
     "pending_capability",
     "user_change_request",
   ],
+  session_reviewer: ["session_review", "current_capabilities", "related_history"],
   revision_author: ["hypothesis", "source_cases"],
   case_generator: ["behavioral_objective", "evidence", "user_criteria"],
   trial: ["case", "arm"],

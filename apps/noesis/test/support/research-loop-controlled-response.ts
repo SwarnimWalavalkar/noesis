@@ -6,7 +6,7 @@ import {
 } from "../../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 
 const RolePromptSchema = z.object({
-  role: z.enum(["capability_router", "history_reranker", "reflector"]),
+  role: z.enum(["history_reranker", "reflector"]),
   messages: z.array(z.object({ name: z.string().optional(), content: z.string() })),
   capabilityRevisions: z.array(CapabilityRevisionRefSchema),
 });
@@ -39,11 +39,21 @@ export function researchLoopControlledResponse(
   if (!input.systemPrompt.includes("role:")) {
     const immutableSkill =
       "Produce concise research briefs with explicit evidence, inference, and uncertainty.";
-    if (
-      input.lastUserText.includes("Prepare a research brief") &&
-      input.systemPrompt.includes(immutableSkill)
-    ) {
-      if (!input.context.messages.some((message) => message.role === "toolResult"))
+    // A relevant learned Capability is listed as a skill; the model loads it when it applies.
+    const learnedSkill = /<name>(learned-evidence-grounded-research-briefs-[a-f0-9]{6})<\/name>/u.exec(
+      input.systemPrompt,
+    )?.[1];
+    if (input.lastUserText.includes("Prepare a research brief") && learnedSkill) {
+      const toolResults = input.context.messages.filter((message) => message.role === "toolResult");
+      if (toolResults.length === 0)
+        return controlledToolCallResponse(
+          "execute",
+          { source: `return await tools.skills.load({ name: ${JSON.stringify(learnedSkill)} });` },
+          "acceptance-load-capability",
+        );
+      if (!JSON.stringify(toolResults[0]).includes(immutableSkill))
+        return "The learned Capability skill did not serve its frozen instruction.";
+      if (toolResults.length === 1)
         return controlledToolCallResponse(
           "execute",
           { source: 'return await tools.history.search_sessions({ query: "research brief evidence" });' },
@@ -75,56 +85,6 @@ export function researchLoopControlledResponse(
       })),
     });
   }
-  if (prompt.role === "capability_router") {
-    const turn = z
-      .object({
-        userInput: z.string(),
-        candidates: z.array(
-          z.object({
-            capabilityId: z.string(),
-            name: z.string(),
-            scope: z.string(),
-            intent: z.string(),
-          }),
-        ),
-      })
-      .parse(structuredPayload(namedMessage(prompt, "turn")));
-    const priorConversation = prompt.messages
-      .filter((message) => message.name === "prior_conversation")
-      .map((message) =>
-        z
-          .object({
-            messageId: z.string(),
-            role: z.enum(["user", "assistant"]),
-            content: z.string(),
-            createdAt: z.string(),
-          })
-          .parse(structuredPayload(message.content)),
-      );
-    const semanticContext = [...priorConversation.map((message) => message.content), turn.userInput].join(
-      "\n",
-    );
-    const selected = semanticContext.includes("research brief") ? turn.candidates[0] : undefined;
-    return JSON.stringify({
-      selections: selected
-        ? [
-            {
-              capabilityId: selected.capabilityId,
-              reason: "The current request is meaningfully within the research-brief scope.",
-            },
-          ]
-        : [],
-      reason: selected
-        ? "Selected the active research-brief capability for relevant work."
-        : "No narrow active capability is relevant to this request.",
-      learningAttribution: selected
-        ? {
-            capabilityId: selected.capabilityId,
-            reason: "The research-brief capability is the primary context for learning from this turn.",
-          }
-        : null,
-    });
-  }
   if (prompt.role === "reflector") {
     const settled = z.object({ userMessage: z.string() }).parse(parsedMessage(prompt, "settled_turn"));
     const current = z
@@ -152,6 +112,11 @@ export function researchLoopControlledResponse(
           activationMode: "relevant",
           consequence: "ordinary",
           consequenceDescription: "Only the model instruction changes.",
+          evidence: {
+            kind: "user_correction",
+            quote: "The user stated how this work should be done from now on.",
+            wouldOtherwise: "The user would repeat the same correction in later sessions.",
+          },
           evidenceCitationIndexes: [0],
         },
       });
@@ -175,6 +140,11 @@ export function researchLoopControlledResponse(
         activationMode: "relevant",
         consequence: "ordinary",
         consequenceDescription: "Only the model instruction changes.",
+        evidence: {
+          kind: "user_correction",
+          quote: "The user stated how this work should be done from now on.",
+          wouldOtherwise: "The user would repeat the same correction in later sessions.",
+        },
         evidenceCitationIndexes: [0],
       },
     });

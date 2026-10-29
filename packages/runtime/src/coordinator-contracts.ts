@@ -3,6 +3,7 @@ import {
   CapabilityRevisionRefSchema,
   CapabilitySchema,
   type DatabaseRowRef,
+  type DurableJobListCursor,
   type DurableJobRecord,
   durableJobFailureError,
   type EvidenceRef,
@@ -263,6 +264,21 @@ export interface CoordinatorJobView {
   readonly job: DurableJobRecord;
   readonly kind: CoordinatorJobKind;
   readonly payload: ReflectTurnJobPayload | AuthorRevisionJobPayload | PreflightJobPayload;
+}
+
+/** Paged read access to recorded coordinator jobs for learning read models. */
+export interface CoordinatorJobPageReader {
+  readonly listJobPage: (request?: {
+    readonly kind?: CoordinatorJobKind;
+    readonly limit?: number;
+    readonly after?: DurableJobListCursor;
+    readonly sessionId?: string;
+    readonly experimentIds?: readonly string[];
+  }) => Promise<{
+    readonly jobs: readonly CoordinatorJobView[];
+    readonly exhausted: boolean;
+    readonly nextCursor?: DurableJobListCursor;
+  }>;
 }
 
 export interface PreflightActivationHandoff {

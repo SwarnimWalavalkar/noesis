@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveNoesisConfig } from "@noesis/config";
+import { resolveNoesisConfig, type ResolvedNoesisConfig } from "@noesis/config";
 import { createPiAgentRoleRunner, createPiAgentRuntime } from "@noesis/runtime-pi";
 import { afterEach, describe, expect, test } from "vitest";
 import { z } from "zod";
@@ -19,15 +19,21 @@ afterEach(async () => {
   await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true })));
 });
 
+/** These tests check reflection itself, so they skip the wait for the user's reply. */
+function reflectImmediately(config: ResolvedNoesisConfig): ResolvedNoesisConfig {
+  return { ...config, reflection: { ...config.reflection, idleMinutes: 0 } };
+}
 describe("credential-free Pi application acceptance", () => {
   test("creates, routes, revises, pauses, and restores exact Capabilities through AgentHarness", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-controlled-pi-loop-"));
     homes.push(home);
-    const config = await resolveNoesisConfig({
-      home,
-      env: Object.freeze({}),
-      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
-    });
+    const config = reflectImmediately(
+      await resolveNoesisConfig({
+        home,
+        env: Object.freeze({}),
+        cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+      }),
+    );
     const controlled = createControlledPiModels({
       respond: researchLoopControlledResponse,
       responseBudget: 200,
@@ -131,11 +137,19 @@ describe("credential-free Pi application acceptance", () => {
 
       const unrelatedSession = await runtime.startTrail({ title: "Unrelated return" });
       const unrelated = await runtime.debug.runTurn(unrelatedSession.trailId, "Draft a meeting agenda.");
+      // The Capability is listed for every turn, and the model loads it only for related work.
       expect(
-        unrelated.frozenTurnPlan?.selectedCapabilities.some(
+        unrelated.frozenTurnPlan?.selectedCapabilities.find(
           (selection) => selection.capabilityId === definition.capabilityId,
-        ),
-      ).toBe(false);
+        )?.delivery,
+      ).toBe("on_demand");
+      expect(unrelated.frozenTurnPlan?.renderedSystemPrompt).not.toContain("Produce concise research briefs");
+      const loadedSkills = async (sessionId: string) =>
+        (await runtime.debug.workspace.operational.toolCalls.listForSession(sessionId)).filter(
+          (toolCall) => toolCall.toolName === "skills.load",
+        );
+      expect(await loadedSkills(relatedSession.trailId)).toHaveLength(1);
+      expect(await loadedSkills(unrelatedSession.trailId)).toHaveLength(0);
 
       await runtime.debug.runTurn(
         relatedSession.trailId,

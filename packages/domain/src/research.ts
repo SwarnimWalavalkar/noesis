@@ -260,7 +260,36 @@ export interface CapabilityLifecycleRevision {
   readonly summary: string;
   readonly rationale: string;
   readonly anticipatedEffect: string;
+  readonly evidence?: CapabilityEvidenceClaim;
   readonly createdAt: string;
+}
+
+/** How a Capability did in one turn that used it, as judged by reflection on that exchange. */
+export interface CapabilityOutcome {
+  readonly outcomeId: string;
+  readonly capabilityId: string;
+  readonly capabilityRevisionId: string;
+  readonly sessionId: string;
+  readonly turnId: string;
+  readonly result: "helped" | "hurt" | "unclear";
+  readonly reason: string;
+  readonly evidenceRefs: readonly EvidenceRef[];
+  readonly createdAt: string;
+}
+
+/** Counts of judged outcomes for one Capability revision. */
+export interface CapabilityTrackRecord {
+  readonly capabilityRevisionId: string;
+  readonly helped: number;
+  readonly hurt: number;
+  readonly unclear: number;
+}
+
+/** The authoring model's statement of what supports a learned Capability. */
+export interface CapabilityEvidenceClaim {
+  readonly kind: "explicit_request" | "user_correction" | "repeated_across_sessions" | "verified_method";
+  readonly quote: string;
+  readonly wouldOtherwise: string;
 }
 
 export type CapabilityScope =

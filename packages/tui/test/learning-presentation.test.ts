@@ -151,11 +151,17 @@ describe("working-adjustment notice presentation", () => {
             createdAt: "2026-08-01T00:00:00.000Z",
             updatedAt: "2026-08-01T00:00:00.000Z",
           }),
-        listLearningActivity: async () => Object.freeze([activity("running")]),
+        listLearningActivity: async () =>
+          Object.freeze([
+            // This turn's own reflection waits for the user's reply, so the TUI does not wait on it.
+            Object.freeze({ ...activity("queued"), jobId: "job-held", turnId: "turn-2" }),
+            // This turn's message released the previous turn's reflection.
+            Object.freeze({ ...activity("running"), turnId: "turn-1", reactionTurnId: "turn-2" }),
+          ]),
       },
       {
         trailId: "trail-1",
-        turnId: "turn-1",
+        turnId: "turn-2",
         outcome: "completed",
         contextUsage: undefined,
       },
