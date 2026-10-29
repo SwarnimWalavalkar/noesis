@@ -1213,6 +1213,9 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         continue;
       }
       const result = outcome.result;
+      // The edit is now the current revision, so write its normalized file over the user's bytes.
+      if (result.status === "revised")
+        await syncWorkingDocument(binding.capabilityId, context, { userChoseRevision: true });
       if (result.status === "revised")
         recorded.push({ capabilityId: binding.capabilityId, name: parsed.content.name });
     }

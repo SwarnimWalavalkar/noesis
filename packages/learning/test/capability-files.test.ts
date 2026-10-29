@@ -188,6 +188,12 @@ describe("Capability files", () => {
     expect(await workspace.capabilities.getDefinition(created.capabilityId)).toMatchObject({
       applicability: "Package and script commands.",
     });
+    // The imported edit is the current file now, so the next scan records nothing new.
+    await expect(publisher.recordDocumentEdits(context, new AbortController().signal)).resolves.toEqual({
+      recorded: [],
+      problems: [],
+    });
+    expect((await current(workspace, created.capabilityId)).binding.revision).toEqual(after.binding.revision);
 
     // History lists the newest change first.
     const afterText = new TextDecoder().decode(await workspace.reads.readRevision(after.document));
