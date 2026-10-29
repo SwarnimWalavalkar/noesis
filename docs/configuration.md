@@ -180,7 +180,7 @@ noesis update
 
 The command installs from the current release channel: `latest` for stable versions and `beta` for prereleases. It uses npm's configured global prefix and reports installation errors. Restart Noesis after updating. For older versions without this command, use `npm install --global noesisai@latest`.
 
-If you upgrade from a version that stored Capabilities in the older format, the upgrade resets your learned Capabilities and keeps their text on disk. [Bring back your Capabilities](migrating-capabilities.md) explains how to recreate them.
+If you upgrade from Noesis 0.0.5 or earlier, the upgrade resets your learned Capabilities and keeps their text on disk. [Bring back your Capabilities](migrating-capabilities.md) explains how to recreate them.
 
 Interactive startup checks npm in the background with a three-second timeout. An available update appears below the startup greeting; failed checks stay silent and never block setup or conversation. Set `NOESIS_NO_UPDATE_CHECK=1` to skip the check. Checks do not modify your installation.
 
