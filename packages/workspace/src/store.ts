@@ -1587,8 +1587,21 @@ export async function createWorkspaceStore(
           throw error;
         }
       },
-      latestWorkingRevision: async (workingPath: string) =>
-        latestRevisionFor(pathsForDefinition(workingPath).stored),
+      latestWorkingRevision: async (workingPath: string) => {
+        const revision = latestRevisionFor(pathsForDefinition(workingPath).stored);
+        if (!revision) return undefined;
+        const row = db
+          .prepare("SELECT actor_id, actor_kind FROM file_revisions WHERE revision_id = ?")
+          .get(revision.revisionId);
+        if (!row) return undefined;
+        return Object.freeze({
+          revision,
+          actor: ActorSchema.parse({
+            actorId: requiredString(row, "actor_id"),
+            kind: requiredString(row, "actor_kind"),
+          }),
+        });
+      },
       readRevision: async (ref: FileRevisionRef) => {
         FileRevisionRefSchema.parse(ref);
         const registered = await resolveRevision(ref.revisionId);

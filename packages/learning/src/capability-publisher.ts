@@ -1096,17 +1096,15 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       const path = capabilityWorkingDocumentPath(document);
       const working = await options.workspace.reads.readWorkingFile(path);
       if (!working || sha256(working) === document.contentDigest) continue;
-      // A file that still holds a Capability file Noesis wrote, and nothing recorded since, was never
-      // brought up to date, e.g. Noesis stopped right after publishing. Any edit by the user changes
-      // the bytes away from that record, so it is still imported below, even if it matches an older
-      // revision restored from a backup.
-      const workingDigest = sha256(working);
+      // A file Noesis wrote that was never brought up to date, e.g. Noesis stopped right after
+      // publishing, is synced instead of imported as the user's edit.
+      // Stale only when Noesis's own file sync made the last record at this path and the file still
+      // matches it. A user edit, including bytes restored from a backup, never meets both.
       const lastRecorded = await options.workspace.reads.latestWorkingRevision(path);
       const writtenByNoesis =
-        lastRecorded?.contentDigest === workingDigest &&
-        (await options.store.listRevisions(binding.capabilityId)).some(
-          (revision) => capabilityDocumentRevision(revision)?.contentDigest === workingDigest,
-        );
+        lastRecorded?.actor.actorId === systemActor.actorId &&
+        lastRecorded.actor.kind === systemActor.kind &&
+        lastRecorded.revision.contentDigest === sha256(working);
       if (writtenByNoesis) {
         await syncWorkingDocument(binding.capabilityId, context);
         continue;

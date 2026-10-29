@@ -286,6 +286,57 @@ describe("Capability files", () => {
     ).toBe("Run pnpm, not npm.");
   });
 
+  test("keeps reporting a restored file it cannot apply instead of overwriting it", async () => {
+    const { root, workspace, publisher, context } = await setup();
+    const proposal = {
+      name: "Rules",
+      description: "Rules.",
+      applicability: "Every turn.",
+      summary: "Rules.",
+      rationale: "Fixture.",
+      anticipatedEffect: "None.",
+      effects: [{ kind: "instruction" as const, content: "x".repeat(2_001) }],
+      consequence: "ordinary" as const,
+      consequenceDescription: "Fixture.",
+    };
+    const created = await publisher.publish(
+      { decision: "create", proposal },
+      context,
+      new AbortController().signal,
+    );
+    if (created.status !== "activated") throw new Error("Expected activation");
+    const long = await current(workspace, created.capabilityId);
+    await publisher.publish(
+      {
+        decision: "revise",
+        capabilityId: created.capabilityId,
+        expectedBindingRevision: long.binding.revisionNumber,
+        proposal: {
+          ...proposal,
+          effects: [{ kind: "instruction", content: "Short." }],
+          activationMode: "always",
+        },
+      },
+      context,
+      new AbortController().signal,
+    );
+    const file = join(root, capabilityWorkingDocumentPath(long.document));
+    const restoredBytes = await workspace.reads.readRevision(long.document);
+    await writeFile(file, restoredBytes);
+    for (const _scan of [1, 2]) {
+      const report = await publisher.recordDocumentEdits(context, new AbortController().signal);
+      expect(report.problems).toEqual([
+        expect.objectContaining({
+          capabilityId: created.capabilityId,
+          error: expect.stringContaining("at most 2000"),
+        }),
+      ]);
+      expect(await workspace.reads.readWorkingFile(capabilityWorkingDocumentPath(long.document))).toEqual(
+        restoredBytes,
+      );
+    }
+  });
+
   test("keeps always-active guidance short", async () => {
     const { workspace, publisher, context } = await setup();
     const proposal = {
