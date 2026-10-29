@@ -13,10 +13,8 @@ import { resolveNoesisConfig, type ResolvedNoesisConfig } from "@noesis/config";
 import {
   createConditionalObject,
   EvidenceRevisionRefSchema,
-  eventChecksum,
   type FileRevisionRef,
   type JsonValue,
-  type LedgerEvent,
   type ProjectRef,
   sha256,
 } from "@noesis/domain";
@@ -163,53 +161,6 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>): Promise<v
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })));
 });
-async function writeLegacyCompletedTurn(
-  home: string,
-  runtimeIdentity: string,
-): Promise<{
-  readonly trailId: string;
-  readonly input: string;
-  readonly output: string;
-}> {
-  const trailId = "trail-legacy-import";
-  const input = "Preserve this legitimate history";
-  const output = "Imported legacy completion";
-  const unsignedStart: Omit<LedgerEvent, "checksum"> = {
-    schemaVersion: 1,
-    eventId: "event-legacy-start",
-    sequence: 1,
-    occurredAt: "2026-01-01T00:00:00.000Z",
-    principal: "foreground",
-    type: "trail.started",
-    trailId,
-    payload: {
-      title: "Legacy import",
-      provider: CONTROLLED_PI_PROVIDER,
-      model: CONTROLLED_PI_MODEL,
-      runtime: runtimeIdentity,
-    },
-    previousChecksum: null,
-  };
-  const start: LedgerEvent = { ...unsignedStart, checksum: eventChecksum(unsignedStart) };
-  const unsignedTurn: Omit<LedgerEvent, "checksum"> = {
-    schemaVersion: 1,
-    eventId: "event-legacy-turn",
-    sequence: 2,
-    occurredAt: "2026-01-01T00:01:00.000Z",
-    principal: "foreground",
-    type: "turn.completed",
-    trailId,
-    payload: { input, output },
-    previousChecksum: start.checksum,
-  };
-  const turn: LedgerEvent = { ...unsignedTurn, checksum: eventChecksum(unsignedTurn) };
-  await mkdir(join(home, "ledger"), { recursive: true });
-  await writeFile(
-    join(home, "ledger", "events.jsonl"),
-    `${[start, turn].map((event) => JSON.stringify(event)).join("\n")}\n`,
-  );
-  return Object.freeze({ trailId, input, output });
-}
 describe("apps/noesis production control-plane composition", () => {
   test("compacts durable history into a frozen checkpoint while preserving the complete transcript", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-context-compaction-"));
@@ -756,51 +707,6 @@ describe("apps/noesis production control-plane composition", () => {
       workspace.close();
     }
   });
-  test("starts from marked SQLite authority without parsing corrupted abandoned JSONL", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-app-marked-corrupt-legacy-"));
-    roots.push(home);
-    const config = await resolveNoesisConfig({
-      home,
-      env: Object.freeze({}),
-      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
-    });
-    const controlled = createControlledPiModels();
-    const first = await createApplicationRuntimeComposition({
-      config,
-      createAgent: (codeExecution) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
-      createRoleRunner: (configurations) =>
-        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
-    });
-    const trail = await first.startTrail({ title: "SQLite-authoritative session" });
-    if (!first.setTrailThinkingLevel) throw new Error("reasoning control unavailable");
-    await first.setTrailThinkingLevel(trail.trailId, "medium");
-    await first.debug.workspace.operational.messages.put({
-      messageId: "sqlite-authoritative-session-marker",
-      sessionId: trail.trailId,
-      role: "system",
-      content: "Keep this non-empty session for the SQLite authority check.",
-      sensitivity: "normal",
-      createdAt: "2026-08-25T00:00:00.000Z",
-      metadata: Object.freeze({}),
-    });
-    await first.shutdown();
-    await mkdir(join(home, "ledger"), { recursive: true });
-    await writeFile(join(home, "ledger", "events.jsonl"), "{ definitely not valid JSONL\n");
-    const reopened = await createApplicationRuntimeComposition({
-      config,
-      createAgent: (codeExecution) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
-      createRoleRunner: (configurations) =>
-        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
-    });
-    expect(reopened.getTrail(trail.trailId)).toMatchObject({
-      trailId: trail.trailId,
-      title: "SQLite-authoritative session",
-      thinkingLevel: "medium",
-    });
-    await reopened.shutdown();
-  });
   test("purges empty sessions and keeps deleted conversations out of resume after restart", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-session-deletion-"));
     roots.push(home);
@@ -841,32 +747,6 @@ describe("apps/noesis production control-plane composition", () => {
       metadata: { deletedAt: expect.any(String) },
     });
     await reopened.shutdown();
-  });
-  test("imports completed pre-marker legacy turns once and retains them for resume", async () => {
-    const home = await mkdtemp(join(tmpdir(), "noesis-app-pre-marker-import-"));
-    roots.push(home);
-    const config = await resolveNoesisConfig({
-      home,
-      env: Object.freeze({}),
-      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
-    });
-    const controlled = createControlledPiModels();
-    const runtimeIdentity = createPiAgentRuntime(process.cwd(), controlled.models).name;
-    const legacy = await writeLegacyCompletedTurn(home, runtimeIdentity);
-    const runtime = await createApplicationRuntimeComposition({
-      config,
-      createAgent: (codeExecution) =>
-        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
-      createRoleRunner: (configurations) =>
-        createPiAgentRoleRunner(process.cwd(), controlled.models, configurations),
-    });
-    expect(runtime.getTrail(legacy.trailId).turns).toEqual([
-      {
-        input: legacy.input,
-        output: legacy.output,
-      },
-    ]);
-    await runtime.shutdown();
   });
   test("retains an aborted partial pair in the visible transcript and future frozen context", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-app-aborted-replay-"));

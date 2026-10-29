@@ -25,9 +25,7 @@ type TranscriptPoint = Readonly<{
 }>;
 const optionalTurnId = (metadata: JsonObject): string | undefined => {
   const turnId = metadata["turnId"];
-  if (typeof turnId === "string" && turnId) return turnId;
-  const legacyEventId = metadata["legacyEventId"];
-  return typeof legacyEventId === "string" && legacyEventId ? legacyEventId : undefined;
+  return typeof turnId === "string" && turnId ? turnId : undefined;
 };
 const inheritedHistorySequence = (metadata: JsonObject): number | undefined => {
   if (

@@ -2341,13 +2341,9 @@ describe("production codemode journey", () => {
                 }),
               };
             }
-            return request.runId.startsWith("capability-route-")
-              ? {
-                  text: '{"selections":[],"reason":"Controlled routing omission.","learningAttribution":null}',
-                }
-              : {
-                  text: '{"decision":"no_change","reason":"The foreground agent already published the deliberate refinement."}',
-                };
+            return {
+              text: '{"decision":"no_change","reason":"The foreground agent already published the deliberate refinement."}',
+            };
           },
         }),
     });

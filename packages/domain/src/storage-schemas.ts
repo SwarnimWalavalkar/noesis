@@ -24,13 +24,6 @@ export const DatabaseRowRefSchema = z.strictObject({
   rowId: z.string().min(1),
 });
 
-export const databaseRowRefSchema = <Table extends (typeof DATABASE_TABLES)[number]>(table: Table) =>
-  z.strictObject({
-    kind: z.literal("database_row"),
-    table: z.literal(table),
-    rowId: z.string().min(1),
-  });
-
 export const FileRevisionRefSchema = z.strictObject({
   kind: z.literal("file_revision"),
   revisionId: z.string().min(1),

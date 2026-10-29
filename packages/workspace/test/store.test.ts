@@ -3,16 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { type FrozenTurnPlan, frozenTurnPlanDigest } from "@noesis/agent-types";
-import {
-  createConditionalObject,
-  canonicalJson,
-  effectOperationFingerprint,
-  eventChecksum,
-  type JsonValue,
-  type LedgerEvent,
-  SCHEMA_VERSION,
-  sha256,
-} from "@noesis/domain";
+import { createConditionalObject, canonicalJson, type JsonValue, sha256 } from "@noesis/domain";
 import type { AuthorityReceipt } from "@noesis/policy";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { createWorkspaceStore, type NoesisWorkspaceStore, restoreWorkspaceBackup } from "../src/index.ts";
@@ -1887,7 +1878,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 56 });
+    ).toEqual({ version: 57 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -2517,7 +2508,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 56,
+      version: 57,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2622,7 +2613,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 56,
+      version: 57,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2722,7 +2713,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 56,
+      version: 57,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     for (const table of [
@@ -2759,6 +2750,79 @@ describe("WorkspaceStore", () => {
         )
         .run(),
     ).toThrow(/immutable/u);
+    upgraded.close();
+  });
+  test("migration 57 drops legacy import records and keeps authority operations", async () => {
+    const root = await temporary("remove-legacy-import");
+    const { database } = await seedWorkspaceThroughMigration(root, 56);
+    const at = "2026-07-26T00:00:00.000Z";
+    database
+      .prepare(`INSERT INTO import_runs(source_id, source_root, source_digest, imported_at, report_json)
+        VALUES ('source', '/old', ?, ?, '{}')`)
+      .run(digest("a"), at);
+    database
+      .prepare(`INSERT INTO operational_cutovers(cutover_name, cutover_version, source_digest, completed_at)
+        VALUES ('workspace-operational-authority', 1, ?, ?)`)
+      .run(digest("a"), at);
+    database
+      .prepare(`INSERT INTO authority_grants(
+          grant_id, principal, effects_json, resource_prefixes_json, expires_at, max_uses, max_cost,
+          issued_at, source_event_id
+        ) VALUES ('grant-old', 'scheduler', '["execute"]', '["job:"]', '2027-01-01T00:00:00.000Z', 2, 2, ?,
+          'event-grant')`)
+      .run(at);
+    database
+      .prepare(`INSERT INTO authority_operations(
+          operation_id, idempotency_key, operation_fingerprint, principal, effect, resource,
+          request_digest, estimated_cost, grant_id, status, result_json, failure, receipt_lineage_id,
+          source_event_id, created_at, updated_at
+        ) VALUES ('operation-old', 'key-old', ?, 'scheduler', 'execute', 'job:old', ?, 1, 'grant-old',
+          'completed', '"done"', NULL, 'receipt-old', 'event-operation', ?, ?)`)
+      .run(digest("b"), digest("c"), at, at);
+    database.close();
+
+    const store = await createWorkspaceStore(root);
+    store.close();
+    const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
+      version: 57,
+    });
+    expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(
+      upgraded
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('import_runs', 'operational_cutovers')",
+        )
+        .all(),
+    ).toEqual([]);
+    for (const table of ["authority_grants", "authority_operations"])
+      expect(
+        upgraded
+          .prepare(`SELECT name FROM pragma_table_info('${table}') WHERE name = 'source_event_id'`)
+          .all(),
+      ).toEqual([]);
+    expect(upgraded.prepare("SELECT grant_id, max_uses FROM authority_grants").all()).toEqual([
+      { grant_id: "grant-old", max_uses: 2 },
+    ]);
+    expect(
+      upgraded
+        .prepare("SELECT operation_id, grant_id, status, receipt_lineage_id FROM authority_operations")
+        .all(),
+    ).toEqual([
+      {
+        operation_id: "operation-old",
+        grant_id: "grant-old",
+        status: "completed",
+        receipt_lineage_id: "receipt-old",
+      },
+    ]);
+    expect(
+      upgraded
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'authority_operations_grant'",
+        )
+        .all(),
+    ).toEqual([{ name: "authority_operations_grant" }]);
     upgraded.close();
   });
   test("upgrades an old version-20 workspace through corrected execution lineage contracts", async () => {
@@ -2844,7 +2908,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(56);
+    expect(versions.at(-1)).toBe(57);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",
@@ -2998,7 +3062,7 @@ describe("WorkspaceStore", () => {
       const jobId = `active-filler-${String(index).padStart(4, "0")}`;
       await store.jobs.enqueue({
         jobId,
-        kind: "runtime.author_revision",
+        kind: "test.bulk_job",
         payload: Object.freeze({}),
         payloadRefs: Object.freeze([]),
         operationId: `operation:${jobId}`,
@@ -3011,7 +3075,7 @@ describe("WorkspaceStore", () => {
     }
     await store.jobs.enqueue({
       jobId: "active-transition-target",
-      kind: "runtime.preflight",
+      kind: "test.transition_job",
       payload: Object.freeze({}),
       payloadRefs: Object.freeze([]),
       operationId: "operation:active-transition-target",
@@ -3026,13 +3090,13 @@ describe("WorkspaceStore", () => {
       now: new Date(start + 3000).toISOString(),
       leaseUntil: new Date(start + 4000).toISOString(),
       maximumCost: 1,
-      kinds: ["runtime.preflight"],
+      kinds: ["test.transition_job"],
     });
     if (!claimed?.leaseToken) throw new Error("Expected transition target lease");
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const filter = {
       statuses: ["scheduled", "running"] as const,
-      kinds: ["runtime.author_revision", "runtime.preflight"] as const,
+      kinds: ["test.bulk_job", "test.transition_job"] as const,
       limit: 1000,
     };
     const first = await store.jobs.listPage(filter);
@@ -3223,21 +3287,6 @@ describe("WorkspaceStore", () => {
       ).toBe(false);
       return null;
     });
-    store.close();
-  });
-  test("writes the operational cutover marker only after strict legacy validation", async () => {
-    const root = await temporary("strict-cutover");
-    await mkdir(join(root, "ledger"), { recursive: true });
-    await writeFile(join(root, "ledger", "events.jsonl"), "{ definitely-not-json }\n");
-    const store = await createWorkspaceStore(root);
-    await expect(store.cutoverLegacyOperationalAuthority(root, actor)).rejects.toThrow(
-      "malformed legacy journal line 1",
-    );
-    const database = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
-    expect(database.prepare("SELECT count(*) AS count FROM operational_cutovers").get()).toMatchObject({
-      count: 0,
-    });
-    database.close();
     store.close();
   });
   test("rolls back repository activity when a foreign-key write fails", async () => {
@@ -4514,75 +4563,6 @@ describe("WorkspaceStore", () => {
     expect(missingBackup.missingFiles).toContain(artifact.path);
     restoredStore.close();
   });
-  test("imports a legacy home once without continuing dual writes", async () => {
-    const legacyRoot = await temporary("legacy");
-    const workspaceRoot = await temporary("imported");
-    await mkdir(join(legacyRoot, "ledger"), { recursive: true });
-    await mkdir(join(legacyRoot, "views"), { recursive: true });
-    await writeFile(join(legacyRoot, "config.json"), '{"schemaVersion":1,"agent":{}}\n');
-    await writeFile(join(legacyRoot, "views", "memory.md"), "# Legacy memory\n\nPreserve this.\n");
-    const events = legacyEvents();
-    await writeFile(
-      join(legacyRoot, "ledger", "events.jsonl"),
-      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
-    );
-    const store = await createWorkspaceStore(workspaceRoot);
-    const first = await store.importLegacyWorkspace(legacyRoot, actor);
-    const second = await store.importLegacyWorkspace(legacyRoot, actor);
-    expect(first).toMatchObject({ sessions: 1, messages: 2, outcomes: 1, definitions: 2 });
-    expect(second.alreadyImported).toBe(true);
-    expect(await store.operational.messages.listForSession("trail-legacy")).toHaveLength(2);
-    expect(await readFile(join(store.paths.definitions, "profile-memory", "memory.md"), "utf8")).toContain(
-      "Preserve this",
-    );
-    await writeFile(join(legacyRoot, "views", "memory.md"), "changed after import\n");
-    expect(await readFile(join(store.paths.definitions, "profile-memory", "memory.md"), "utf8")).toContain(
-      "Preserve this",
-    );
-    store.close();
-  });
-  test("cuts over the full legacy authority graph before writing its independent marker", async () => {
-    const legacyRoot = await temporary("legacy-authority");
-    const workspaceRoot = await temporary("authority-cutover");
-    await mkdir(join(legacyRoot, "ledger"), { recursive: true });
-    const events = legacyAuthorityEvents();
-    await writeFile(
-      join(legacyRoot, "ledger", "events.jsonl"),
-      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
-    );
-    const store = await createWorkspaceStore(workspaceRoot);
-    const first = await store.cutoverLegacyOperationalAuthority(legacyRoot, actor);
-    const second = await store.cutoverLegacyOperationalAuthority(legacyRoot, actor);
-    expect(first).toMatchObject({
-      cutoverVersion: 1,
-      alreadyCompleted: false,
-    });
-    expect(second).toMatchObject({
-      cutoverVersion: 1,
-      alreadyCompleted: true,
-      sourceDigest: first.sourceDigest,
-    });
-    const database = new DatabaseSync(store.unsafeDatabasePathForTesting, { readOnly: true });
-    expect(
-      database.prepare("SELECT principal FROM authority_grants WHERE grant_id = 'grant-legacy'").get(),
-    ).toMatchObject({ principal: "scheduler" });
-    expect(
-      database
-        .prepare(
-          "SELECT status, result_json, receipt_lineage_id FROM authority_operations WHERE operation_id = 'operation-legacy'",
-        )
-        .get(),
-    ).toMatchObject({
-      status: "completed",
-      result_json: '"legacy-result"',
-      receipt_lineage_id: expect.stringMatching(/^legacy_receipt_/u),
-    });
-    expect(database.prepare("SELECT count(*) AS count FROM operational_cutovers").get()).toMatchObject({
-      count: 1,
-    });
-    database.close();
-    store.close();
-  });
   test("rejects partial model usage and workflow context pins while decoding", () => {
     expect(() =>
       decodeModelCall({
@@ -4711,97 +4691,4 @@ function countRows(store: NoesisWorkspaceStore, table: string): number {
   const value = row && typeof row === "object" ? row["count"] : undefined;
   if (typeof value !== "number") throw new Error(`Could not count ${table}`);
   return value;
-}
-function legacyEvents(): readonly LedgerEvent[] {
-  const unsignedStart: Omit<LedgerEvent, "checksum"> = {
-    schemaVersion: SCHEMA_VERSION,
-    eventId: "event-start",
-    sequence: 1,
-    occurredAt: "2026-01-01T00:00:00.000Z",
-    principal: "foreground",
-    type: "trail.started",
-    trailId: "trail-legacy",
-    payload: { title: "Legacy", provider: "fake", model: "fake", runtime: "fake" },
-    previousChecksum: null,
-  };
-  const start: LedgerEvent = { ...unsignedStart, checksum: eventChecksum(unsignedStart) };
-  const unsignedTurn: Omit<LedgerEvent, "checksum"> = {
-    schemaVersion: SCHEMA_VERSION,
-    eventId: "event-turn",
-    sequence: 2,
-    occurredAt: "2026-01-01T00:01:00.000Z",
-    principal: "foreground",
-    type: "turn.completed",
-    trailId: "trail-legacy",
-    payload: { input: "legacy question", output: "legacy answer" },
-    previousChecksum: start.checksum,
-  };
-  return [start, { ...unsignedTurn, checksum: eventChecksum(unsignedTurn) }];
-}
-function legacyAuthorityEvents(): readonly LedgerEvent[] {
-  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-  const identity = {
-    operationId: "operation-legacy",
-    idempotencyKey: "legacy-run-1",
-    principal: "scheduler" as const,
-    effect: "execute" as const,
-    resource: "job:legacy:runtime",
-    requestDigest: digest("a"),
-  };
-  const events: LedgerEvent[] = [];
-  const append = (
-    input: Pick<LedgerEvent, "eventId" | "occurredAt" | "principal" | "type" | "payload">,
-  ): void => {
-    const previous = events.at(-1);
-    const unsigned: Omit<LedgerEvent, "checksum"> = {
-      schemaVersion: SCHEMA_VERSION,
-      eventId: input.eventId,
-      sequence: events.length + 1,
-      occurredAt: input.occurredAt,
-      principal: input.principal,
-      type: input.type,
-      payload: input.payload,
-      previousChecksum: previous?.checksum ?? null,
-    };
-    events.push({ ...unsigned, checksum: eventChecksum(unsigned) });
-  };
-  append({
-    eventId: "event-grant",
-    occurredAt: "2026-01-01T00:00:00.000Z",
-    principal: "system",
-    type: "authority.grant_issued",
-    payload: {
-      grant: {
-        schemaVersion: 1,
-        grantId: "grant-legacy",
-        principal: "scheduler",
-        effects: ["execute"],
-        resourcePrefixes: ["job:legacy:"],
-        expiresAt: "2027-01-01T00:00:00.000Z",
-        maxUses: 2,
-        maxCost: 2,
-      },
-    },
-  });
-  const operation = {
-    ...identity,
-    operationFingerprint: effectOperationFingerprint(identity),
-    estimatedCost: 1,
-    grantId: "grant-legacy",
-  };
-  append({
-    eventId: "event-reserved",
-    occurredAt: "2026-01-01T00:01:00.000Z",
-    principal: "scheduler",
-    type: "effect.reserved",
-    payload: { ...operation, reservationId: "reservation-legacy" },
-  });
-  append({
-    eventId: "event-completed",
-    occurredAt: "2026-01-01T00:02:00.000Z",
-    principal: "scheduler",
-    type: "effect.completed",
-    payload: { ...operation, result: "legacy-result" },
-  });
-  return Object.freeze(events);
 }

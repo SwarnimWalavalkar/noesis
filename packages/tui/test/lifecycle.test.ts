@@ -1108,7 +1108,7 @@ describe("Noesis TUI lifecycle", () => {
 
   test("shows a completed learning change once after its foreground turn", async () => {
     const base = await createRuntime({
-      name: "working-adjustment-notice",
+      name: "learning-change-notice",
       async run(request) {
         return {
           text: `reply:${request.prompt}`,
@@ -1160,7 +1160,7 @@ describe("Noesis TUI lifecycle", () => {
       releaseSecondTurn = resolve;
     });
     const base = await createRuntime({
-      name: "late-working-adjustment-notice",
+      name: "late-learning-change-notice",
       async run(request) {
         runCount += 1;
         if (runCount === 2) {

@@ -955,17 +955,13 @@ function replayEligibleTurnIdsFromOutcomes(
   const eligible = new Set<string>();
   for (const outcome of outcomes) {
     if (!outcome.turnId) continue;
-    const legacyCompleted =
-      typeof outcome.metadata["legacyEventId"] === "string" && outcome.status === "unknown";
-    const modernReplayEligible =
+    const replayEligible =
       outcome.metadata["replayEligible"] === true &&
       outcome.metadata["aborted"] !== true &&
       (outcome.status === "unknown" || outcome.status === "accepted" || outcome.status === "corrected");
-    if (!legacyCompleted && !modernReplayEligible) continue;
-    if (modernReplayEligible) {
-      const turn = turns.get(outcome.turnId);
-      if (!turn || turn.status !== "completed") continue;
-    }
+    if (!replayEligible) continue;
+    const turn = turns.get(outcome.turnId);
+    if (!turn || turn.status !== "completed") continue;
     eligible.add(outcome.turnId);
   }
   return eligible;
@@ -1044,7 +1040,7 @@ function replayHistoryTurnKey(message: MessageRecord): string | undefined {
   const inherited = inheritedReplayKind(message);
   if (inherited === "steer") return undefined;
   if (inherited === "turn") return metadataString(message, "historyTurnKey");
-  const turnId = metadataString(message, "turnId") ?? metadataString(message, "legacyEventId");
+  const turnId = metadataString(message, "turnId");
   return turnId === undefined ? undefined : `${message.sessionId}:${turnId}`;
 }
 function historySequence(message: MessageRecord): number | undefined {
@@ -1141,12 +1137,7 @@ function orderedHistoryMessages(
         const inheritedKind = inheritedReplayKind(message);
         if (inheritedKind === "steer") return message.role === "user";
         if (inheritedKind === "turn") return replayHistoryTurnKey(message) !== undefined;
-        const turnId =
-          typeof message.metadata["turnId"] === "string"
-            ? message.metadata["turnId"]
-            : typeof message.metadata["legacyEventId"] === "string"
-              ? message.metadata["legacyEventId"]
-              : undefined;
+        const turnId = metadataString(message, "turnId");
         return turnId !== undefined && eligibleTurnIds.has(turnId);
       })
       .sort((left, right) => {
@@ -1450,11 +1441,6 @@ export async function createApplicationRuntimeComposition(
     if (!decision.ok) throw new Error(`MCP sampling ${decision.code}: ${decision.reason}`);
     return decision.value;
   });
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  await workspace.cutoverLegacyOperationalAuthority(
-    options.config.home,
-    Object.freeze({ actorId: "operational-cutover", kind: "system" as const }),
-  );
   const roles = await roleConfigurations(workspace, options.config);
   const roleRunner = options.createRoleRunner(Object.freeze(Object.values(roles)));
   const inference = createStructuredInferencePort({ runner: roleRunner, maxRepairAttempts: 1 });

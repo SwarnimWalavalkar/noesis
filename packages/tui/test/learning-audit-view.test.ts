@@ -316,7 +316,7 @@ describe("learning audit view helpers", () => {
         Object.freeze({ identity: "b", label: "USER", excerpt: "second cited preview", redacted: false }),
         Object.freeze({ identity: "c", label: "USER", excerpt: "third cited preview", redacted: false }),
       ]),
-      relations: Object.freeze([{ label: "experiment", targetId: "capability_revision:1" }]),
+      relations: Object.freeze([{ label: "predecessor", targetId: "capability_revision:1" }]),
     });
     expect(interactableStops(withEvidence)).toEqual(["evidence", "inputs", "related"]);
     expect(cycleDetailFocus(withEvidence, "document")).toBe("evidence");

@@ -289,7 +289,7 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
       group: "history",
       status: "observing",
       title: "Use narrower research first",
-      summary: "A project experiment",
+      summary: "A project revision",
       sessionId: "session-2",
       occurredAt: "2026-08-14T00:00:01.000Z",
       rawJson: '{"hypothesis":"Use narrower research first"}',

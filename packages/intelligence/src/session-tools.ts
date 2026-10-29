@@ -147,12 +147,12 @@ function citationStringProjection(
     },
   };
 }
-export const RetrievalStrategyIdSchema = z.enum([
+const RetrievalStrategyIdSchema = z.enum([
   "session-search.fts-only.v1",
   "session-search.hybrid.v1",
   "session-search.conservative.v1",
 ]);
-export type RetrievalStrategyId = z.infer<typeof RetrievalStrategyIdSchema>;
+type RetrievalStrategyId = z.infer<typeof RetrievalStrategyIdSchema>;
 export interface RetrievalStrategyVariant {
   readonly strategyId: RetrievalStrategyId;
   readonly mode: "fts_only" | "hybrid" | "no_retrieval";
@@ -278,7 +278,7 @@ export type SessionToolResult<T> = Result<T, SessionToolError>;
 export interface SessionToolExecutionOptions {
   readonly signal?: AbortSignal;
 }
-export type SessionToolName = "search_sessions" | "open_session_evidence" | "find_similar_tasks";
+type SessionToolName = "search_sessions" | "open_session_evidence" | "find_similar_tasks";
 /** BOUNDARY: The tool broker parses each session-tool input with its adjacent inputSchema. */
 export interface SessionToolDefinition {
   readonly name: SessionToolName;

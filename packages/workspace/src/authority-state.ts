@@ -83,8 +83,8 @@ export function createWorkspaceAuthorityBoundary(
     db.prepare(
       `INSERT INTO authority_grants(
         grant_id, principal, effects_json, resource_prefixes_json, expires_at,
-        max_uses, max_cost, issued_at, source_event_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+        max_uses, max_cost, issued_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       grant.grantId,
       grant.principal,
@@ -137,8 +137,8 @@ export function createWorkspaceAuthorityBoundary(
         `INSERT INTO authority_operations(
           operation_id, idempotency_key, operation_fingerprint, principal, effect, resource,
           request_digest, estimated_cost, grant_id, status, result_json, failure,
-          receipt_lineage_id, source_event_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?)`,
+          receipt_lineage_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, ?, ?)`,
       ).run(
         operation.identity.operationId,
         operation.identity.idempotencyKey,

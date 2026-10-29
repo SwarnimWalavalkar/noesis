@@ -1,4 +1,7 @@
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+// Some names are dropped tables (working adjustments, experiments, feedback signals, preflight,
+// evaluations, activation pointers). Stored provenance and job references may still cite them, and
+// those references must keep decoding and keep failing closed when resolved.
 export const DATABASE_TABLES = [
   "sessions",
   "messages",

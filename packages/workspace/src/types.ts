@@ -742,27 +742,6 @@ export interface RestoreReport {
   readonly missingFiles: readonly string[];
 }
 
-export interface LegacyImportReport {
-  readonly sourceId: string;
-  readonly alreadyImported: boolean;
-  readonly sessions: number;
-  readonly messages: number;
-  readonly toolCalls: number;
-  readonly outcomes: number;
-  readonly jobs: number;
-  readonly definitions: number;
-  readonly artifacts: number;
-  readonly warnings: readonly string[];
-}
-
-export interface OperationalCutoverReport {
-  readonly cutoverName: "workspace-operational-authority";
-  readonly cutoverVersion: 1;
-  readonly sourceDigest: string;
-  readonly alreadyCompleted: boolean;
-  readonly legacyImport: LegacyImportReport;
-}
-
 export interface NoesisWorkspaceStore extends WorkspaceStore {
   readonly paths: WorkspacePaths;
   readonly operational: OperationalRepositories;
@@ -775,11 +754,6 @@ export interface NoesisWorkspaceStore extends WorkspaceStore {
   ) => Promise<FileRevisionRef>;
   readonly inspectIntegrity: () => Promise<IntegrityReport>;
   readonly backup: (backupRoot: string) => Promise<BackupReport>;
-  readonly importLegacyWorkspace: (legacyRoot: string, actor: ActorRef) => Promise<LegacyImportReport>;
-  readonly cutoverLegacyOperationalAuthority: (
-    legacyRoot: string,
-    actor: ActorRef,
-  ) => Promise<OperationalCutoverReport>;
   readonly close: () => void;
   readonly unsafeDatabasePathForTesting: string;
   readonly getArtifactMetadata: (artifactId: string) => Promise<ArtifactFileRef | undefined>;

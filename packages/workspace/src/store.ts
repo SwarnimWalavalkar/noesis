@@ -5,7 +5,7 @@ import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import { link, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -38,9 +38,6 @@ import {
   type EvidenceWriteRequest,
   type FileRevisionRef,
   FileRevisionRefSchema,
-  GrantSchema,
-  type LedgerEvent,
-  LedgerEventSchema,
   sha256,
   type JsonValue,
   JsonValueSchema,
@@ -82,7 +79,6 @@ import {
   SensitivitySchema,
 } from "./decoders.ts";
 import { createProtectedTurnPlanStore } from "./turn-plan-store.ts";
-import { importLegacyWorkspace } from "./importer.ts";
 import { createDurableJobStore } from "./jobs.ts";
 import { createMcpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
 import {
@@ -102,7 +98,6 @@ import type {
   ModelCallRecord,
   NoesisWorkspaceStore,
   OperationalRepositories,
-  OperationalCutoverReport,
   OutcomeRecord,
   SearchCandidate,
   SearchConfiguration,
@@ -131,7 +126,6 @@ const ActorSchema = z.strictObject({
   actorId: z.string().min(1),
   kind: z.enum(["user", "noesis", "external_system", "system"]),
 });
-const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const SearchSourceScopeSchema = z.enum(["session_or_outcome"]) satisfies z.ZodType<SearchSourceScope>;
 // BOUNDARY: Operational identities canonicalize arbitrary adapter payloads into durable JSON.
 const persistedJsonValue = (value: unknown): JsonValue | undefined => {
@@ -166,18 +160,6 @@ const persistedToolCall = (
   response: persistedJsonValue(record.response),
   status: record.status,
   completedAt: record.completedAt ?? null,
-});
-const LegacyImportReportSchema = z.strictObject({
-  sourceId: z.string().min(1),
-  alreadyImported: z.boolean(),
-  sessions: z.number().int().nonnegative(),
-  messages: z.number().int().nonnegative(),
-  toolCalls: z.number().int().nonnegative(),
-  outcomes: z.number().int().nonnegative(),
-  jobs: z.number().int().nonnegative(),
-  definitions: z.number().int().nonnegative(),
-  artifacts: z.number().int().nonnegative(),
-  warnings: z.array(z.string()),
 });
 const databaseRef = <Table extends DatabaseTable>(table: Table, rowId: string): DatabaseRowRef<Table> => ({
   kind: "database_row",
@@ -1098,193 +1080,6 @@ export async function createWorkspaceStore(
     recordActivity,
     assertStoredReference: (reference) => assertStoredReference(db, reference),
   });
-  const cutoverLegacyOperationalAuthority = async (
-    legacyRoot: string,
-    actor: ActorRef,
-  ): Promise<OperationalCutoverReport> => {
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const cutoverName = "workspace-operational-authority" as const;
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const cutoverVersion = 1 as const;
-    const existing = db
-      .prepare(`SELECT source_digest FROM operational_cutovers
-         WHERE cutover_name = ? AND cutover_version = ?`)
-      .get(cutoverName, cutoverVersion);
-    if (existing !== undefined) {
-      const sourceId = sha256(resolve(legacyRoot));
-      const imported = db.prepare("SELECT report_json FROM import_runs WHERE source_id = ?").get(sourceId);
-      const legacyImport =
-        imported === undefined
-          ? Object.freeze({
-              sourceId,
-              alreadyImported: true,
-              sessions: 0,
-              messages: 0,
-              toolCalls: 0,
-              outcomes: 0,
-              jobs: 0,
-              definitions: 0,
-              artifacts: 0,
-              warnings: Object.freeze([
-                "Operational cutover marker exists without a retained legacy import report",
-              ]),
-            })
-          : Object.freeze({
-              ...LegacyImportReportSchema.parse(JSON.parse(requiredString(imported, "report_json"))),
-              alreadyImported: true,
-            });
-      return Object.freeze({
-        cutoverName,
-        cutoverVersion,
-        sourceDigest: requiredString(existing, "source_digest"),
-        alreadyCompleted: true,
-        legacyImport,
-      });
-    }
-    let journalBytes: Uint8Array;
-    try {
-      journalBytes = await readFile(join(legacyRoot, "ledger", "events.jsonl"));
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      journalBytes = new Uint8Array();
-    }
-    const journalText = new TextDecoder("utf8", { fatal: true }).decode(journalBytes);
-    const legacyEvents: LedgerEvent[] = [];
-    for (const [index, line] of journalText.split(/\r?\n/u).entries()) {
-      if (!line.trim()) continue;
-      try {
-        legacyEvents.push(LedgerEventSchema.parse(JSON.parse(line)));
-      } catch (error) {
-        throw new Error(`Operational cutover rejected malformed legacy journal line ${index + 1}`, {
-          cause: error,
-        });
-      }
-    }
-    const sourceDigest = sha256(journalBytes);
-    await createBackup(paths, db, join(paths.root, "backups", "pre-operational-cutover-v1"), now());
-    const legacyImport = await importLegacyWorkspace({
-      legacyRoot,
-      actor,
-      paths,
-      database,
-      now,
-      createId,
-      recordDefinitionBytes,
-      writeArtifact,
-    });
-    const malformedWarning = legacyImport.warnings.find((warning) =>
-      warning.startsWith("Skipped invalid legacy journal line"),
-    );
-    if (malformedWarning) throw new Error(`Operational cutover rejected legacy import: ${malformedWarning}`);
-    database.transaction(() => {
-      for (const event of legacyEvents) {
-        if (event.type === "authority.grant_issued") {
-          const grant = GrantSchema.parse(event.payload["grant"]);
-          db.prepare(`INSERT OR IGNORE INTO authority_grants(
-              grant_id, principal, effects_json, resource_prefixes_json, expires_at,
-              max_uses, max_cost, issued_at, source_event_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-            grant.grantId,
-            grant.principal,
-            JSON.stringify(grant.effects),
-            JSON.stringify(grant.resourcePrefixes),
-            grant.expiresAt,
-            grant.maxUses,
-            grant.maxCost,
-            event.occurredAt,
-            event.eventId,
-          );
-          continue;
-        }
-        if (
-          event.type !== "effect.reserved" &&
-          event.type !== "effect.completed" &&
-          event.type !== "effect.failed" &&
-          event.type !== "effect.denied"
-        )
-          continue;
-        const operationId = z.string().min(1).parse(event.payload["operationId"]);
-        const idempotencyKey = z.string().min(1).parse(event.payload["idempotencyKey"]);
-        const fingerprint = DigestSchema.parse(event.payload["operationFingerprint"]);
-        const principal = z.string().min(1).parse(event.payload["principal"]);
-        const effect = z.string().min(1).parse(event.payload["effect"]);
-        const resource = z.string().min(1).parse(event.payload["resource"]);
-        const requestDigest = DigestSchema.parse(event.payload["requestDigest"]);
-        const estimatedCost = z.number().nonnegative().parse(event.payload["estimatedCost"]);
-        const grantId =
-          event.payload["grantId"] === undefined ? null : z.string().min(1).parse(event.payload["grantId"]);
-        const status =
-          event.type === "effect.completed"
-            ? "completed"
-            : event.type === "effect.failed"
-              ? "failed"
-              : event.type === "effect.denied"
-                ? "denied"
-                : "reserved";
-        const resultJson =
-          event.type === "effect.completed" ? JSON.stringify(event.payload["result"] ?? null) : null;
-        const failure =
-          event.type === "effect.failed" || event.type === "effect.denied"
-            ? z.string().min(1).parse(event.payload["reason"])
-            : null;
-        const lineage =
-          event.type === "effect.completed" || event.type === "effect.failed"
-            ? `legacy_receipt_${sha256(event.eventId).slice(0, 32)}`
-            : null;
-        const existingOperation = db
-          .prepare("SELECT operation_fingerprint, status FROM authority_operations WHERE operation_id = ?")
-          .get(operationId);
-        if (existingOperation !== undefined) {
-          if (requiredString(existingOperation, "operation_fingerprint") !== fingerprint)
-            throw new Error(`Legacy authority operation ${operationId} changed identity`);
-          if (status === "completed" || status === "failed")
-            db.prepare(`UPDATE authority_operations
-               SET status = ?, result_json = ?, failure = ?, receipt_lineage_id = ?, updated_at = ?
-               WHERE operation_id = ? AND status = 'reserved'`).run(
-              status,
-              resultJson,
-              failure,
-              lineage,
-              event.occurredAt,
-              operationId,
-            );
-          continue;
-        }
-        db.prepare(`INSERT INTO authority_operations(
-            operation_id, idempotency_key, operation_fingerprint, principal, effect, resource,
-            request_digest, estimated_cost, grant_id, status, result_json, failure,
-            receipt_lineage_id, source_event_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-          operationId,
-          idempotencyKey,
-          fingerprint,
-          principal,
-          effect,
-          resource,
-          requestDigest,
-          estimatedCost,
-          grantId,
-          status,
-          resultJson,
-          failure,
-          lineage,
-          event.eventId,
-          event.occurredAt,
-          event.occurredAt,
-        );
-      }
-      db.prepare(`INSERT INTO operational_cutovers(
-          cutover_name, cutover_version, source_digest, completed_at
-        ) VALUES (?, ?, ?, ?)`).run(cutoverName, cutoverVersion, sourceDigest, now());
-    });
-    return Object.freeze({
-      cutoverName,
-      cutoverVersion,
-      sourceDigest,
-      alreadyCompleted: false,
-      legacyImport,
-    });
-  };
   const workspace: NoesisWorkspaceStore = Object.freeze({
     paths,
     capabilities,
@@ -1421,18 +1216,6 @@ export async function createWorkspaceStore(
     recordDirectEdit,
     inspectIntegrity: async () => await inspectWorkspaceIntegrity(paths, db),
     backup: async (backupRoot: string) => await createBackup(paths, db, backupRoot, now()),
-    importLegacyWorkspace: async (legacyRoot: string, actor: ActorRef) =>
-      await importLegacyWorkspace({
-        legacyRoot,
-        actor,
-        paths,
-        database,
-        now,
-        createId,
-        recordDefinitionBytes,
-        writeArtifact,
-      }),
-    cutoverLegacyOperationalAuthority,
     close: () => {
       releaseRuntimeOwner();
       database.close();

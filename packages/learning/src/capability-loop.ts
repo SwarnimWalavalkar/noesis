@@ -120,11 +120,8 @@ export interface CapabilityLearningTurn {
   readonly turn: LearningTurnInput;
   readonly project: ProjectRef;
   readonly selectedCapabilities: readonly CapabilityRevisionRef[];
-  /**
-   * Capabilities whose guidance the turn's frozen plan put in the system prompt. Older jobs omit
-   * it, and reflection then falls back to each binding's current mode.
-   */
-  readonly promptCapabilityIds?: readonly string[];
+  /** Capabilities whose guidance the turn's frozen plan put in the system prompt. */
+  readonly promptCapabilityIds: readonly string[];
 }
 /** A publication result, with the reflection model's token usage when a model ran. */
 export type CapabilityReflectionResult = CapabilityPublicationResult & { readonly usage?: AgentUsage };
@@ -173,12 +170,6 @@ export type CapabilityManagementIntent =
 export interface CapabilityLearningModule {
   readonly reflectSettledTurn: (
     turn: CapabilityLearningTurn,
-    signal: AbortSignal,
-  ) => Promise<CapabilityReflectionResult>;
-  readonly iterateOnFeedback: (
-    input: CapabilityLearningTurn & {
-      readonly feedback: string;
-    },
     signal: AbortSignal,
   ) => Promise<CapabilityReflectionResult>;
   readonly manage: (
@@ -388,12 +379,7 @@ async function exchangeReaction(
   if (!next) return undefined;
   return Object.freeze({ messageId: next.messageId, content: next.content, createdAt: next.createdAt });
 }
-function settledTurnMessage(
-  input: CapabilityLearningTurn & {
-    readonly feedback?: string;
-  },
-  reaction: ExchangeReaction | undefined,
-): string {
+function settledTurnMessage(input: CapabilityLearningTurn, reaction: ExchangeReaction | undefined): string {
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const encoded = canonicalJson(
     createConditionalObject({
@@ -415,7 +401,6 @@ function settledTurnMessage(
       .addOptional(
         input.turn.correction ? { correction: boundedText(input.turn.correction, 1000) } : undefined,
       )
-      .addOptional(input.feedback ? { explicitFeedback: boundedText(input.feedback, 1000) } : undefined)
       .add({
         outcome: input.turn.outcome,
         cause: input.turn.cause ?? "unrecorded",
@@ -946,9 +931,7 @@ export function createCapabilityLearningModule(
     return paused;
   };
   const reflect = async (
-    input: CapabilityLearningTurn & {
-      readonly feedback?: string;
-    },
+    input: CapabilityLearningTurn,
     signal: AbortSignal,
   ): Promise<CapabilityReflectionResult> => {
     signal.throwIfAborted();
@@ -957,14 +940,14 @@ export function createCapabilityLearningModule(
         status: "no_change",
         reason: "Secret turns are excluded from ambient capability authoring",
       });
-    if (input.turn.cause === "failed_before_output" && input.feedback === undefined)
+    if (input.turn.cause === "failed_before_output")
       return Object.freeze({
         status: "no_change",
         reason: "The turn failed before the model produced any output, so it shows nothing about behavior",
       });
     const [history, bindings] = await Promise.all([
       options.history.search({
-        query: input.feedback ?? input.turn.correction ?? input.turn.userMessage,
+        query: input.turn.correction ?? input.turn.userMessage,
         sessionScope: Object.freeze({ kind: "previous", currentSessionId: input.turn.sessionId }),
         limit: 8,
         maxExcerptChars: 800,
@@ -1049,9 +1032,7 @@ export function createCapabilityLearningModule(
       const loaded = [...loadedSkillNames].some(
         (name) => name.startsWith("learned-") && name.endsWith(suffix),
       );
-      const inPrompt = input.promptCapabilityIds
-        ? input.promptCapabilityIds.includes(reference.capabilityId)
-        : binding.activationMode === "always";
+      const inPrompt = input.promptCapabilityIds.includes(reference.capabilityId);
       const how = inPrompt ? "always_in_prompt" : loaded ? "loaded_by_model" : undefined;
       return how === undefined ? [] : [Object.freeze({ reference, lifecycle, how })];
     });
@@ -1103,16 +1084,11 @@ export function createCapabilityLearningModule(
         content: foregroundCapabilitySurfaceMessage(
           exactSelectedTurnRevisions,
           currentEvidence,
-          // The frozen plan says which Capabilities were delivered on demand; older jobs fall back to
-          // each binding's current mode.
+          // The frozen plan says which Capabilities were delivered on demand.
           new Set(
-            input.promptCapabilityIds
-              ? input.selectedCapabilities
-                  .map((reference) => reference.capabilityId)
-                  .filter((capabilityId) => !input.promptCapabilityIds?.includes(capabilityId))
-              : bindings
-                  .filter((binding) => binding.activationMode === "relevant")
-                  .map((binding) => binding.capabilityId),
+            input.selectedCapabilities
+              .map((reference) => reference.capabilityId)
+              .filter((capabilityId) => !input.promptCapabilityIds.includes(capabilityId)),
           ),
         ),
       }),
@@ -1157,13 +1133,7 @@ export function createCapabilityLearningModule(
       }),
     ]);
     const inferred = await options.inference.run(
-      roleRequest(
-        options.reflector,
-        nextId(input.feedback ? "iterate-feedback" : "reflect-capability"),
-        messages,
-        input.turn.evidenceRefs,
-        signal,
-      ),
+      roleRequest(options.reflector, nextId("reflect-capability"), messages, input.turn.evidenceRefs, signal),
       CapabilityReflectionOutputSchema,
     );
     signal.throwIfAborted();
@@ -1228,7 +1198,6 @@ export function createCapabilityLearningModule(
       ? citedEvidence(proposal.evidenceCitationIndexes, citations)
       : input.turn.evidenceRefs;
     const interpretation =
-      input.feedback ??
       input.turn.correction ??
       proposal?.rationale ??
       ("reason" in decision ? decision.reason : "Capability decision");
@@ -1419,12 +1388,6 @@ export function createCapabilityLearningModule(
   return Object.freeze({
     reflectSettledTurn: async (turn: CapabilityLearningTurn, signal: AbortSignal) =>
       await reflect(turn, signal),
-    iterateOnFeedback: async (
-      input: CapabilityLearningTurn & {
-        readonly feedback: string;
-      },
-      signal: AbortSignal,
-    ) => await reflect(input, signal),
     manage,
   });
 }
