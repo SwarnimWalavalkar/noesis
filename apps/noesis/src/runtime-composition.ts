@@ -33,8 +33,6 @@ import {
   createCodeModeRuntime,
 } from "@noesis/codemode";
 import {
-  createUserCriterionRepository,
-  createWorkspaceUserCriterionPorts,
   type NoesisConfigPatch,
   reloadNoesisConfig,
   type ResolvedNoesisConfig,
@@ -1638,7 +1636,6 @@ export async function createApplicationRuntimeComposition(
   const roles = await roleConfigurations(workspace, options.config);
   const roleRunner = options.createRoleRunner(Object.freeze(Object.values(roles)));
   const inference = createStructuredInferencePort({ runner: roleRunner, maxRepairAttempts: 1 });
-  const criteria = createUserCriterionRepository(createWorkspaceUserCriterionPorts(workspace));
   const registry = createAtomicCapabilityRegistry({
     researchState: workspace.research,
     controlStore: createWorkspaceCapabilityControlStore(workspace),
@@ -6652,7 +6649,6 @@ export async function createApplicationRuntimeComposition(
     return await loadLearningAuditSnapshot(
       {
         workspace,
-        criteria,
         activations: protectedRuntime.activations,
         feedback: protectedRuntime.feedback,
         resolveRevision,

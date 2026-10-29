@@ -118,14 +118,3 @@ export interface RuntimePiStructuredInferencePort {
     readonly capabilityRevisions: readonly CapabilityRevisionRef[];
   }>;
 }
-
-export interface ComparableRoleVariantFixture {
-  readonly baseline: RuntimePiAgentRunRequest;
-  readonly candidate: RuntimePiAgentRunRequest;
-  readonly capabilityRevisions: readonly CapabilityRevisionRef[];
-}
-
-export interface BlindedJudgeFixture {
-  readonly messages: readonly AgentMessage[];
-  readonly labels: Readonly<Record<"A" | "B", "first" | "second">>;
-}

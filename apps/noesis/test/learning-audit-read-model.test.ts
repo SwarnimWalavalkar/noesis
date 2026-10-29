@@ -158,7 +158,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        criteria: { list: async () => ({ ok: true, value: Object.freeze([]) }) },
         activations: {
           current: async () => undefined,
           listOperations: async () => Object.freeze([]),
@@ -282,7 +281,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        criteria: { list: async () => ({ ok: true, value: Object.freeze([]) }) },
         activations: {
           current: async () => undefined,
           listOperations: async () => Object.freeze([]),
@@ -482,7 +480,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace,
-        criteria: { list: async () => ({ ok: true, value: Object.freeze([]) }) },
         activations: {
           current: async () => undefined,
           listOperations: async () => Object.freeze([]),
@@ -713,7 +710,6 @@ describe("learning audit read model", () => {
     const snapshot = await loadLearningAuditSnapshot(
       {
         workspace: sourceWorkspace,
-        criteria: { list: async () => ({ ok: true, value: Object.freeze([]) }) },
         activations: {
           current: async () => undefined,
           listOperations: async () => Object.freeze([]),

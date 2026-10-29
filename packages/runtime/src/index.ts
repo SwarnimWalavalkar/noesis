@@ -17,7 +17,6 @@ import type {
   InteractionSnapshot,
 } from "./turn-interaction.ts";
 
-export * from "./coordinator-contracts.ts";
 export * from "./capability-coordinator.ts";
 export * from "./turn-intelligence.ts";
 export * from "./turn-settlement.ts";

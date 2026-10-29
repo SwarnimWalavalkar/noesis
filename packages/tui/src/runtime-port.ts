@@ -1,5 +1,5 @@
+import type { EvidenceRef } from "@noesis/domain";
 import type {
-  CoordinatorEvidenceRef,
   InteractionCommand,
   InteractionDispatchResult,
   InteractionSnapshot,
@@ -208,7 +208,7 @@ export interface TuiLearningActivitySummary {
   readonly projectId?: string;
   readonly adjustmentId?: string;
   readonly activeAdjustmentId?: string;
-  readonly evidenceRefs?: readonly CoordinatorEvidenceRef[];
+  readonly evidenceRefs?: readonly EvidenceRef[];
   readonly workingAdjustment?: TuiWorkingAdjustmentState;
   readonly failure?: string;
 }
@@ -238,7 +238,6 @@ export interface TuiLearningInspection {
 }
 
 export type TuiLearningPrimitiveKind =
-  | "criterion"
   | "capability"
   | "capability_feedback"
   | "capability_gate"

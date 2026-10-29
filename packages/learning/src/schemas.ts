@@ -133,20 +133,6 @@ export const LearningTurnInputSchema = z.strictObject({
 });
 export type LearningTurnInput = Readonly<z.infer<typeof LearningTurnInputSchema>>;
 
-export const SemanticTurnObservationSchema = z.strictObject({
-  kind: z
-    .enum(["correction", "preference", "other"])
-    .describe(
-      "Whether the current user turn semantically corrects prior behavior, expresses a reusable preference, or is neither",
-    ),
-  reason: z
-    .string()
-    .min(1)
-    .max(WORKING_ADJUSTMENT_LIMITS.observationChars)
-    .describe("Brief evidence-grounded reason for the classification"),
-});
-export type SemanticTurnObservation = Readonly<z.infer<typeof SemanticTurnObservationSchema>>;
-
 export interface LearningCitation {
   readonly source:
     | {

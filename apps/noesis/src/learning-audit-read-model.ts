@@ -1,5 +1,4 @@
 import { capabilityEffectKinds, capabilityEffects } from "@noesis/capabilities";
-import type { UserCriterionRepository } from "@noesis/config";
 import {
   createConditionalObject,
   type CapabilityDefinition,
@@ -54,7 +53,6 @@ interface LearningAuditSource {
   readonly home?: string;
   /** Why an edited Capability file could not be applied, by Capability ID. */
   readonly editProblems?: ReadonlyMap<string, string>;
-  readonly criteria: Pick<UserCriterionRepository, "list">;
   readonly activations: Pick<
     ProtectedWorkspaceRuntime["activations"],
     "current" | "listOperations" | "getApproval"
@@ -839,27 +837,19 @@ export async function loadLearningAuditSnapshot(
   source: LearningAuditSource,
   sessionId: string,
 ): Promise<TuiLearningAuditSnapshot> {
-  const [
-    reflectionJobs,
-    adjustments,
-    criteriaResult,
-    activation,
-    allActivationOperations,
-    allFeedbackSignals,
-  ] = await Promise.all([
-    listProjectReflectionJobs(source.workspace, source.project.projectId),
-    source.workspace.workingAdjustments.list({
-      projectId: source.project.projectId,
-      limit: AUDIT_LIMIT,
-    }),
-    source.criteria.list(),
-    source.activations.current(),
-    source.activations.listOperations(AUDIT_LIMIT),
-    source.workspace.research.feedbackSignals.listFeedbackSignals({
-      limit: AUDIT_LIMIT,
-    }),
-  ]);
-  if (!criteriaResult.ok) throw new Error(criteriaResult.error.message);
+  const [reflectionJobs, adjustments, activation, allActivationOperations, allFeedbackSignals] =
+    await Promise.all([
+      listProjectReflectionJobs(source.workspace, source.project.projectId),
+      source.workspace.workingAdjustments.list({
+        projectId: source.project.projectId,
+        limit: AUDIT_LIMIT,
+      }),
+      source.activations.current(),
+      source.activations.listOperations(AUDIT_LIMIT),
+      source.workspace.research.feedbackSignals.listFeedbackSignals({
+        limit: AUDIT_LIMIT,
+      }),
+    ]);
   const projectSessionIds = [...new Set(reflectionJobs.map(jobSessionId).filter(defined))];
   const sourceSessionJobs = await listSourceSessionJobs(source.workspace, projectSessionIds);
   const originJobs = [...reflectionJobs, ...sourceSessionJobs];
@@ -931,27 +921,6 @@ export async function loadLearningAuditSnapshot(
   const primitives: TuiLearningPrimitive[] = await Promise.all(
     jobs.map(async (job) => await jobPrimitive(job, adjustmentsById, resolveEvidencePreviews)),
   );
-  for (const criterion of criteriaResult.value) {
-    const definition = criterion.definition;
-    primitives.push(
-      primitive({
-        id: nativeId("criterion", definition.criterionId),
-        kind: "criterion",
-        group: "memory",
-        status: `${definition.status}${definition.pinned ? " · pinned" : ""}`,
-        tone: definition.status === "active" ? "active" : "neutral",
-        title: definition.evaluatorInstruction,
-        summary: definition.pinned
-          ? "Pinned criterion"
-          : definition.status === "active"
-            ? "Active criterion"
-            : "Inactive criterion",
-        evidence: definition.evidenceRefs,
-        relations: [],
-        raw: criterion,
-      }),
-    );
-  }
   for (const adjustment of adjustments) {
     const active = activeAdjustment?.adjustmentId === adjustment.adjustmentId;
     const sessionId = originSessions.sessionByAdjustmentId.get(adjustment.adjustmentId);

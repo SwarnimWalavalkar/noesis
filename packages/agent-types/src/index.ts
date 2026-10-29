@@ -25,7 +25,6 @@ import {
 import { z } from "zod";
 export type AgentRole =
   | "foreground"
-  | "capability_router"
   | "session_compactor"
   | "session_titler"
   | "history_reranker"
@@ -1257,17 +1256,4 @@ export interface AgentToolDescriptor {
   readonly inputSchemaId: string;
   readonly outputSchemaId: string;
   readonly permissionManifestRef: string;
-}
-/** One execution child of the canonical domain Experiment lifecycle. */
-export interface ExperimentExecutionRun {
-  readonly runId: string;
-  readonly experimentId: string;
-  readonly purpose: string;
-  readonly axis: ExperimentVariantRef["axis"];
-  readonly baselineVariant: ExperimentVariantRef;
-  readonly candidateVariants: readonly ExperimentVariantRef[];
-  readonly inputRefs: readonly EvidenceRef[];
-  readonly trialRefs: readonly EvidenceRef[];
-  readonly comparisonRef?: EvidenceRevisionRef;
-  readonly status: "planned" | "running" | "completed" | "failed";
 }

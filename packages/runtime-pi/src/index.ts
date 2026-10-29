@@ -59,7 +59,6 @@ export * from "./auth.ts";
 export * from "./auth-recovery.ts";
 export * from "./context-budget.ts";
 export * from "./execute-tool.ts";
-export * from "./experiment-fixtures.ts";
 export type {
   FrozenPlanMaterialKind,
   FrozenPlanMaterialUse,
