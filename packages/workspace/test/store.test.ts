@@ -1878,7 +1878,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 57 });
+    ).toEqual({ version: 58 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -2508,7 +2508,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 57,
+      version: 58,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2613,7 +2613,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 57,
+      version: 58,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2713,7 +2713,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 57,
+      version: 58,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     for (const table of [
@@ -2785,7 +2785,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 57,
+      version: 58,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2824,6 +2824,52 @@ describe("WorkspaceStore", () => {
         .all(),
     ).toEqual([{ name: "authority_operations_grant" }]);
     upgraded.close();
+  });
+  test("migration 58 rewrites imported exchanges as self-describing replay history", async () => {
+    const root = await temporary("imported-history");
+    const { database } = await seedWorkspaceThroughMigration(root, 57);
+    const at = (second: number): string => `2026-07-26T00:00:0${String(second)}.000Z`;
+    database
+      .prepare(`INSERT INTO sessions(
+          session_id, title, status, provider, model, runtime, created_at, updated_at, metadata_json
+        ) VALUES ('session-imported', 'Imported', 'idle', 'controlled', 'controlled', 'pi', ?, ?, '{}')`)
+      .run(at(0), at(0));
+    const outcome = database.prepare(`INSERT INTO outcomes(
+        outcome_id, session_id, turn_id, status, summary, created_at, metadata_json
+      ) VALUES (?, 'session-imported', ?, ?, '', ?, ?)`);
+    outcome.run("evt-done:outcome", "evt-done", "unknown", at(2), '{"legacyEventId":"evt-done"}');
+    outcome.run("evt-failed:outcome", "evt-failed", "failed", at(4), '{"legacyEventId":"evt-failed"}');
+    const message = database.prepare(`INSERT INTO messages(
+        message_id, session_id, role, content, created_at, metadata_json
+      ) VALUES (?, 'session-imported', ?, ?, ?, ?)`);
+    message.run("m-user", "user", "hello", at(1), '{"legacyEventId":"evt-done"}');
+    message.run("m-assistant", "assistant", "hi", at(2), '{"legacyEventId":"evt-done"}');
+    message.run("m-failed", "user", "broken", at(3), '{"legacyEventId":"evt-failed"}');
+    message.run("m-modern", "user", "later", at(5), '{"turnId":"turn-modern"}');
+    database.close();
+
+    const store = await createWorkspaceStore(root);
+    store.close();
+    const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
+    const rows = upgraded
+      .prepare("SELECT message_id, metadata_json FROM messages ORDER BY created_at")
+      .all()
+      .map((row) => ({ id: row["message_id"], metadata: JSON.parse(String(row["metadata_json"])) }));
+    upgraded.close();
+    const inherited = (messageId: string, historySequence: number) => ({
+      replayEligible: true,
+      historyKind: "turn",
+      historyTurnKey: "session-imported:evt-done",
+      historySequence,
+      inheritedFromSessionId: "session-imported",
+      inheritedFromMessageId: messageId,
+    });
+    expect(rows).toEqual([
+      { id: "m-user", metadata: inherited("m-user", 0) },
+      { id: "m-assistant", metadata: inherited("m-assistant", 1) },
+      { id: "m-failed", metadata: { legacyEventId: "evt-failed" } },
+      { id: "m-modern", metadata: { turnId: "turn-modern" } },
+    ]);
   });
   test("upgrades an old version-20 workspace through corrected execution lineage contracts", async () => {
     const root = await temporary("development-migrations");
@@ -2908,7 +2954,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(57);
+    expect(versions.at(-1)).toBe(58);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

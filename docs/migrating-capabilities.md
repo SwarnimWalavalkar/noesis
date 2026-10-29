@@ -35,4 +35,4 @@ Load the `noesis` skill. I want to bring back my learned Capabilities from the p
 
 ## What the upgrade removed
 
-The upgrade removed every learned Capability, its revisions, its track record of helped and hurt results, its feedback, and its pending gates. It also removed reflections and session reviews that had not finished, and the history of earlier subagents. Finished reflections and reviews stay visible in `/learning` and in the learning report.
+The upgrade removed every learned Capability, its revisions, its track record of helped and hurt results, its feedback, and its pending gates. It also removed reflections and session reviews that had not finished, and the history of earlier subagents. Finished reflections stay visible in `/learning`, and the learning report still counts finished reflections and session reviews.
