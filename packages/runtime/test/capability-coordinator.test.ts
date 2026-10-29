@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { createWorkspaceRuntimeInternals } from "../../workspace/src/protected-runtime.ts";
 import { createCapabilityCoordinator } from "../src/capability-coordinator.ts";
 
@@ -159,11 +159,17 @@ describe("Capability coordinator", () => {
       expect(reflectCalls).toBe(0);
       expect((await workspace.jobs.get(observed.job.jobId))?.status).toBe("scheduled");
 
-      current = new Date(start.getTime() + 60_000);
+      // The user returns more than a day later; the held reflection still has its grant. The
+      // authority checks grant expiry against the system clock, so move that clock too.
+      current = new Date(start.getTime() + 25 * 60 * 60_000);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(new Date(Date.now() + 25 * 60 * 60_000));
       await coordinator.runAvailable();
+      vi.useRealTimers();
       expect(reflectCalls).toBe(1);
       expect((await workspace.jobs.get(observed.job.jobId))?.status).toBe("completed");
     } finally {
+      vi.useRealTimers();
       await coordinator.stop();
     }
   });

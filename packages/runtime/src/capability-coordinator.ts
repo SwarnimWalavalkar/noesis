@@ -40,6 +40,11 @@ const SessionReviewJobPayloadSchema = z.strictObject({
   project: z.strictObject({ projectId: z.string().min(1), root: z.string().min(1) }),
 });
 const DELAYED_JOB_POLL_MS = 60_000;
+/**
+ * A held reflection or review may wait for the user's return across restarts, so its scheduler
+ * grant lasts long enough to cover days away.
+ */
+const HELD_JOB_GRANT_MS = 30 * 24 * 60 * 60 * 1_000;
 
 const CapabilityReflectionJobPayloadSchema = z.strictObject({
   schemaVersion: z.literal(1),
@@ -177,7 +182,7 @@ export function createCapabilityCoordinator(
     await authorizeScheduledJob(options.authority, {
       jobId,
       budget: 3,
-      expiresAt: iso(new Date(now().getTime() + 24 * 60 * 60 * 1_000)),
+      expiresAt: iso(new Date(now().getTime() + HELD_JOB_GRANT_MS)),
     });
     let job: DurableJobRecord;
     try {
@@ -218,7 +223,7 @@ export function createCapabilityCoordinator(
     await authorizeScheduledJob(options.authority, {
       jobId,
       budget: 3,
-      expiresAt: iso(new Date(now().getTime() + 24 * 60 * 60 * 1_000)),
+      expiresAt: iso(new Date(now().getTime() + HELD_JOB_GRANT_MS)),
     });
     try {
       await options.workspace.jobs.enqueue({

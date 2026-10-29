@@ -1247,6 +1247,19 @@ export interface CapabilityLifecycleStore {
   readonly trackRecords: (
     capabilityRevisionIds: readonly string[],
   ) => Promise<ReadonlyMap<string, import("@noesis/domain").CapabilityTrackRecord>>;
+  /**
+   * Judged outcome counts for one Capability across all its revisions, optionally since a time,
+   * and when its first judged outcome happened.
+   */
+  readonly outcomeCounts: (
+    capabilityId: string,
+    since?: string,
+  ) => Promise<{
+    readonly helped: number;
+    readonly hurt: number;
+    readonly unclear: number;
+    readonly firstAt?: string;
+  }>;
   /** The newest judged outcomes for one Capability, across its revisions. */
   readonly listOutcomes: (
     capabilityId: string,

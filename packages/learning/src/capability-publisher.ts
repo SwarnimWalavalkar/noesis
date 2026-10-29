@@ -194,6 +194,10 @@ export interface CapabilityPublisher {
   readonly syncWorkingDocument: (
     capabilityId: string,
     context?: Pick<CapabilityPublicationContext, "project" | "sessionId">,
+    options?: {
+      /** The user restored or approved this revision, so it replaces unapplied file edits. */
+      readonly userChoseRevision?: boolean;
+    },
   ) => Promise<void>;
   /**
    * Records direct edits to Capability files as new revisions. An edit that cannot be read is left
@@ -283,6 +287,8 @@ function proposedActivationMode(
 }
 
 const evidenceKindLabel = capabilityEvidenceLabel;
+/** The actor ambient reflection publishes as. */
+export const AMBIENT_REFLECTION_ACTOR_ID = "automatic-learning-organ";
 /** An always-active Capability enters every turn's prompt, so its guidance must stay short. */
 export const ALWAYS_GUIDANCE_MAX_CHARACTERS = 2_000;
 
@@ -418,7 +424,9 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         } as const)
         .finish(),
     );
-    options.registry.registerCapability(registryCapability(definition));
+    // A new Capability must be registered before its first revision is built. A revision of an
+    // existing one registers its new name only after the store accepts it.
+    if (!existingDefinition) options.registry.registerCapability(registryCapability(definition));
     // Instruction and skill drafts become the guidance of one readable Capability file.
     const guidance = input.proposal.effects
       .flatMap((draft) =>
@@ -630,7 +638,11 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         state: "active",
         feedback: decisionFeedback(binding, decision.reason, "restore_request"),
       });
-      if (updated.status !== "stale") await syncWorkingDocument(binding.capabilityId, context);
+      if (updated.status !== "stale")
+        // Ambient reflection restoring a revision does not override the user's unapplied edits.
+        await syncWorkingDocument(binding.capabilityId, context, {
+          userChoseRevision: context.actor.actorId !== AMBIENT_REFLECTION_ACTOR_ID,
+        });
       return Object.freeze({
         status: updated.status === "stale" ? ("stale" as const) : ("restored" as const),
         capabilityId: binding.capabilityId,
@@ -789,7 +801,10 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       scope: nextScope,
       activationMode: nextActivationMode,
     });
-    if (updated.status !== "stale") await syncWorkingDocument(capabilityId, context);
+    if (updated.status !== "stale") {
+      options.registry.registerCapability(registryCapability(authored.definition));
+      await syncWorkingDocument(capabilityId, context);
+    }
     return Object.freeze({
       status: updated.status === "stale" ? ("stale" as const) : ("revised" as const),
       capabilityId,
@@ -885,6 +900,18 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
   };
   const systemActor: ActorRef = Object.freeze({ actorId: "capability-files", kind: "system" });
   const userActor: ActorRef = Object.freeze({ actorId: "workspace-user", kind: "user" });
+  /**
+   * True when Noesis's own file sync made the last record at this path and the file still matches
+   * it. A user edit, including bytes restored from a backup, never meets both.
+   */
+  const isUnchangedNoesisWrite = async (path: string, working: Uint8Array): Promise<boolean> => {
+    const lastRecorded = await options.workspace.reads.latestWorkingRevision(path);
+    return (
+      lastRecorded?.actor.actorId === systemActor.actorId &&
+      lastRecorded.actor.kind === systemActor.kind &&
+      lastRecorded.revision.contentDigest === sha256(working)
+    );
+  };
 
   /** Guidance and Program drafts that reproduce a revision's current effects exactly. */
   const currentDrafts = async (
@@ -944,7 +971,11 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
   // Syncs for one Capability run one at a time. Each reads the binding when it starts, so the last
   // sync always writes the current revision even when publications race.
   const syncQueues = new Map<string, Promise<void>>();
-  const syncWorkingDocument: CapabilityPublisher["syncWorkingDocument"] = async (capabilityId, context) => {
+  const syncWorkingDocument: CapabilityPublisher["syncWorkingDocument"] = async (
+    capabilityId,
+    context,
+    options_,
+  ) => {
     // A restored revision from before Capability files gets a file as a new revision. That move
     // publishes, and publishing syncs again, so it runs outside the queue to avoid waiting on itself.
     // Without a project context, the next startup moves it instead.
@@ -955,7 +986,9 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       return;
     }
     const previous = syncQueues.get(capabilityId) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(async () => await syncNow(capabilityId));
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => await syncNow(capabilityId, options_?.userChoseRevision === true));
     syncQueues.set(capabilityId, next);
     try {
       await next;
@@ -963,7 +996,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       if (syncQueues.get(capabilityId) === next) syncQueues.delete(capabilityId);
     }
   };
-  const syncNow = async (capabilityId: string): Promise<void> => {
+  const syncNow = async (capabilityId: string, userChoseRevision: boolean): Promise<void> => {
     const binding = await options.store.getBinding(capabilityId);
     if (!binding) return;
     const lifecycle = await options.store.getRevision(binding.revision);
@@ -993,10 +1026,17 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     const path = capabilityWorkingDocumentPath(document);
     const working = await options.workspace.reads.readWorkingFile(path);
     if (working && sha256(working) === document.contentDigest) return;
-    // The store skips a write whose bytes match the path's latest record. Record the out-of-date
-    // file first, so the current revision is always written back to disk.
-    if (working)
-      await options.workspace.recordDirectEdit(path, systemActor, "Out-of-date Capability file before sync");
+    if (working && !(await isUnchangedNoesisWrite(path, working))) {
+      // The file holds an edit Noesis has not recorded yet. A publication leaves it, so the next edit
+      // scan applies the user's edit on top of this revision. The user's own restore or approval
+      // replaces it, after keeping its bytes as a revision so nothing is lost.
+      if (!userChoseRevision) return;
+      await options.workspace.recordDirectEdit(
+        path,
+        userActor,
+        "Unapplied edit replaced by the user's restore",
+      );
+    }
     await options.workspace.definitions.recordWorkingDefinition({
       workingPath: path,
       bytes,
@@ -1098,13 +1138,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       if (!working || sha256(working) === document.contentDigest) continue;
       // A file Noesis wrote that was never brought up to date, e.g. Noesis stopped right after
       // publishing, is synced instead of imported as the user's edit.
-      // Stale only when Noesis's own file sync made the last record at this path and the file still
-      // matches it. A user edit, including bytes restored from a backup, never meets both.
-      const lastRecorded = await options.workspace.reads.latestWorkingRevision(path);
-      const writtenByNoesis =
-        lastRecorded?.actor.actorId === systemActor.actorId &&
-        lastRecorded.actor.kind === systemActor.kind &&
-        lastRecorded.revision.contentDigest === sha256(working);
+      const writtenByNoesis = await isUnchangedNoesisWrite(path, working);
       if (writtenByNoesis) {
         await syncWorkingDocument(binding.capabilityId, context);
         continue;
@@ -1116,6 +1150,36 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       }
       const current = await currentDrafts(lifecycle);
       if (current.project && current.project.projectId !== context.project.projectId) continue;
+      // An edit gets the same limits as any authored Capability, e.g. name and guidance length.
+      const proposal = CapabilityProposalSchema.safeParse({
+        name: parsed.content.name,
+        description: parsed.content.description,
+        applicability: parsed.content.when,
+        summary: "Edited directly in its Capability file.",
+        rationale: "The user edited the Capability file.",
+        anticipatedEffect: "Noesis follows the edited guidance from the next turn.",
+        effects: [
+          { kind: "instruction", content: parsed.content.guidance },
+          ...current.drafts.filter((draft) => draft.kind === "program"),
+        ],
+        consequence: "ordinary",
+        consequenceDescription: "The user changed the guidance directly.",
+        evidence: {
+          kind: "explicit_request",
+          quote: `Edited ${path}`,
+          wouldOtherwise: "Noesis would keep following the guidance the user replaced.",
+        },
+      });
+      if (!proposal.success) {
+        problems.push({
+          capabilityId: binding.capabilityId,
+          path,
+          error: proposal.error.issues
+            .map((issue) => `${issue.path.join(".") || "file"}: ${issue.message}`)
+            .join("; "),
+        });
+        continue;
+      }
       const outcome = await (async () => {
         const edit = await options.workspace.recordDirectEdit(
           path,
@@ -1127,25 +1191,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
             decision: "revise",
             capabilityId: binding.capabilityId,
             expectedBindingRevision: binding.revisionNumber,
-            proposal: {
-              name: parsed.content.name,
-              description: parsed.content.description,
-              applicability: parsed.content.when,
-              summary: "Edited directly in its Capability file.",
-              rationale: "The user edited the Capability file.",
-              anticipatedEffect: "Noesis follows the edited guidance from the next turn.",
-              effects: [
-                { kind: "instruction", content: parsed.content.guidance },
-                ...current.drafts.filter((draft) => draft.kind === "program"),
-              ],
-              consequence: "ordinary",
-              consequenceDescription: "The user changed the guidance directly.",
-              evidence: {
-                kind: "explicit_request",
-                quote: `Edited ${path}`,
-                wouldOtherwise: "Noesis would keep following the guidance the user replaced.",
-              },
-            },
+            proposal: proposal.data,
           },
           {
             project: current.project ?? context.project,

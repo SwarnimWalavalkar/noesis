@@ -1078,6 +1078,24 @@ export function createCapabilityLifecycleStore(
     }
     return records;
   };
+  const outcomeCounts: CapabilityLifecycleStore["outcomeCounts"] = async (capabilityId, since) => {
+    const counts = { helped: 0, hurt: 0, unclear: 0 };
+    for (const row of db
+      .prepare(
+        "SELECT result, COUNT(*) AS count FROM capability_outcomes WHERE capability_id = ? AND created_at >= ? GROUP BY result",
+      )
+      .all(capabilityId, since ?? ""))
+      counts[OutcomeResultSchema.parse(requiredString(row, "result"))] = requiredNumber(row, "count");
+    const first = db
+      .prepare("SELECT MIN(created_at) AS first_at FROM capability_outcomes WHERE capability_id = ?")
+      .get(capabilityId);
+    const firstAt = first ? first["first_at"] : undefined;
+    return Object.freeze(
+      createConditionalObject(counts)
+        .addOptional(typeof firstAt === "string" ? { firstAt } : undefined)
+        .finish(),
+    );
+  };
   const listOutcomes: CapabilityLifecycleStore["listOutcomes"] = async (capabilityId, limit) => {
     assertLimit(limit);
     return Object.freeze(
@@ -1093,7 +1111,9 @@ export function createCapabilityLifecycleStore(
     const definition = CapabilityDefinitionSchema.parse(input);
     options.database.transaction(() => {
       const existing = decodeDefinition(
-        db.prepare("SELECT definition_json FROM capabilities WHERE capability_id = ?").get(definition.capabilityId),
+        db
+          .prepare("SELECT definition_json FROM capabilities WHERE capability_id = ?")
+          .get(definition.capabilityId),
       );
       if (!existing) throw new Error(`Unknown capability ${definition.capabilityId}`);
       if (existing.createdAt !== definition.createdAt)
@@ -1105,6 +1125,7 @@ export function createCapabilityLifecycleStore(
     });
   };
   return Object.freeze({
+    outcomeCounts,
     updateDefinition,
     recordOutcomes,
     trackRecords,

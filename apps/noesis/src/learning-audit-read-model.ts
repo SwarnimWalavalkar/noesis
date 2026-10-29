@@ -52,6 +52,8 @@ interface LearningAuditSource {
   readonly workspace: NoesisWorkspaceStore;
   /** The Noesis home, used to show where each Capability file lives. */
   readonly home?: string;
+  /** Why an edited Capability file could not be applied, by Capability ID. */
+  readonly editProblems?: ReadonlyMap<string, string>;
   readonly criteria: Pick<UserCriterionRepository, "list">;
   readonly activations: Pick<
     ProtectedWorkspaceRuntime["activations"],
@@ -1557,7 +1559,11 @@ export async function loadLearningAuditSnapshot(
                 ),
                 detailEntry(
                   "your last edit",
-                  unreadableEdit && !unreadableEdit.ok ? `Not applied. ${unreadableEdit.error}.` : undefined,
+                  unreadableEdit && !unreadableEdit.ok
+                    ? `Not applied. ${unreadableEdit.error}.`
+                    : source.editProblems?.has(binding.capabilityId)
+                      ? `Not applied. ${source.editProblems.get(binding.capabilityId) ?? ""}`
+                      : undefined,
                 ),
               ]),
               detailSection("WHAT CHANGED", currentMaterialEntries),

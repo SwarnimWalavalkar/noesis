@@ -152,6 +152,12 @@ describe("Capability publisher", () => {
     if (!parsed.ok) throw new Error(parsed.error);
     expect(parsed.content).toMatchObject({ name: "Evidence-led review" });
     expect(parsed.content.guidance).toContain("Ground review findings in exact repository evidence.");
+    // The skill draft is merged into the same guidance, not dropped.
+    expect(parsed.content.guidance).toContain("## evidence-led-review");
+    expect(parsed.content.guidance).toContain("Perform a bounded evidence-led review.");
+    expect(parsed.content.guidance).toContain(
+      "Inspect the exact diff, trace consumers, and report only actionable findings.",
+    );
     expect(document).toContain("## Why");
     // The working file is the same document, so the user can open and edit it.
     expect(

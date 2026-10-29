@@ -488,7 +488,7 @@ async function main(): Promise<void> {
       });
     else
       throw new Error(
-        `Unknown command ${input.command}. Use tui, onboard, inspect, rebuild, config, auth, or skills.`,
+        `Unknown command ${input.command}. Use tui, onboard, inspect, rebuild, config, auth, skills, learning, update, or help.`,
       );
   } finally {
     await runtime.shutdown();

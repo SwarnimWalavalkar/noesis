@@ -36,6 +36,7 @@ import {
   CapabilityProposalSchema,
   type CapabilityPublicationResult,
   type CapabilityPublisher,
+  AMBIENT_REFLECTION_ACTOR_ID,
   CapabilityScopeDecisionSchema,
   capabilityScopeDecision,
   createCapabilityPublisher,
@@ -1175,10 +1176,16 @@ export function createCapabilityLearningModule(
         content: foregroundCapabilitySurfaceMessage(
           exactSelectedTurnRevisions,
           currentEvidence,
+          // The frozen plan says which Capabilities were delivered on demand; older jobs fall back to
+          // each binding's current mode.
           new Set(
-            bindings
-              .filter((binding) => binding.activationMode === "relevant")
-              .map((binding) => binding.capabilityId),
+            input.promptCapabilityIds
+              ? input.selectedCapabilities
+                  .map((reference) => reference.capabilityId)
+                  .filter((capabilityId) => !input.promptCapabilityIds?.includes(capabilityId))
+              : bindings
+                  .filter((binding) => binding.activationMode === "relevant")
+                  .map((binding) => binding.capabilityId),
           ),
         ),
       }),
@@ -1327,7 +1334,7 @@ export function createCapabilityLearningModule(
         project: input.project,
         sessionId: input.turn.sessionId,
         evidenceRefs,
-        actor: Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" }),
+        actor: Object.freeze({ actorId: AMBIENT_REFLECTION_ACTOR_ID, kind: "noesis" }),
         interpretation,
         programResolver,
       },
@@ -1363,7 +1370,7 @@ export function createCapabilityLearningModule(
           capabilityId: gate.capabilityId,
           message: "Binding changed",
         });
-      await publisher.syncWorkingDocument(gate.capabilityId);
+      await publisher.syncWorkingDocument(gate.capabilityId, undefined, { userChoseRevision: true });
       return Object.freeze({
         status: "activated",
         capabilityId: gate.capabilityId,
@@ -1426,7 +1433,7 @@ export function createCapabilityLearningModule(
           instruction: intent.instruction,
         },
         createConditionalObject({
-          actor: Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" as const }),
+          actor: Object.freeze({ actorId: AMBIENT_REFLECTION_ACTOR_ID, kind: "noesis" as const }),
         } as const)
           .addOptional(
             gate.proposedScope.kind === "project" ? { project: gate.proposedScope.project } : undefined,
@@ -1468,7 +1475,7 @@ export function createCapabilityLearningModule(
     signal.throwIfAborted();
     const updated = await options.store.updateBinding(request);
     if (intent.type === "restore" && updated.status !== "stale")
-      await publisher.syncWorkingDocument(intent.capabilityId);
+      await publisher.syncWorkingDocument(intent.capabilityId, undefined, { userChoseRevision: true });
     return Object.freeze({
       status:
         updated.status === "stale"

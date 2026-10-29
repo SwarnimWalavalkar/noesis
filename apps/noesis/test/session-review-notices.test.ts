@@ -44,7 +44,7 @@ test("announces a session review's published change on the next turn after it co
       jobId: "job-published",
       stage: "reflection",
       status: "activated",
-      summary: "Session review · Release notes by area · Paused overlapping notes",
+      summary: "Review of an earlier session · Release notes by area · Paused overlapping notes",
       updatedAt: "2026-10-29T11:00:00.000Z",
       reactionTurnId: "turn-after",
       capabilityId: "capability-notes",

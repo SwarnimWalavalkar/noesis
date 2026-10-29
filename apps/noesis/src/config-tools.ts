@@ -228,14 +228,15 @@ export const routesAfter = (
       BUILT_IN_TITLES_DEFAULTS.thinkingLevel,
     ),
   };
+  // Unset reflection fields follow the configured foreground route when Noesis next starts.
   const reflectionBefore: Route = {
-    provider: before.reflection.provider ?? session.provider,
-    model: before.reflection.model ?? session.model,
+    provider: before.reflection.provider ?? before.agent.provider,
+    model: before.reflection.model ?? before.agent.model,
     thinkingLevel: before.reflection.thinkingLevel,
   };
   const reflection: Route = {
-    provider: patched(patch.reflection?.provider, reflectionBefore.provider, session.provider),
-    model: patched(patch.reflection?.model, reflectionBefore.model, session.model),
+    provider: patched(patch.reflection?.provider, reflectionBefore.provider, agent.provider),
+    model: patched(patch.reflection?.model, reflectionBefore.model, agent.model),
     thinkingLevel: patched(
       patch.reflection?.thinkingLevel,
       reflectionBefore.thinkingLevel,

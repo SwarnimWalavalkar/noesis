@@ -72,7 +72,8 @@ export function parseCapabilityDocument(text: string): CapabilityDocumentParseRe
   for (const line of normalized.slice(4, close).split("\n")) {
     if (line.trim().length === 0) continue;
     const separator = line.indexOf(":");
-    const key = separator < 0 ? line.trim() : line.slice(0, separator).trim();
+    if (separator < 0) return { ok: false, error: `Frontmatter line "${line.trim()}" needs a colon after its field name` };
+    const key = line.slice(0, separator).trim();
     const field = FIELDS.find((candidate) => candidate === key);
     if (!field)
       return { ok: false, error: `Unknown frontmatter field "${key}". Use name, when, and description` };
@@ -80,13 +81,17 @@ export function parseCapabilityDocument(text: string): CapabilityDocumentParseRe
   }
   const name = fields.get("name");
   const when = fields.get("when");
+  const description = fields.get("description");
   if (!name) return { ok: false, error: "The frontmatter needs a name" };
   if (!when) return { ok: false, error: "The frontmatter needs a when line" };
+  if (!description) return { ok: false, error: "The frontmatter needs a description" };
   const rest = normalized.slice(close + 5);
-  const marker = rest.indexOf(CAPABILITY_NOTES_MARKER);
-  const guidance = (marker < 0 ? rest : rest.slice(0, marker)).trim();
+  // The notes start at the marker on a line of its own; guidance may quote the marker text.
+  const lines = rest.split("\n");
+  const markerLine = lines.findIndex((line) => line.trim() === CAPABILITY_NOTES_MARKER);
+  const guidance = (markerLine < 0 ? rest : lines.slice(0, markerLine).join("\n")).trim();
   if (guidance.length === 0) return { ok: false, error: "The guidance below the frontmatter is empty" };
-  return { ok: true, content: { name, when, description: fields.get("description") || when, guidance } };
+  return { ok: true, content: { name, when, description, guidance } };
 }
 
 /**

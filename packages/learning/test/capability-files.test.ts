@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { capabilityEffects, createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import {
+  CAPABILITY_NOTES_MARKER,
   capabilityGuidance,
   capabilityRevisionRef,
   parseCapabilityDocument,
@@ -93,6 +94,13 @@ describe("Capability files", () => {
     // Older materials are plain guidance and pass through unchanged.
     expect(capabilityGuidance("Plain guidance.")).toBe("Plain guidance.");
     expect(parseCapabilityDocument("---\nname: x\n---\n\nBody")).toMatchObject({ ok: false });
+    // Every field needs a colon and a value, and a quoted marker inside the guidance is kept.
+    expect(parseCapabilityDocument("---\nname\nwhen: w\ndescription: d\n---\n\nBody")).toMatchObject({
+      ok: false,
+    });
+    expect(parseCapabilityDocument("---\nname: n\nwhen: w\n---\n\nBody")).toMatchObject({ ok: false });
+    const quoted = `---\nname: n\nwhen: w\ndescription: d\n---\n\nThe file ends with ${CAPABILITY_NOTES_MARKER} notes.\n\n${CAPABILITY_NOTES_MARKER}\n\n## Why`;
+    expect(capabilityGuidance(quoted)).toBe(`The file ends with ${CAPABILITY_NOTES_MARKER} notes.`);
   });
 
   test("records a direct edit as a revision and reports an edit it cannot read", async () => {
@@ -206,6 +214,12 @@ describe("Capability files", () => {
       ),
     ).toBe(afterText);
 
+    // An edit gets the same limits as any authored Capability.
+    await writeFile(file, afterText.replace("name: Use pnpm", `name: ${"n".repeat(161)}`));
+    const tooLong = await publisher.recordDocumentEdits(context, new AbortController().signal);
+    expect(tooLong.recorded).toEqual([]);
+    expect(tooLong.problems).toEqual([expect.objectContaining({ error: expect.stringContaining("name") })]);
+
     await writeFile(file, "no frontmatter here");
     const report = await publisher.recordDocumentEdits(context, new AbortController().signal);
     expect(report.recorded).toEqual([]);
@@ -240,6 +254,58 @@ describe("Capability files", () => {
     expect(await workspace.capabilities.getDefinition(created.capabilityId)).toMatchObject({
       applicability: "Package commands in this repository.",
     });
+  });
+
+  test("keeps an unrecorded user edit when an ambient revision is published", async () => {
+    const { root, workspace, publisher, context } = await setup();
+    const proposal = {
+      name: "Use pnpm",
+      description: "Use pnpm for package commands.",
+      applicability: "Package commands in this repository.",
+      summary: "Use pnpm.",
+      rationale: "The user asked for pnpm.",
+      anticipatedEffect: "Package commands use pnpm.",
+      effects: [{ kind: "instruction" as const, content: "Run pnpm, not npm." }],
+      consequence: "ordinary" as const,
+      consequenceDescription: "Only model instructions change.",
+    };
+    const created = await publisher.publish(
+      { decision: "create", proposal },
+      context,
+      new AbortController().signal,
+    );
+    if (created.status !== "activated") throw new Error("Expected activation");
+    const first = await current(workspace, created.capabilityId);
+    const file = join(root, capabilityWorkingDocumentPath(first.document));
+    const userEdit = new TextDecoder()
+      .decode(await workspace.reads.readRevision(first.document))
+      .replace("Run pnpm, not npm.", "Run pnpm, not npm. Prefer pnpm dlx.");
+    await writeFile(file, userEdit);
+    // Reflection publishes a revision before the edit scan has run.
+    await publisher.publish(
+      {
+        decision: "revise",
+        capabilityId: created.capabilityId,
+        expectedBindingRevision: first.binding.revisionNumber,
+        proposal: { ...proposal, effects: [{ kind: "instruction", content: "Run pnpm in scripts too." }] },
+      },
+      { ...context, actor: Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" as const }) },
+      new AbortController().signal,
+    );
+    expect(
+      new TextDecoder().decode(
+        await workspace.reads.readWorkingFile(capabilityWorkingDocumentPath(first.document)),
+      ),
+    ).toBe(userEdit);
+    await expect(publisher.recordDocumentEdits(context, new AbortController().signal)).resolves.toMatchObject(
+      {
+        recorded: [{ capabilityId: created.capabilityId }],
+      },
+    );
+    const latest = await current(workspace, created.capabilityId);
+    expect(
+      capabilityGuidance(new TextDecoder().decode(await workspace.reads.readRevision(latest.document))),
+    ).toBe("Run pnpm, not npm. Prefer pnpm dlx.");
   });
 
   test("imports an earlier file the user restored from a backup as an edit", async () => {

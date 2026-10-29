@@ -6648,7 +6648,7 @@ export async function createApplicationRuntimeComposition(
     sessionId,
   ): Promise<TuiLearningInspection> => Object.freeze({ activity: await listLearningActivity(sessionId) });
   const inspectLearningAudit: NonNullable<NoesisTuiRuntime["inspectLearningAudit"]> = async (sessionId) => {
-    await recordCapabilityFileEdits(sessionId);
+    const edits = await recordCapabilityFileEdits(sessionId);
     return await loadLearningAuditSnapshot(
       {
         workspace,
@@ -6659,6 +6659,9 @@ export async function createApplicationRuntimeComposition(
         resolveCapability: (capabilityId) => registry.getCapability(capabilityId),
         project,
         home: options.config.home,
+        editProblems: new Map(
+          (edits?.problems ?? []).map((problem) => [problem.capabilityId, problem.error] as const),
+        ),
       },
       sessionId,
     );

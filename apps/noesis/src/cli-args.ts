@@ -104,7 +104,7 @@ export function parseArgs(argv: readonly string[]): CliInput {
   const command = args[0] === undefined || args[0].startsWith("--") ? "tui" : args[0];
   if (!COMMANDS.has(command))
     throw new Error(
-      `Unknown command ${command}. Use tui, onboard, inspect, rebuild, config, auth, skills, update, or help.`,
+      `Unknown command ${command}. Use tui, onboard, inspect, rebuild, config, auth, skills, learning, update, or help.`,
     );
   const commandIndex = command === "tui" && args[0]?.startsWith("--") ? -1 : 0;
   const consumed = new Set<number>();

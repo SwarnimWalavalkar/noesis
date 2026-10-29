@@ -116,7 +116,7 @@ Existing experiment and preflight records remain readable historical evidence. N
 
 ## Capability records
 
-The current Capability lifecycle has four durable records:
+The current Capability lifecycle has these durable records and files:
 
 - `CapabilityDefinition` owns the stable ID, name, description, and applicability.
 - `CapabilityLifecycleRevision` owns one immutable revision, its exact effects, its rationale, its anticipated effect, and the evidence claim behind it.

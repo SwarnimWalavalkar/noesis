@@ -15,7 +15,6 @@ const ReviewResultSchema = z.looseObject({
   results: z.array(z.looseObject({ status: z.string() })).optional(),
 });
 const JOB_PAGE_LIMIT = 1000;
-const OUTCOME_LIMIT = 1000;
 const ADOPTION_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -66,14 +65,25 @@ export interface LearningReport {
 const within = (timestamp: string, since: string | undefined): boolean =>
   since === undefined || timestamp >= since;
 
+/** Every job of a kind in the window, newest first, read page by page. */
 async function listJobs(
   workspace: NoesisWorkspaceStore,
   kind: string,
   since: string | undefined,
 ): Promise<readonly DurableJobRecord[]> {
-  return (await workspace.jobs.list({ kind, order: "newest", limit: JOB_PAGE_LIMIT })).filter((job) =>
-    within(job.createdAt, since),
-  );
+  const jobs: DurableJobRecord[] = [];
+  let page = await workspace.jobs.listPage({ kind, order: "newest", limit: JOB_PAGE_LIMIT });
+  for (;;) {
+    const inWindow = page.records.filter((job) => within(job.createdAt, since));
+    jobs.push(...inWindow);
+    if (page.exhausted || !page.nextCursor || inWindow.length < page.records.length) return jobs;
+    page = await workspace.jobs.listPage({
+      kind,
+      order: "newest",
+      limit: JOB_PAGE_LIMIT,
+      after: page.nextCursor,
+    });
+  }
 }
 
 export async function computeLearningReport(
@@ -128,11 +138,11 @@ export async function computeLearningReport(
       if (!binding) return [];
       return [
         (async (): Promise<LearningReportCapability> => {
-          const [revisions, current, feedback, outcomes] = await Promise.all([
+          const [revisions, current, feedback, counts] = await Promise.all([
             workspace.capabilities.listRevisions(definition.capabilityId),
             workspace.capabilities.getRevision(binding.revision),
             workspace.capabilities.listFeedback(definition.capabilityId),
-            workspace.capabilities.listOutcomes(definition.capabilityId, OUTCOME_LIMIT),
+            workspace.capabilities.outcomeCounts(definition.capabilityId, since),
           ]);
           // listRevisions without a limit returns the oldest revision first.
           const first = revisions[0];
@@ -140,7 +150,6 @@ export async function computeLearningReport(
             const kind = first?.evidence?.kind ?? "not recorded";
             evidenceKinds[kind] = (evidenceKinds[kind] ?? 0) + 1;
           }
-          const windowed = outcomes.filter((outcome) => within(outcome.createdAt, since));
           const adoptionEnd = new Date(
             Date.parse(definition.createdAt) + ADOPTION_DAYS * DAY_MS,
           ).toISOString();
@@ -151,10 +160,10 @@ export async function computeLearningReport(
             state: binding.state,
             activationMode: binding.activationMode,
             revisions: revisions.length,
-            helped: windowed.filter((outcome) => outcome.result === "helped").length,
-            hurt: windowed.filter((outcome) => outcome.result === "hurt").length,
-            unclear: windowed.filter((outcome) => outcome.result === "unclear").length,
-            usedWithin30Days: outcomes.some((outcome) => outcome.createdAt <= adoptionEnd),
+            helped: counts.helped,
+            hurt: counts.hurt,
+            unclear: counts.unclear,
+            usedWithin30Days: counts.firstAt !== undefined && counts.firstAt <= adoptionEnd,
             automaticPauses: feedback.filter(
               (item) => item.disposition === "regression" && within(item.createdAt, since),
             ).length,

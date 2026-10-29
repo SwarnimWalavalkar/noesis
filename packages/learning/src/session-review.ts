@@ -91,13 +91,21 @@ function bounded(value: string, maximum: number): string {
   return value.length <= maximum ? value : `${value.slice(0, maximum)}…`;
 }
 
-/** Drops items from the end until the encoded message fits its character budget. */
-function fitted<T>(items: readonly T[], encode: (items: readonly T[]) => string): string {
+/**
+ * Drops items until the encoded message fits its character budget. Session requests drop the
+ * oldest first, so a long session keeps the newest needs that scheduled this review.
+ */
+function fitted<T>(
+  items: readonly T[],
+  encode: (items: readonly T[]) => string,
+  drop: "oldest" | "last" = "last",
+): string {
   const kept = [...items];
   for (;;) {
     const encoded = encode(kept);
     if (encoded.length <= MESSAGE_MAX_CHARACTERS || kept.length === 0) return encoded;
-    kept.pop();
+    if (drop === "oldest") kept.shift();
+    else kept.pop();
   }
 }
 
@@ -213,8 +221,10 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
       Object.freeze({
         role: "user" as const,
         name: "session_review",
-        content: fitted(sessionRequests, (items) =>
-          canonicalJson({ sessionId: request.sessionId, requests: items }),
+        content: fitted(
+          sessionRequests,
+          (items) => canonicalJson({ sessionId: request.sessionId, requests: items }),
+          "oldest",
         ),
       }),
       Object.freeze({

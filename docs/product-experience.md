@@ -94,7 +94,7 @@ The reflector or the user may choose project or session scope. The user may also
 
 ### Quiet, not compulsory
 
-Reflection runs automatically on every settled foreground turn once the user has reacted to it, by replying or by leaving the session idle. It should stay quiet and accept `no_change` as a normal result. `/learning` shows how each Capability has done in the turns that used it. The user should not have to run learning commands or manage an experiment pipeline.
+Reflection runs automatically on every settled foreground turn once the user has reacted to it, by replying or by leaving the session idle. A turn that failed before the model produced any output is skipped, because it shows nothing about behavior. It should stay quiet and accept `no_change` as a normal result. `/learning` shows how each Capability has done in the turns that used it. The user should not have to run learning commands or manage an experiment pipeline.
 
 The user may nevertheless ask Noesis to improve itself explicitly, or invoke `/refine`. Both load the built-in `noesis` skill, which progressively explains how to choose a lasting form, inspect current state, and publish an exact Capability decision. Program authoring guidance lives in the separate `execute` skill. This guidance is not repeated in the default system prompt.
 

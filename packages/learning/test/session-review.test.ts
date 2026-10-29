@@ -52,9 +52,12 @@ test("creates a Capability from a need repeated across sessions and skips supers
       createdAt: "2026-10-29T10:00:00.000Z",
       metadata: Object.freeze({ turnId: "turn-current" }),
     });
+    const earlierText = "Write the release notes from the merged pull requests, grouped by area.";
+    const searchedScopes: unknown[] = [];
     const history: Pick<HistoryPort, "search"> = Object.freeze({
-      search: async (request) =>
-        Object.freeze({
+      search: async (request) => {
+        searchedScopes.push(request.sessionScope);
+        return Object.freeze({
           query: request.query,
           hits: Object.freeze([
             Object.freeze({
@@ -68,8 +71,8 @@ test("creates a Capability from a need repeated across sessions and skips supers
                 occurredAt: "2026-10-20T10:00:00.000Z",
                 excerpt: "Write the release notes from the merged pull requests, grouped by area.",
                 startOffset: 0,
-                endOffset: 70,
-                contentDigest: sha256("earlier"),
+                endOffset: earlierText.length,
+                contentDigest: sha256(earlierText),
               }),
               combinedScore: 1,
             }),
@@ -82,7 +85,8 @@ test("creates a Capability from a need repeated across sessions and skips supers
             resultLimit: 3,
             maxExcerptChars: 400,
           }),
-        }),
+        });
+      },
     });
     const inference = createScriptedLearningInferencePort({
       steps: [
@@ -171,6 +175,8 @@ test("creates a Capability from a need repeated across sessions and skips supers
         new AbortController().signal,
       ),
     ).resolves.toMatchObject({ status: "reviewed", results: [{ status: "activated" }] });
+    // The review searches only earlier sessions for the same need.
+    expect(searchedScopes).toContainEqual({ kind: "previous", currentSessionId: "session-current" });
     expect(inference.requests()[0]?.messages.map((message) => message.name)).toEqual([
       "session_review",
       "current_capabilities",

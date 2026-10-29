@@ -197,6 +197,7 @@ const CapabilityInspectOutputSchema = z.discriminatedUnion("view", [
             result: z.enum(["helped", "hurt", "unclear"]),
             reason: z.string(),
             createdAt: z.string(),
+            evidenceRefs: z.array(EvidenceRefSchema),
           }),
         ),
       })
@@ -429,6 +430,7 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
               result: outcome.result,
               reason: outcome.reason,
               createdAt: outcome.createdAt,
+              evidenceRefs: [...outcome.evidenceRefs],
             })),
           },
         });

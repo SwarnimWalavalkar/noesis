@@ -36,7 +36,8 @@ export function sessionReviewNotices(
             stage: "reflection" as const,
             status: first.status,
             // One notice names every change the review made.
-            summary: `Session review · ${published
+            // The review usually covers a session the user has already left.
+            summary: `Review of an earlier session · ${published
               .map((item) => ("message" in item ? item.message : result.data.summary))
               .join(" · ")}`,
             updatedAt: job.updatedAt,
