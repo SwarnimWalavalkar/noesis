@@ -1,5 +1,5 @@
 import type { TrailState } from "@noesis/runtime";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import {
   learningAuditFocusId,
   learningDiagnosticNotice,
@@ -286,6 +286,24 @@ describe("working-adjustment notice presentation", () => {
         type: "notification-shown",
         text: "Capability active · activated summary · 1 more in /learning",
       }),
+    );
+  });
+
+  test("counts changes already announced when a late learning result arrives", async () => {
+    const notices: string[] = [];
+    startLateLearningNoticeRefresh(
+      { waitForLearningActivity: async () => activity("revised") },
+      {
+        trailId: "trail-1",
+        jobId: "job-revised",
+        earlierNotices: 1,
+        onNotice: (notice) => notices.push(notice),
+        onFailure: () => undefined,
+        onError: () => undefined,
+      },
+    );
+    await vi.waitFor(() =>
+      expect(notices).toEqual(["Capability updated · revised summary · 1 more in /learning"]),
     );
   });
 

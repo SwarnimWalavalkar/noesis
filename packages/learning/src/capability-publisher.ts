@@ -864,10 +864,13 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
 
   async function assertRevisionGuidanceFitsAlways(revision: CapabilityLifecycleRevision): Promise<void> {
     const document = capabilityDocumentRevision(revision);
-    if (!document) return;
-    assertAlwaysGuidanceFits(
-      capabilityGuidance(new TextDecoder().decode(await options.workspace.reads.readRevision(document))),
-    );
+    // Revisions from before Capability files keep their guidance in separate materials.
+    const guidance = document
+      ? capabilityGuidance(new TextDecoder().decode(await options.workspace.reads.readRevision(document)))
+      : (await currentDrafts(revision)).drafts
+          .flatMap((draft) => (draft.kind === "instruction" ? [draft.content] : []))
+          .join("\n\n");
+    assertAlwaysGuidanceFits(guidance);
   }
   const assertCurrentGuidanceFitsAlways = async (capabilityId: string): Promise<void> => {
     const binding = await options.store.getBinding(capabilityId);
@@ -942,8 +945,17 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
   // sync always writes the current revision even when publications race.
   const syncQueues = new Map<string, Promise<void>>();
   const syncWorkingDocument: CapabilityPublisher["syncWorkingDocument"] = async (capabilityId, context) => {
+    // A restored revision from before Capability files gets a file as a new revision. That move
+    // publishes, and publishing syncs again, so it runs outside the queue to avoid waiting on itself.
+    // Without a project context, the next startup moves it instead.
+    const binding = await options.store.getBinding(capabilityId);
+    const lifecycle = binding ? await options.store.getRevision(binding.revision) : undefined;
+    if (binding && lifecycle && !capabilityDocumentRevision(lifecycle)) {
+      if (context) await moveOne(binding, lifecycle, context, new AbortController().signal);
+      return;
+    }
     const previous = syncQueues.get(capabilityId) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(async () => await syncNow(capabilityId, context));
+    const next = previous.catch(() => undefined).then(async () => await syncNow(capabilityId));
     syncQueues.set(capabilityId, next);
     try {
       await next;
@@ -951,21 +963,13 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       if (syncQueues.get(capabilityId) === next) syncQueues.delete(capabilityId);
     }
   };
-  const syncNow = async (
-    capabilityId: string,
-    context: Pick<CapabilityPublicationContext, "project" | "sessionId"> | undefined,
-  ): Promise<void> => {
+  const syncNow = async (capabilityId: string): Promise<void> => {
     const binding = await options.store.getBinding(capabilityId);
     if (!binding) return;
     const lifecycle = await options.store.getRevision(binding.revision);
     if (!lifecycle) return;
     const document = capabilityDocumentRevision(lifecycle);
-    if (!document) {
-      // A restored revision from before Capability files gets a file as a new revision. Without a
-      // project context, the next startup moves it instead.
-      if (context) await moveOne(binding, lifecycle, context, new AbortController().signal);
-      return;
-    }
+    if (!document) return;
     // A restore or approval may select a revision with an older name or "when" text.
     const bytes = await options.workspace.reads.readRevision(document);
     const parsed = parseCapabilityDocument(new TextDecoder().decode(bytes));
@@ -1092,13 +1096,18 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       const path = capabilityWorkingDocumentPath(document);
       const working = await options.workspace.reads.readWorkingFile(path);
       if (!working || sha256(working) === document.contentDigest) continue;
-      // A file that matches an earlier recorded revision was never brought up to date, e.g. Noesis
-      // stopped right after publishing. It is not the user's edit, so bring it up to date instead.
+      // A file that still holds a Capability file Noesis wrote, and nothing recorded since, was never
+      // brought up to date, e.g. Noesis stopped right after publishing. Any edit by the user changes
+      // the bytes away from that record, so it is still imported below, even if it matches an older
+      // revision restored from a backup.
       const workingDigest = sha256(working);
-      const earlier = (await options.store.listRevisions(binding.capabilityId)).some(
-        (revision) => capabilityDocumentRevision(revision)?.contentDigest === workingDigest,
-      );
-      if (earlier) {
+      const lastRecorded = await options.workspace.reads.latestWorkingRevision(path);
+      const writtenByNoesis =
+        lastRecorded?.contentDigest === workingDigest &&
+        (await options.store.listRevisions(binding.capabilityId)).some(
+          (revision) => capabilityDocumentRevision(revision)?.contentDigest === workingDigest,
+        );
+      if (writtenByNoesis) {
         await syncWorkingDocument(binding.capabilityId, context);
         continue;
       }

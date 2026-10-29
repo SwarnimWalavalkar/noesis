@@ -1587,6 +1587,8 @@ export async function createWorkspaceStore(
           throw error;
         }
       },
+      latestWorkingRevision: async (workingPath: string) =>
+        latestRevisionFor(pathsForDefinition(workingPath).stored),
       readRevision: async (ref: FileRevisionRef) => {
         FileRevisionRefSchema.parse(ref);
         const registered = await resolveRevision(ref.revisionId);

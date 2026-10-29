@@ -154,6 +154,8 @@ export interface WorkspaceReadPort {
     ref: DatabaseRowRef<Table>,
   ) => Promise<Readonly<Record<string, string | number | bigint | Uint8Array | null>> | undefined>;
   readonly readWorkingFile: (workingPath: string) => Promise<Uint8Array | undefined>;
+  /** The newest recorded revision of a working path, i.e. the bytes Noesis last recorded there. */
+  readonly latestWorkingRevision: (workingPath: string) => Promise<FileRevisionRef | undefined>;
   readonly readRevision: (ref: FileRevisionRef) => Promise<Uint8Array>;
   readonly readEvidence: <Kind extends EvidenceKind>(ref: EvidenceRevisionRef<Kind>) => Promise<Uint8Array>;
   readonly readArtifact: (ref: ArtifactFileRef, maxBytes?: number) => Promise<Uint8Array>;

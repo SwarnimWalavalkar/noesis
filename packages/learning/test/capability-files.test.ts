@@ -188,9 +188,13 @@ describe("Capability files", () => {
       history.indexOf("Use pnpm."),
     );
 
-    // A file left at an earlier revision, e.g. after Noesis stopped mid-publication, is brought up to
-    // date instead of being imported as the user's edit.
-    await writeFile(file, new TextDecoder().decode(await workspace.reads.readRevision(before.document)));
+    // Noesis stopped right after publishing: its own last write at this path is still the earlier
+    // file. That file is brought up to date instead of being imported as the user's edit.
+    await workspace.definitions.recordWorkingDefinition({
+      workingPath: capabilityWorkingDocumentPath(before.document),
+      bytes: await workspace.reads.readRevision(before.document),
+      actor: Object.freeze({ actorId: "capability-files", kind: "system" as const }),
+    });
     await expect(publisher.recordDocumentEdits(context, new AbortController().signal)).resolves.toEqual({
       recorded: [],
       problems: [],
@@ -236,6 +240,50 @@ describe("Capability files", () => {
     expect(await workspace.capabilities.getDefinition(created.capabilityId)).toMatchObject({
       applicability: "Package commands in this repository.",
     });
+  });
+
+  test("imports an earlier file the user restored from a backup as an edit", async () => {
+    const { root, workspace, publisher, context } = await setup();
+    const proposal = {
+      name: "Use pnpm",
+      description: "Use pnpm for package commands.",
+      applicability: "Package commands in this repository.",
+      summary: "Use pnpm.",
+      rationale: "The user asked for pnpm.",
+      anticipatedEffect: "Package commands use pnpm.",
+      effects: [{ kind: "instruction" as const, content: "Run pnpm, not npm." }],
+      consequence: "ordinary" as const,
+      consequenceDescription: "Only model instructions change.",
+    };
+    const created = await publisher.publish(
+      { decision: "create", proposal },
+      context,
+      new AbortController().signal,
+    );
+    if (created.status !== "activated") throw new Error("Expected activation");
+    const first = await current(workspace, created.capabilityId);
+    await publisher.publish(
+      {
+        decision: "revise",
+        capabilityId: created.capabilityId,
+        expectedBindingRevision: first.binding.revisionNumber,
+        proposal: { ...proposal, effects: [{ kind: "instruction", content: "Run pnpm and pnpm dlx." }] },
+      },
+      context,
+      new AbortController().signal,
+    );
+    await writeFile(
+      join(root, capabilityWorkingDocumentPath(first.document)),
+      await workspace.reads.readRevision(first.document),
+    );
+    await expect(publisher.recordDocumentEdits(context, new AbortController().signal)).resolves.toEqual({
+      recorded: [{ capabilityId: created.capabilityId, name: "Use pnpm" }],
+      problems: [],
+    });
+    const restored = await current(workspace, created.capabilityId);
+    expect(
+      capabilityGuidance(new TextDecoder().decode(await workspace.reads.readRevision(restored.document))),
+    ).toBe("Run pnpm, not npm.");
   });
 
   test("keeps always-active guidance short", async () => {
@@ -374,5 +422,24 @@ describe("Capability files", () => {
     expect(moved.binding.activationMode).toBe("always");
     // A second run finds nothing left to move.
     await expect(publisher.moveToDocuments(context, new AbortController().signal)).resolves.toBe(0);
+
+    // Restoring the revision from before Capability files moves it into a file again, and finishes.
+    const restored = await publisher.publish(
+      {
+        decision: "restore",
+        capabilityId: "capability-old",
+        expectedBindingRevision: moved.binding.revisionNumber,
+        capabilityRevisionId: "revision-old",
+        reason: "Go back to the original.",
+      },
+      context,
+      new AbortController().signal,
+    );
+    expect(restored).toMatchObject({ status: "restored" });
+    const afterRestore = await current(workspace, "capability-old");
+    expect(afterRestore.binding.revision.capabilityRevisionId).not.toBe("revision-old");
+    expect(
+      capabilityGuidance(new TextDecoder().decode(await workspace.reads.readRevision(afterRestore.document))),
+    ).toMatch(/^Cite the primary source\./u);
   });
 });
