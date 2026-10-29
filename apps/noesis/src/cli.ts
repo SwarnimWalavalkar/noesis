@@ -142,7 +142,7 @@ async function createRuntime(
         .addOptional(mcp ? { mcp } : undefined)
         .add({
           recoverInterruptedOperations: options.recoverInterruptedOperations,
-          createAgent: (_sessionTools, codeExecution, skillLibrary) =>
+          createAgent: (codeExecution, skillLibrary) =>
             createPiAgentRuntime(
               project.root,
               services.models,
@@ -465,7 +465,7 @@ async function main(): Promise<void> {
         JSON.stringify(
           {
             trails: runtime.listTrails(),
-            activation: await runtime.debug.adaptations.activations.current(),
+            capabilityBindings: await runtime.debug.workspace.capabilities.listBindings(),
           },
           null,
           2,

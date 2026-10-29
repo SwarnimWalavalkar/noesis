@@ -542,4 +542,3 @@ export async function updateNoesisConfig(home: string, patch: unknown): Promise<
     return decoded.value;
   });
 }
-export * from "./criteria.ts";

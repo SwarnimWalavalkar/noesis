@@ -1,10 +1,5 @@
 import type { AgentMessage, AgentUsage, StructuredInferencePort } from "@noesis/agent-types";
 import {
-  type AtomicCapabilityRegistry,
-  capabilityEffectKinds,
-  capabilityEffects,
-} from "@noesis/capabilities";
-import {
   createConditionalObject,
   type CapabilityActivationMode,
   CapabilityEvidenceClaimSchema,
@@ -42,31 +37,23 @@ import {
   createCapabilityPublisher,
 } from "./capability-publisher.ts";
 import type { LearningRoleConfiguration, LearningTurnInput } from "./schemas.ts";
-export const CapabilityReflectionProposalSchema = z
-  .strictObject({
-    name: z.string().min(1).max(160),
-    /** Accepted only for compatibility with controlled responders written before effects-first authoring. */
-    kind: z.literal("instruction").optional(),
-    description: z.string().min(1).max(2048),
-    applicability: z.string().min(1).max(2048),
-    summary: z.string().min(1).max(2048),
-    rationale: z.string().min(1).max(4096),
-    anticipatedEffect: z.string().min(1).max(2048),
-    instruction: z.string().min(1).max(12000).optional(),
-    effects: z.array(CapabilityEffectDraftSchema).min(1).max(8).optional(),
-    scope: CapabilityScopeDecisionSchema.optional(),
-    activationMode: z.enum(["relevant", "always"]).optional(),
-    consequence: CapabilityConsequenceSchema,
-    consequenceDescription: z.string().min(1).max(2048),
-    evidence: CapabilityEvidenceClaimSchema.describe(
-      "What supports this lesson: the user's explicit request or correction, the same need in several sessions, or a method that worked. Quote the user's words or the observed result, and say what the user would otherwise have to repeat or correct.",
-    ),
-    evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(16),
-  })
-  .superRefine((proposal, context) => {
-    if (proposal.effects === undefined && proposal.instruction === undefined)
-      context.addIssue({ code: "custom", message: "Capability proposal requires effects" });
-  });
+export const CapabilityReflectionProposalSchema = z.strictObject({
+  name: z.string().min(1).max(160),
+  description: z.string().min(1).max(2048),
+  applicability: z.string().min(1).max(2048),
+  summary: z.string().min(1).max(2048),
+  rationale: z.string().min(1).max(4096),
+  anticipatedEffect: z.string().min(1).max(2048),
+  effects: z.array(CapabilityEffectDraftSchema).min(1).max(8),
+  scope: CapabilityScopeDecisionSchema.optional(),
+  activationMode: z.enum(["relevant", "always"]).optional(),
+  consequence: CapabilityConsequenceSchema,
+  consequenceDescription: z.string().min(1).max(2048),
+  evidence: CapabilityEvidenceClaimSchema.describe(
+    "What supports this lesson: the user's explicit request or correction, the same need in several sessions, or a method that worked. Quote the user's words or the observed result, and say what the user would otherwise have to repeat or correct.",
+  ),
+  evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(16),
+});
 const CapabilityGateChangeSchema = z.strictObject({
   summary: z.string().min(1).max(2048),
   rationale: z.string().min(1).max(4096),
@@ -133,11 +120,8 @@ export interface CapabilityLearningTurn {
   readonly turn: LearningTurnInput;
   readonly project: ProjectRef;
   readonly selectedCapabilities: readonly CapabilityRevisionRef[];
-  /**
-   * Capabilities whose guidance the turn's frozen plan put in the system prompt. Older jobs omit
-   * it, and reflection then falls back to each binding's current mode.
-   */
-  readonly promptCapabilityIds?: readonly string[];
+  /** Capabilities whose guidance the turn's frozen plan put in the system prompt. */
+  readonly promptCapabilityIds: readonly string[];
 }
 /** A publication result, with the reflection model's token usage when a model ran. */
 export type CapabilityReflectionResult = CapabilityPublicationResult & { readonly usage?: AgentUsage };
@@ -188,12 +172,6 @@ export interface CapabilityLearningModule {
     turn: CapabilityLearningTurn,
     signal: AbortSignal,
   ) => Promise<CapabilityReflectionResult>;
-  readonly iterateOnFeedback: (
-    input: CapabilityLearningTurn & {
-      readonly feedback: string;
-    },
-    signal: AbortSignal,
-  ) => Promise<CapabilityReflectionResult>;
   readonly manage: (
     intent: CapabilityManagementIntent,
     signal: AbortSignal,
@@ -202,7 +180,6 @@ export interface CapabilityLearningModule {
 export interface CreateCapabilityLearningModuleOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly store: CapabilityLifecycleStore;
-  readonly registry: AtomicCapabilityRegistry;
   readonly history: Pick<HistoryPort, "search">;
   readonly inference: StructuredInferencePort;
   readonly reflector: LearningRoleConfiguration;
@@ -232,12 +209,6 @@ function roleRequest(
 export function publicationProposal(
   proposal: z.infer<typeof CapabilityReflectionProposalSchema>,
 ): CapabilityProposal {
-  const effects =
-    proposal.effects ??
-    (proposal.instruction
-      ? Object.freeze([{ kind: "instruction" as const, content: proposal.instruction }])
-      : undefined);
-  if (!effects) throw new Error("Capability proposal has no effects");
   return CapabilityProposalSchema.parse(
     createConditionalObject({
       name: proposal.name,
@@ -246,7 +217,7 @@ export function publicationProposal(
       summary: proposal.summary,
       rationale: proposal.rationale,
       anticipatedEffect: proposal.anticipatedEffect,
-      effects,
+      effects: proposal.effects,
       consequence: proposal.consequence,
       consequenceDescription: proposal.consequenceDescription,
       evidence: proposal.evidence,
@@ -283,13 +254,10 @@ function currentCapabilitiesMessage(
           capabilityId: definition.capabilityId,
           name: definition.name,
           selectedForSettledTurn: selectedIds.has(definition.capabilityId),
-          effects: lifecycle ? capabilityEffectKinds(lifecycle.revision) : Object.freeze([]),
+          effects: lifecycle ? lifecycle.revision.effects.map((effect) => effect.kind) : Object.freeze([]),
+          description: definition.description,
+          applicability: definition.applicability,
         } as const)
-          .addOptional(!lifecycle && definition.kind ? { legacyKind: definition.kind } : undefined)
-          .add({
-            description: definition.description,
-            applicability: definition.applicability,
-          } as const)
           .addOptional(
             binding
               ? {
@@ -411,12 +379,7 @@ async function exchangeReaction(
   if (!next) return undefined;
   return Object.freeze({ messageId: next.messageId, content: next.content, createdAt: next.createdAt });
 }
-function settledTurnMessage(
-  input: CapabilityLearningTurn & {
-    readonly feedback?: string;
-  },
-  reaction: ExchangeReaction | undefined,
-): string {
+function settledTurnMessage(input: CapabilityLearningTurn, reaction: ExchangeReaction | undefined): string {
   // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
   const encoded = canonicalJson(
     createConditionalObject({
@@ -438,7 +401,6 @@ function settledTurnMessage(
       .addOptional(
         input.turn.correction ? { correction: boundedText(input.turn.correction, 1000) } : undefined,
       )
-      .addOptional(input.feedback ? { explicitFeedback: boundedText(input.feedback, 1000) } : undefined)
       .add({
         outcome: input.turn.outcome,
         cause: input.turn.cause ?? "unrecorded",
@@ -452,7 +414,6 @@ function settledTurnMessage(
         sensitivity: input.turn.sensitivity,
         telemetry: input.turn.telemetry,
         evidenceRefCount: input.turn.evidenceRefs.length,
-        priorAdjustmentOutcomeCount: input.turn.servedWorkingAdjustmentOutcomes.length,
       } as const)
       .finish(),
   );
@@ -718,14 +679,9 @@ async function currentCapabilityMaterialsMessage(
   });
   const projected: unknown[] = [];
   for (const [capabilityId, lifecycle] of ordered) {
-    const effects = capabilityEffects(lifecycle.revision);
-    if (effects.length === 0) continue;
     const materials = await Promise.all(
-      effects.map(async (effect) => {
-        const reference =
-          effect.kind === "instruction" || effect.kind === "skill"
-            ? effect.material
-            : effect.program.definitionRevision;
+      lifecycle.revision.effects.map(async (effect) => {
+        const reference = effect.kind === "instruction" ? effect.material : effect.program.definitionRevision;
         const content = new TextDecoder("utf8", { fatal: true })
           .decode(await workspace.reads.readRevision(reference))
           .slice(0, CURRENT_MATERIAL_EXCERPT_CHARACTERS);
@@ -734,14 +690,7 @@ async function currentCapabilityMaterialsMessage(
           createConditionalObject({
             kind: effect.kind,
           } as const)
-            .addOptional(
-              effect.kind === "skill" || effect.kind === "program"
-                ? {
-                    name: effect.kind === "program" ? effect.program.name : effect.name,
-                  }
-                : undefined,
-            )
-            .addOptional(effect.kind === "skill" ? { description: effect.description } : undefined)
+            .addOptional(effect.kind === "program" ? { name: effect.program.name } : undefined)
             .add({
               revisionId: reference.revisionId,
               contentDigest: reference.contentDigest,
@@ -785,7 +734,7 @@ function foregroundCapabilitySurfaceMessage(
   const contract = Object.freeze({
     authority: "Derived from the exact Capability revisions selected for the settled foreground turn.",
     instruction:
-      "A relevant Capability starts as name-and-description metadata only: its instructions form one learned-capability skill, and its skill effects are separate skills. One completed skills.load exposes a full frozen body. An always Capability's instructions are in the system prompt. Immutable bytes in the turn plan or reflector context do not mean the foreground model read them.",
+      "A relevant Capability starts as name-and-description metadata only: its instructions form one learned-capability skill. One completed skills.load exposes a full frozen body. An always Capability's instructions are in the system prompt. Immutable bytes in the turn plan or reflector context do not mean the foreground model read them.",
   });
   const capabilities: unknown[] = [];
   const encode = (projected: readonly unknown[]): string =>
@@ -811,64 +760,30 @@ function foregroundCapabilitySurfaceMessage(
       capabilities.push(item);
       continue;
     }
-    const effects = capabilityEffects(lifecycle.revision);
-    const exposure =
-      effects.length > 0
-        ? effects.map((effect) => {
-            if (effect.kind === "instruction")
-              return onDemandCapabilityIds.has(lifecycle.reference.capabilityId)
-                ? Object.freeze({
-                    kind: effect.kind,
-                    initialForegroundExposure: "name_and_description_only",
-                    fullBodyExposure: "after_completed_skills.load",
-                    loadedDuringSettledTurn: [...loadedSkillNames].some(
-                      (name) =>
-                        name.startsWith("learned-") &&
-                        name.endsWith(`-${learnedCapabilitySkillSuffix(lifecycle.reference.capabilityId)}`),
-                    ),
-                  })
-                : Object.freeze({
-                    kind: effect.kind,
-                    initialForegroundExposure: "full_content_in_system_prompt",
-                  });
-            if (effect.kind === "skill")
-              return Object.freeze({
-                kind: effect.kind,
-                name: effect.name,
-                initialForegroundExposure: "name_and_description_only",
-                fullBodyExposure: "after_completed_skills.load",
-                loadedDuringSettledTurn: loadedSkillNames.has(effect.name),
-              });
-            return Object.freeze({
+    const exposure = lifecycle.revision.effects.map((effect) => {
+      if (effect.kind === "instruction")
+        return onDemandCapabilityIds.has(lifecycle.reference.capabilityId)
+          ? Object.freeze({
               kind: effect.kind,
-              name: effect.program.name,
-              mode: effect.program.mode,
-              initialForegroundExposure: "exact_project_program_adapter",
+              initialForegroundExposure: "name_and_description_only",
+              fullBodyExposure: "after_completed_skills.load",
+              loadedDuringSettledTurn: [...loadedSkillNames].some(
+                (name) =>
+                  name.startsWith("learned-") &&
+                  name.endsWith(`-${learnedCapabilitySkillSuffix(lifecycle.reference.capabilityId)}`),
+              ),
+            })
+          : Object.freeze({
+              kind: effect.kind,
+              initialForegroundExposure: "full_content_in_system_prompt",
             });
-          })
-        : [
-            ...lifecycle.revision.promptModules.map((material) =>
-              Object.freeze({
-                kind: "legacy_prompt_module",
-                revisionId: material.revisionId,
-                initialForegroundExposure: "full_content_in_system_prompt",
-              }),
-            ),
-            ...lifecycle.revision.skills.map((material) =>
-              Object.freeze({
-                kind: "legacy_skill",
-                revisionId: material.revisionId,
-                initialForegroundExposure: "full_content_in_system_prompt",
-              }),
-            ),
-            ...lifecycle.revision.tools.map((material) =>
-              Object.freeze({
-                kind: "legacy_tool",
-                revisionId: material.revisionId,
-                initialForegroundExposure: "tool_catalog",
-              }),
-            ),
-          ];
+      return Object.freeze({
+        kind: effect.kind,
+        name: effect.program.name,
+        mode: effect.program.mode,
+        initialForegroundExposure: "exact_project_program_adapter",
+      });
+    });
     const item = Object.freeze({
       capabilityId: lifecycle.reference.capabilityId,
       capabilityRevisionId: lifecycle.reference.capabilityRevisionId,
@@ -915,7 +830,6 @@ export function createCapabilityLearningModule(
     createCapabilityPublisher({
       workspace: options.workspace,
       store: options.store,
-      registry: options.registry,
       programs,
       now,
       nextId,
@@ -1017,9 +931,7 @@ export function createCapabilityLearningModule(
     return paused;
   };
   const reflect = async (
-    input: CapabilityLearningTurn & {
-      readonly feedback?: string;
-    },
+    input: CapabilityLearningTurn,
     signal: AbortSignal,
   ): Promise<CapabilityReflectionResult> => {
     signal.throwIfAborted();
@@ -1028,14 +940,14 @@ export function createCapabilityLearningModule(
         status: "no_change",
         reason: "Secret turns are excluded from ambient capability authoring",
       });
-    if (input.turn.cause === "failed_before_output" && input.feedback === undefined)
+    if (input.turn.cause === "failed_before_output")
       return Object.freeze({
         status: "no_change",
         reason: "The turn failed before the model produced any output, so it shows nothing about behavior",
       });
     const [history, bindings] = await Promise.all([
       options.history.search({
-        query: input.feedback ?? input.turn.correction ?? input.turn.userMessage,
+        query: input.turn.correction ?? input.turn.userMessage,
         sessionScope: Object.freeze({ kind: "previous", currentSessionId: input.turn.sessionId }),
         limit: 8,
         maxExcerptChars: 800,
@@ -1117,14 +1029,10 @@ export function createCapabilityLearningModule(
       const binding = bindingById.get(reference.capabilityId);
       if (!binding || !lifecycle) return [];
       const suffix = `-${learnedCapabilitySkillSuffix(reference.capabilityId)}`;
-      const loaded =
-        [...loadedSkillNames].some((name) => name.startsWith("learned-") && name.endsWith(suffix)) ||
-        capabilityEffects(lifecycle.revision).some(
-          (effect) => effect.kind === "skill" && loadedSkillNames.has(effect.name),
-        );
-      const inPrompt = input.promptCapabilityIds
-        ? input.promptCapabilityIds.includes(reference.capabilityId)
-        : binding.activationMode === "always";
+      const loaded = [...loadedSkillNames].some(
+        (name) => name.startsWith("learned-") && name.endsWith(suffix),
+      );
+      const inPrompt = input.promptCapabilityIds.includes(reference.capabilityId);
       const how = inPrompt ? "always_in_prompt" : loaded ? "loaded_by_model" : undefined;
       return how === undefined ? [] : [Object.freeze({ reference, lifecycle, how })];
     });
@@ -1133,7 +1041,7 @@ export function createCapabilityLearningModule(
     const inUseGuidance = await Promise.all(
       inUse.map(async (used) => {
         const texts = await Promise.all(
-          capabilityEffects(used.lifecycle.revision).flatMap((effect) =>
+          used.lifecycle.revision.effects.flatMap((effect) =>
             effect.kind === "program"
               ? []
               : [
@@ -1176,16 +1084,11 @@ export function createCapabilityLearningModule(
         content: foregroundCapabilitySurfaceMessage(
           exactSelectedTurnRevisions,
           currentEvidence,
-          // The frozen plan says which Capabilities were delivered on demand; older jobs fall back to
-          // each binding's current mode.
+          // The frozen plan says which Capabilities were delivered on demand.
           new Set(
-            input.promptCapabilityIds
-              ? input.selectedCapabilities
-                  .map((reference) => reference.capabilityId)
-                  .filter((capabilityId) => !input.promptCapabilityIds?.includes(capabilityId))
-              : bindings
-                  .filter((binding) => binding.activationMode === "relevant")
-                  .map((binding) => binding.capabilityId),
+            input.selectedCapabilities
+              .map((reference) => reference.capabilityId)
+              .filter((capabilityId) => !input.promptCapabilityIds.includes(capabilityId)),
           ),
         ),
       }),
@@ -1230,13 +1133,7 @@ export function createCapabilityLearningModule(
       }),
     ]);
     const inferred = await options.inference.run(
-      roleRequest(
-        options.reflector,
-        nextId(input.feedback ? "iterate-feedback" : "reflect-capability"),
-        messages,
-        input.turn.evidenceRefs,
-        signal,
-      ),
+      roleRequest(options.reflector, nextId("reflect-capability"), messages, input.turn.evidenceRefs, signal),
       CapabilityReflectionOutputSchema,
     );
     signal.throwIfAborted();
@@ -1301,7 +1198,6 @@ export function createCapabilityLearningModule(
       ? citedEvidence(proposal.evidenceCitationIndexes, citations)
       : input.turn.evidenceRefs;
     const interpretation =
-      input.feedback ??
       input.turn.correction ??
       proposal?.rationale ??
       ("reason" in decision ? decision.reason : "Capability decision");
@@ -1370,7 +1266,7 @@ export function createCapabilityLearningModule(
           capabilityId: gate.capabilityId,
           message: "Binding changed",
         });
-      await publisher.syncWorkingDocument(gate.capabilityId, undefined, { userChoseRevision: true });
+      await publisher.syncWorkingDocument(gate.capabilityId, { userChoseRevision: true });
       return Object.freeze({
         status: "activated",
         capabilityId: gate.capabilityId,
@@ -1475,7 +1371,7 @@ export function createCapabilityLearningModule(
     signal.throwIfAborted();
     const updated = await options.store.updateBinding(request);
     if (intent.type === "restore" && updated.status !== "stale")
-      await publisher.syncWorkingDocument(intent.capabilityId, undefined, { userChoseRevision: true });
+      await publisher.syncWorkingDocument(intent.capabilityId, { userChoseRevision: true });
     return Object.freeze({
       status:
         updated.status === "stale"
@@ -1492,12 +1388,6 @@ export function createCapabilityLearningModule(
   return Object.freeze({
     reflectSettledTurn: async (turn: CapabilityLearningTurn, signal: AbortSignal) =>
       await reflect(turn, signal),
-    iterateOnFeedback: async (
-      input: CapabilityLearningTurn & {
-        readonly feedback: string;
-      },
-      signal: AbortSignal,
-    ) => await reflect(input, signal),
     manage,
   });
 }

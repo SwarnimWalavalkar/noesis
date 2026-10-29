@@ -1,5 +1,5 @@
+import type { EvidenceRef } from "@noesis/domain";
 import type {
-  CoordinatorEvidenceRef,
   InteractionCommand,
   InteractionDispatchResult,
   InteractionSnapshot,
@@ -179,21 +179,18 @@ export interface TuiExecutionDetail extends TuiExecutionSummary {
 
 export interface TuiLearningActivitySummary {
   readonly jobId: string;
-  readonly stage: "reflection" | "authoring" | "preflight";
+  readonly stage: "reflection";
   readonly status:
     | "queued"
     | "running"
     | "completed"
     | "no_change"
-    | "adjusted"
     | "activated"
     | "revised"
     | "pending"
     | "paused"
     | "restored"
     | "binding_changed"
-    | "replaced"
-    | "unapplied"
     | "stale"
     | "failed";
   readonly summary: string;
@@ -201,87 +198,29 @@ export interface TuiLearningActivitySummary {
   readonly turnId?: string;
   /** The later turn whose user message reacted to `turnId` and released its reflection. */
   readonly reactionTurnId?: string;
-  readonly experimentId?: string;
   readonly capabilityId?: string;
   readonly capabilityRevisionId?: string;
   readonly capabilityBundleDigest?: string;
   readonly projectId?: string;
-  readonly adjustmentId?: string;
-  readonly activeAdjustmentId?: string;
-  readonly evidenceRefs?: readonly CoordinatorEvidenceRef[];
-  readonly workingAdjustment?: TuiWorkingAdjustmentState;
+  readonly evidenceRefs?: readonly EvidenceRef[];
   readonly failure?: string;
-}
-
-export interface TuiWorkingAdjustmentEvidenceSummary {
-  readonly planId: string;
-  readonly sessionId: string;
-  readonly turnId: string;
-  readonly outcomeId: string;
-  readonly outcome: "accepted" | "corrected" | "failed" | "unknown";
-  readonly summary: string;
-  readonly settledAt: string;
-}
-
-export interface TuiWorkingAdjustmentState {
-  readonly adjustmentId: string;
-  readonly projectId: string;
-  readonly status: "active" | "inactive";
-  readonly strategy: string;
-  readonly successSignal: string;
-  readonly servedEvidence: readonly TuiWorkingAdjustmentEvidenceSummary[];
 }
 
 export interface TuiLearningInspection {
   readonly activity: readonly TuiLearningActivitySummary[];
-  readonly currentWorkingAdjustment?: TuiWorkingAdjustmentState;
 }
 
 export type TuiLearningPrimitiveKind =
-  | "criterion"
   | "capability"
   | "capability_feedback"
   | "capability_gate"
   | "reflection"
-  | "working_adjustment"
-  | "experiment"
-  | "capability_revision"
-  | "preflight_plan"
-  | "trial"
-  | "evaluation"
-  | "preflight_report"
-  | "activation"
-  | "approval"
-  | "feedback_signal"
-  | "observation"
-  | "outcome_research"
-  | "experiment_outcome"
-  | "successor_lineage"
-  | "job";
+  | "capability_revision";
 
-export type TuiLearningPrimitiveGroup =
-  | "capabilities"
-  | "memory"
-  | "reflection"
-  | "history"
-  | "evaluation"
-  | "activation"
-  | "feedback"
-  | "operations";
-
-export type TuiCapabilityKind =
-  | "instruction"
-  | "skill"
-  | "tool"
-  | "workflow"
-  | "router"
-  | "model_configuration"
-  | "harness_configuration"
-  | "core_update"
-  | "composite";
+export type TuiLearningPrimitiveGroup = "capabilities" | "reflection" | "history" | "activation" | "feedback";
 
 /** Exact mechanisms produced by the current Capability revision. */
-export type TuiCapabilityFacet = "instruction" | "skill" | "program";
+export type TuiCapabilityFacet = "instruction" | "program";
 
 export interface TuiLearningRelation {
   readonly label: string;
@@ -318,14 +257,11 @@ export interface TuiLearningPrimitive {
   readonly occurredAt?: string;
   readonly sessionId?: string;
   readonly projectId?: string;
-  readonly experimentId?: string;
   readonly capabilityId?: string;
   readonly capabilityRevisionId?: string;
   readonly capabilityBundleDigest?: string;
   readonly capabilityBindingRevision?: number;
   readonly capabilityFacets?: readonly TuiCapabilityFacet[];
-  /** Historical authoring label. Current records use capabilityFacets. */
-  readonly capabilityKind?: TuiCapabilityKind;
   readonly capabilityState?: "active" | "paused";
   readonly capabilityActivationMode?: "relevant" | "always";
   readonly capabilityScope?: "global" | "project" | "session";
@@ -344,8 +280,6 @@ export interface TuiLearningAuditSnapshot {
   readonly projectId: string;
   readonly sessionId: string;
   readonly generatedAt: string;
-  readonly activeAdjustmentId?: string;
-  readonly activeActivationId?: string;
   readonly primitives: readonly TuiLearningPrimitive[];
 }
 

@@ -17,7 +17,7 @@ Never claim an action or system state without runtime evidence.
 
 Active Capabilities and skills may add relevant instructions. The stable core stays short.
 
-Active Capability revisions contribute exact effects frozen at turn start. An effect may add an instruction, expose a progressively loaded skill, or attach an exact saved project Program revision in script or workflow mode.
+Active Capability revisions contribute exact effects frozen at turn start. Each revision has exactly one instruction effect, the Capability file revision, and may attach one exact saved project Program revision in script or workflow mode.
 
 The built-in `noesis` skill holds the operational guidance for inspecting and deliberately refining these systems. Its compact name and description appear with other skill metadata; its body loads only when relevant or when the user invokes `/noesis` or its `/refine` alias. The stable core prompt does not duplicate the publication contract.
 
@@ -96,23 +96,23 @@ The foreground agent is an equally capable semantic author. When the task or use
 
 Ambient reflection and foreground authoring share one protected Capability publisher. That publisher records the Capability's file as an exact revision, resolves exact saved-program revisions, validates scope and consequence, compares the expected binding revision, preserves predecessor lineage, and either activates or creates the same small protected gate. A foreground publication changes later frozen turn plans, never the already-admitted current plan. Subagents may inspect and advise but cannot publish.
 
-Reflection also receives an exact foreground Capability surface. It distinguishes material injected into the initial system prompt, effect skills exposed only as name-and-description metadata, completed `skills.load` calls that later exposed a full frozen body, and exact saved-program adapters. Complete predecessor materials remain available separately for revision authoring; their presence in reflector context is not evidence that the foreground model saw them.
+Reflection also receives an exact foreground Capability surface. It distinguishes material injected into the initial system prompt, learned skills exposed only as name-and-description metadata, completed `skills.load` calls that later exposed a Capability's full frozen guidance, and exact saved-program adapters. Complete predecessor materials remain available separately for revision authoring; their presence in reflector context is not evidence that the foreground model saw them.
 
 An ordinary exact revision becomes active after SQLite validates its evidence and compare-and-swap binding. User feedback may produce a successor immediately.
 
 Credential export, recovery or audit control, and irreversible external actions without foreground intent create a pending gate. `/learning` offers approve, deny, and change for these requests.
 
-A Capability states when an ability should help, why the evidence supports it, what behavior changes, and its anticipated effect. Its revision contains one or more exact effects rather than a mechanism label.
+A Capability states when an ability should help, why the evidence supports it, what behavior changes, and its anticipated effect. Its revision contains exactly one instruction effect, the Capability's Markdown file, and optionally one saved Program effect.
 
 New Capabilities are globally eligible and relevant by default. The foreground model sees each one's name and "when" text with the other skills and loads it when it applies. The user may narrow the scope or make one always active.
 
 Direct deliberate learning and ambient reflection both publish versioned Capabilities through the same protected publisher. A lasting user fact, preference, or criterion that should alter future behavior is represented as a Capability whose file holds its guidance, not as a second model-facing memory primitive.
 
-A session review runs once a session has been quiet for 30 minutes after its last turn. It receives a prepared packet: the session's requests, matching requests from earlier sessions, and every current Capability with its track record. It has no tools. It may create, revise, pause, or rescope at most three Capabilities through the same publisher, and it cannot author Programs. Historical user criteria remain readable evaluation and audit data.
+A session review runs once a session has been quiet for 30 minutes after its last turn. It receives a prepared packet: the session's requests, matching requests from earlier sessions, and every current Capability with its track record. It has no tools. It may create, revise, pause, or rescope at most three Capabilities through the same publisher, and it cannot author Programs.
 
 Inside `execute`, `capabilities.inspect` progressively exposes the Capability list, one complete lifecycle, or one exact effect material. `capabilities.refine` accepts the complete decision schema and returns the authoritative publication result. These schemas come from the frozen Tool Catalog and remain discoverable through `noesis.describe`; they are not handwritten into the system prompt or skill body. Completed normal-sensitivity calls earlier in the same foreground execution, plus the current user message, form the bounded publication evidence set.
 
-Existing experiment and preflight records remain readable historical evidence. No new speculative evaluation pipeline blocks ordinary learning. A future evaluation system must run real candidate behavior before it makes comparative claims.
+No speculative evaluation pipeline blocks ordinary learning. A future evaluation system must run real candidate behavior before it makes comparative claims.
 
 ## Capability records
 

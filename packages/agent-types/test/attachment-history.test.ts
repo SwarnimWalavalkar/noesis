@@ -28,12 +28,10 @@ const history: FrozenConversationHistoryEntry = {
 };
 function freeze(entry: FrozenConversationHistoryEntry) {
   const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: "plan",
     sessionId: "session",
     turnId: "turn",
-    activationId: "activation",
-    activationRevision: 1,
     selectedCapabilities: [],
     renderedSystemPrompt: "System",
     provider: "controlled",
@@ -41,7 +39,6 @@ function freeze(entry: FrozenConversationHistoryEntry) {
     thinkingLevel: "off",
     permissionSnapshot: { effects: [], resourcePatterns: [], credentialRefs: [] },
     retrievalCitations: [],
-    routing: { strategyId: "baseline", reason: "test" },
     createdAt: "2026-01-01",
     conversationHistory: [entry],
   };

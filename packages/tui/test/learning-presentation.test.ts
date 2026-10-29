@@ -7,7 +7,7 @@ import {
   reconcileSettledTurnPresentation,
   settledTurnPresentation,
   startLateLearningNoticeRefresh,
-  workingAdjustmentNoticeForTurn,
+  learningActivityNoticeForTurn,
 } from "../src/learning-presentation.ts";
 import type { TuiLearningActivitySummary } from "../src/runtime-port.ts";
 import { initialTuiState, reduceTui } from "../src/state.ts";
@@ -55,7 +55,7 @@ const waitForAsyncPresentation = async (): Promise<void> => {
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
 };
 
-describe("working-adjustment notice presentation", () => {
+describe("learning notice presentation", () => {
   test("derives notification tone from structured activity status", () => {
     expect(learningNoticeTone(activity("pending"))).toBe("attention");
     expect(learningNoticeTone(activity("activated"))).toBe("learning");
@@ -63,75 +63,28 @@ describe("working-adjustment notice presentation", () => {
 
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   test.each([
-    ["adjusted", "adjusted · adjusted summary"],
-    ["replaced", "adjusted · replaced summary"],
-    ["unapplied", "unapplied · unapplied summary"],
+    ["activated", "Capability active · activated summary"],
+    ["revised", "Capability updated · revised summary"],
+    ["paused", "Capability paused · paused summary"],
     ["stale", "unchanged · stale summary"],
   ] as const)("presents %s outcomes", (status, expected) => {
-    expect(workingAdjustmentNoticeForTurn([activity(status)], "turn-1")).toBe(expected);
+    expect(learningActivityNoticeForTurn([activity(status)], "turn-1")).toBe(expected);
   });
 
   test("ignores unrelated turns and quiet learning outcomes", () => {
     expect(
-      workingAdjustmentNoticeForTurn([activity("adjusted", "other-turn"), activity("no_change")], "turn-1"),
+      learningActivityNoticeForTurn([activity("activated", "other-turn"), activity("no_change")], "turn-1"),
     ).toBeUndefined();
   });
 
   test("names the audit record a later /learning command should open", () => {
-    expect(learningAuditFocusId(activity("adjusted"))).toBe("reflection:job-adjusted");
+    expect(learningAuditFocusId(activity("stale"))).toBe("reflection:job-stale");
     expect(
-      learningAuditFocusId(
-        Object.freeze({
-          ...activity("adjusted"),
-          adjustmentId: "adjustment-1",
-        }),
-      ),
-    ).toBe("working_adjustment:adjustment-1");
-    expect(
-      learningAuditFocusId(
-        Object.freeze({
-          ...activity("unapplied"),
-          adjustmentId: "adjustment-1",
-        }),
-      ),
-    ).toBe("reflection:job-unapplied");
-    expect(
-      learningAuditFocusId(
-        Object.freeze({
-          ...activity("stale"),
-          adjustmentId: "adjustment-1",
-        }),
-      ),
-    ).toBe("reflection:job-stale");
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    expect(
-      learningAuditFocusId(
-        Object.freeze({
-          ...activity("failed"),
-          stage: "authoring" as const,
-          experimentId: "experiment-1",
-        }),
-      ),
-    ).toBe("experiment:experiment-1");
+      learningAuditFocusId(Object.freeze({ ...activity("activated"), capabilityId: "capability-1" })),
+    ).toBe("capability:capability-1");
   });
 
-  test("includes the applied strategy and tracks a running reflection without a transcript placeholder", async () => {
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    const adjusted = Object.freeze({
-      ...activity("adjusted"),
-      workingAdjustment: Object.freeze({
-        adjustmentId: "adjustment-1",
-        projectId: "project-1",
-        status: "active" as const,
-        strategy: "Verify observable state before claiming completion.",
-        successSignal: "Completion claims cite observed state.",
-        servedEvidence: Object.freeze([]),
-      }),
-    });
-    expect(workingAdjustmentNoticeForTurn([adjusted], "turn-1")).toContain(
-      "strategy · Verify observable state before claiming completion.",
-    );
-
+  test("tracks a running reflection without a transcript placeholder", async () => {
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const presentation = await settledTurnPresentation(
       {
@@ -344,11 +297,11 @@ describe("working-adjustment notice presentation", () => {
     const reported: unknown[] = [];
     startLateLearningNoticeRefresh(
       {
-        waitForLearningActivity: async () => activity("adjusted"),
+        waitForLearningActivity: async () => activity("activated"),
       },
       {
         trailId: "trail-1",
-        jobId: "job-adjusted",
+        jobId: "job-activated",
         onNotice: () => {
           throw failure;
         },
@@ -372,7 +325,7 @@ describe("working-adjustment notice presentation", () => {
       },
       {
         trailId: "trail-1",
-        jobId: "job-adjusted",
+        jobId: "job-activated",
         onNotice: () => undefined,
         onFailure: (error) => diagnostics.push(error),
         onError: (error) => fatal.push(error),

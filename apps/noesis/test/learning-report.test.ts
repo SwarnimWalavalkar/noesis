@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import { createCapabilityPublisher } from "@noesis/learning";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { expect, test } from "vitest";
@@ -42,7 +41,6 @@ test("counts each Capability's judged outcomes and evidence", async () => {
     const publisher = createCapabilityPublisher({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
     });
     const published = await publisher.publish(
       {

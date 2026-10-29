@@ -1,12 +1,10 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { capabilityEffects, createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import {
   sha256,
   CAPABILITY_NOTES_MARKER,
   capabilityGuidance,
-  capabilityRevisionRef,
   parseCapabilityDocument,
   renderCapabilityDocument,
 } from "@noesis/domain";
@@ -50,15 +48,14 @@ async function setup() {
     createdAt: "2026-10-29T10:00:00.000Z",
     metadata: Object.freeze({ turnId: "turn-files" }),
   });
-  const registry = createAtomicCapabilityRegistry();
-  const publisher = createCapabilityPublisher({ workspace, store: workspace.capabilities, registry });
+  const publisher = createCapabilityPublisher({ workspace, store: workspace.capabilities });
   const context = Object.freeze({
     project: Object.freeze({ projectId: "project-files", root }),
     sessionId: "session-files",
     evidenceRefs: [message],
     actor: Object.freeze({ actorId: "test", kind: "noesis" as const }),
   });
-  return { root, workspace, registry, publisher, context, message };
+  return { root, workspace, publisher, context, message };
 }
 
 const current = async (workspace: NoesisWorkspaceStore, capabilityId: string) => {
@@ -318,7 +315,7 @@ describe("Capability files", () => {
     // A newer save made while an edit was being applied is never replaced by the older edit.
     const newerSave = `${userEdit}\nNewer save.\n`;
     await writeFile(file, newerSave);
-    await publisher.syncWorkingDocument(created.capabilityId, context, {
+    await publisher.syncWorkingDocument(created.capabilityId, {
       userChoseRevision: true,
       onlyReplacingDigest: sha256(userEdit),
     });
@@ -485,99 +482,5 @@ describe("Capability files", () => {
       ),
     ).rejects.toThrow("at most 2000 characters");
     await expect(publisher.assertGateFitsAlways(gate.gateRequestId)).resolves.toBeUndefined();
-  });
-
-  test("moves a Capability made before Capability files into a file", async () => {
-    const { workspace, registry, publisher, context, message } = await setup();
-    const actor = Object.freeze({ actorId: "test", kind: "noesis" as const });
-    const material = await workspace.definitions.recordWorkingDefinition({
-      workingPath: "capabilities/capability-old/revision-old/instruction-1.md",
-      // Longer than new always-active guidance may be; the move keeps it as it was.
-      bytes: new TextEncoder().encode(`Cite the primary source.${" Keep citations exact.".repeat(120)}\n`),
-      actor,
-    });
-    const router = await workspace.definitions.recordWorkingDefinition({
-      workingPath: "capabilities/capability-old/router.json",
-      bytes: new TextEncoder().encode("{}\n"),
-      actor,
-    });
-    registry.registerCapability({
-      capabilityId: "capability-old",
-      name: "Cite sources",
-      scope: "general",
-      intent: "Research answers.",
-    });
-    const reference = registry.constructRevision({
-      definitionState: "candidate",
-      capabilityRevisionId: "revision-old",
-      capabilityId: "capability-old",
-      effects: [{ kind: "instruction", material }],
-      promptModules: [material],
-      skills: [],
-      tools: [],
-      routerRevision: router,
-      routerStrategyId: "fixture",
-      activationPolicy: { mode: "automatic_low_risk", scope: "general" },
-      permissionManifest: { effects: [], resourcePatterns: [], credentialRefs: [] },
-      evidenceRefs: [message],
-      sourceEvaluationDefinitions: [],
-      requestedPermissionDelta: { addedEffects: [], widenedResources: [], addedCredentialRefs: [] },
-    });
-    const revision = registry.getRevision(reference);
-    if (!revision) throw new Error("Expected the fixture revision");
-    await workspace.capabilities.create({
-      definition: {
-        capabilityId: "capability-old",
-        name: "Cite sources",
-        description: "Cite the primary source.",
-        applicability: "Research answers.",
-        createdAt: "2026-10-01T00:00:00.000Z",
-      },
-      revision: {
-        revision,
-        reference: capabilityRevisionRef(revision),
-        summary: "Cite sources.",
-        rationale: "Fixture.",
-        anticipatedEffect: "Answers cite sources.",
-        createdAt: "2026-10-01T00:00:00.000Z",
-      },
-      binding: {
-        capabilityId: "capability-old",
-        revision: capabilityRevisionRef(revision),
-        scope: { kind: "global" },
-        activationMode: "always",
-        state: "paused",
-      },
-    });
-
-    await expect(publisher.moveToDocuments(context, new AbortController().signal)).resolves.toBe(1);
-    const moved = await current(workspace, "capability-old");
-    expect(moved.binding.state).toBe("paused");
-    expect(capabilityEffects(moved.lifecycle.revision).map((effect) => effect.kind)).toEqual(["instruction"]);
-    expect(
-      capabilityGuidance(new TextDecoder().decode(await workspace.reads.readRevision(moved.document))),
-    ).toMatch(/^Cite the primary source\. Keep citations exact\./u);
-    expect(moved.binding.activationMode).toBe("always");
-    // A second run finds nothing left to move.
-    await expect(publisher.moveToDocuments(context, new AbortController().signal)).resolves.toBe(0);
-
-    // Restoring the revision from before Capability files moves it into a file again, and finishes.
-    const restored = await publisher.publish(
-      {
-        decision: "restore",
-        capabilityId: "capability-old",
-        expectedBindingRevision: moved.binding.revisionNumber,
-        capabilityRevisionId: "revision-old",
-        reason: "Go back to the original.",
-      },
-      context,
-      new AbortController().signal,
-    );
-    expect(restored).toMatchObject({ status: "restored" });
-    const afterRestore = await current(workspace, "capability-old");
-    expect(afterRestore.binding.revision.capabilityRevisionId).not.toBe("revision-old");
-    expect(
-      capabilityGuidance(new TextDecoder().decode(await workspace.reads.readRevision(afterRestore.document))),
-    ).toMatch(/^Cite the primary source\./u);
   });
 });

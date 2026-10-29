@@ -7,7 +7,6 @@ import type {
   TuiLearningActivitySummary,
   TuiLearningInspection,
   TuiModelRoute,
-  TuiWorkingAdjustmentState,
 } from "./runtime-port.ts";
 import type { NoesisTuiAction } from "./state.ts";
 import { resumableTrail } from "./session-picker.ts";
@@ -235,19 +234,6 @@ async function applyRoutePickerSelection(
   await selectFreshRoute(current, selection.route, context, selection.thinkingLevel);
 }
 
-function workingAdjustmentLines(adjustment: TuiWorkingAdjustmentState, heading: string): readonly string[] {
-  return [
-    `${heading} · ${adjustment.status}`,
-    `strategy · ${adjustment.strategy}`,
-    `success signal · ${adjustment.successSignal}`,
-    `served evidence · ${String(adjustment.servedEvidence.length)}`,
-    ...adjustment.servedEvidence.flatMap((evidence) => [
-      `  ${evidence.outcome} · turn ${evidence.turnId} · ${evidence.settledAt}`,
-      `    ${evidence.summary}`,
-    ]),
-  ];
-}
-
 function learningActivityLine(activity: TuiLearningActivitySummary): string {
   const glyph =
     activity.status === "running"
@@ -263,19 +249,13 @@ function learningActivityLine(activity: TuiLearningActivitySummary): string {
               : "✓";
   const references = [
     activity.turnId ? `turn ${activity.turnId}` : undefined,
-    activity.experimentId ? `experiment ${activity.experimentId}` : undefined,
     activity.capabilityRevisionId
       ? `capability ${activity.capabilityId ?? "unknown"}@${activity.capabilityRevisionId}`
       : activity.capabilityId
         ? `capability ${activity.capabilityId}`
         : undefined,
     activity.projectId ? `project ${activity.projectId}` : undefined,
-    activity.adjustmentId ? `adjustment ${activity.adjustmentId}` : undefined,
   ].filter((value): value is string => value !== undefined);
-  const adjustment = activity.workingAdjustment;
-  const adjustmentLines = adjustment
-    ? workingAdjustmentLines(adjustment, "working adjustment").map((line) => `  ${line}`)
-    : [];
   const decisionEvidenceLines = activity.evidenceRefs
     ? [
         `  decision evidence · ${String(activity.evidenceRefs.length)}`,
@@ -291,7 +271,6 @@ function learningActivityLine(activity: TuiLearningActivitySummary): string {
     `  ${activity.summary}`,
     ...(references.length > 0 ? [`  ${references.join(" · ")}`] : []),
     ...decisionEvidenceLines,
-    ...adjustmentLines,
     `  ${activity.updatedAt} · ${activity.jobId}`,
   ].join("\n");
 }
@@ -563,21 +542,13 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
       : runtime.listLearningActivity
         ? Object.freeze({ activity: await runtime.listLearningActivity(trailId) })
         : Object.freeze({ activity: Object.freeze([]) });
-    if (inspection.activity.length === 0 && !inspection.currentWorkingAdjustment) {
+    if (inspection.activity.length === 0) {
       publishInspector("No learning activity in this session yet.");
       return true;
     }
     const pages = paginateInspectorText(
       `Learning activity · ${String(inspection.activity.length)}`,
       [
-        ...(inspection.currentWorkingAdjustment
-          ? [
-              workingAdjustmentLines(
-                inspection.currentWorkingAdjustment,
-                "Current project working adjustment",
-              ).join("\n"),
-            ]
-          : []),
         ...inspection.activity.map(learningActivityLine),
         "Noesis reflects after each turn; most turns change nothing.",
       ].join("\n\n"),

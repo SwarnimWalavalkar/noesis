@@ -10,7 +10,7 @@ Noesis follows one broad loop, but it does not force every session through every
 4. Settle a durable turn trace with the messages, actions, outcome, and exact revisions involved.
 5. Reflect on that trace without interrupting the conversation.
 6. Record `no_change`, or create, revise, pause, restore, or retarget one exact Capability.
-7. Activate ordinary Capability revisions immediately. A revision may contribute instructions, progressively loaded skills, or an exact saved Program revision.
+7. Activate ordinary Capability revisions immediately. A revision contributes its instructions and may attach one exact saved Program revision.
 8. Pause only credential export, recovery or audit control, and irreversible external actions without foreground user intent for an explicit decision.
 9. Select globally eligible Capabilities by semantic relevance on later turns, unless the user has made one always active. Keep every reason and exact revision inspectable.
 
@@ -116,7 +116,7 @@ Each Capability has a history that the user can inspect. A Capability describes 
 - the observation and exact evidence
 - the intended future use and where the change applies
 - the old behavior and proposed change
-- the exact instruction, skill, saved script, or saved workflow revision involved
+- the exact Capability file revision involved, and any saved script or workflow revision it attaches
 - its immediate activation or pending consequence decision
 - the exact version frozen into any turn, derivable from that turn plan
 - later feedback and successor revisions
@@ -126,7 +126,7 @@ The main interaction remains conversational. A user can ask, "Why did you work w
 
 `/learning` opens an interactive explorer built with the same terminal components as the rest of Noesis. Wide terminals show the activity list and selected record together. Narrow terminals open the selected record as a separate view.
 
-The default filter shows active and recently revised Capabilities, protected decisions, feedback, and failures. Routine `no_change` reflections appear as a bounded summary. Failed reflections remain in an expandable section. Historical experiments remain available for audit, but they do not compete with the current Capability lifecycle.
+The default filter shows active and recently revised Capabilities, protected decisions, feedback, and failures. Routine `no_change` reflections appear as a bounded summary. Failed reflections remain in an expandable section.
 
 Each Capability shows the path of its editable file, its guidance, any attached Program and its script or workflow mode, and its track record in turns that used it. The detail pane opens the exact file revision or saved definition behind each effect. It also shows the decision, applicability, binding, revision history, cited evidence, considered inputs, feedback, and related records.
 

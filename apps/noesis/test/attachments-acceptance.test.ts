@@ -44,8 +44,7 @@ async function fixture(imageInput: boolean, beforeResponse?: (prompt: Controlled
   const open = () =>
     createApplicationRuntimeComposition({
       config,
-      createAgent: (_tools, codeExecution) =>
-        createPiAgentRuntime(home, controlled.models, { codeExecution }),
+      createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
       createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
     });
   return { home, prompts, open };

@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { capabilityEffects, createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import { parseCapabilityDocument } from "@noesis/domain";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
@@ -70,7 +69,6 @@ describe("Capability publisher", () => {
     const publisher = createCapabilityPublisher({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       now: () => "2026-08-24T00:01:00.000Z",
       nextId: (prefix) => {
         if (prefix === "capability") return "capability-foreground";
@@ -110,10 +108,8 @@ describe("Capability publisher", () => {
           effects: [
             { kind: "instruction", content: "Ground review findings in exact repository evidence." },
             {
-              kind: "skill",
-              name: "evidence-led-review",
-              description: "Perform a bounded evidence-led review.",
-              instructions: "Inspect the exact diff, trace consumers, and report only actionable findings.",
+              kind: "instruction",
+              content: "Inspect the exact diff, trace consumers, and report only actionable findings.",
             },
           ],
           consequence: "ordinary",
@@ -139,8 +135,8 @@ describe("Capability publisher", () => {
     if (!initialBinding) throw new Error("Expected a foreground Capability binding");
     const initial = await workspace.capabilities.getRevision(initialBinding.revision);
     if (!initial) throw new Error("Expected the exact foreground Capability revision");
-    const initialEffects = capabilityEffects(initial.revision);
-    // The instruction and the skill become the guidance of one readable Capability file.
+    const initialEffects = initial.revision.effects;
+    // Every instruction draft becomes the guidance of one readable Capability file.
     expect(initialEffects.map((effect) => effect.kind)).toEqual(["instruction"]);
     const instruction = initialEffects[0];
     if (instruction?.kind !== "instruction") throw new Error("Expected an instruction effect");
@@ -152,9 +148,6 @@ describe("Capability publisher", () => {
     if (!parsed.ok) throw new Error(parsed.error);
     expect(parsed.content).toMatchObject({ name: "Evidence-led review" });
     expect(parsed.content.guidance).toContain("Ground review findings in exact repository evidence.");
-    // The skill draft is merged into the same guidance, not dropped.
-    expect(parsed.content.guidance).toContain("## evidence-led-review");
-    expect(parsed.content.guidance).toContain("Perform a bounded evidence-led review.");
     expect(parsed.content.guidance).toContain(
       "Inspect the exact diff, trace consumers, and report only actionable findings.",
     );
@@ -288,7 +281,6 @@ describe("Capability publisher", () => {
     const publisher = createCapabilityPublisher({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       programs: Object.freeze({
         list: async () => Object.freeze([]),
         resolve: async () => effect(liveDefinition),
@@ -325,7 +317,7 @@ describe("Capability publisher", () => {
     if (!binding) throw new Error("Expected a pinned Capability binding");
     const lifecycle = await workspace.capabilities.getRevision(binding.revision);
     if (!lifecycle) throw new Error("Expected a pinned Capability revision");
-    expect(capabilityEffects(lifecycle.revision)).toMatchObject([
+    expect(lifecycle.revision.effects).toMatchObject([
       { kind: "instruction" },
       {
         kind: "program",

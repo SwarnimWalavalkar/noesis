@@ -71,7 +71,6 @@ describe("Capability coordinator", () => {
         turnId: "turn-1",
         userMessage: "Remember this preference.",
         outcome: "accepted",
-        servedWorkingAdjustmentOutcomes: Object.freeze([]),
         scope: "general",
         sensitivity: "normal",
         evidenceRefs: [evidence],
@@ -80,6 +79,7 @@ describe("Capability coordinator", () => {
       }),
       project: Object.freeze({ projectId: "project-1", root }),
       selectedCapabilities: Object.freeze([]),
+      promptCapabilityIds: [],
     });
     // The reflection waits for the user's reaction. The next user message releases it.
     expect(observed.job.notBefore > timestamp).toBe(true);
@@ -148,7 +148,6 @@ describe("Capability coordinator", () => {
           userMessage: "Summarize the plan.",
           outcome: "unknown",
           cause: "completed",
-          servedWorkingAdjustmentOutcomes: Object.freeze([]),
           scope: "general",
           sensitivity: "normal",
           evidenceRefs: [evidence],
@@ -157,6 +156,7 @@ describe("Capability coordinator", () => {
         }),
         project: Object.freeze({ projectId: "project-1", root }),
         selectedCapabilities: Object.freeze([]),
+        promptCapabilityIds: [],
       });
       await coordinator.runAvailable();
       expect(reflectCalls).toBe(0);

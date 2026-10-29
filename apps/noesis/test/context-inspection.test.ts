@@ -52,8 +52,7 @@ test("inspects startup context and the actual Pi request without invoking a mode
     config,
     skills,
     resolveModelContext: () => ({ contextWindow: 200000, maxOutputTokens: 1000 }),
-    createAgent: (_tools, codeExecution) =>
-      createPiAgentRuntime(home, controlled.models, { codeExecution, skills }),
+    createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution, skills }),
     createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
   });
   try {

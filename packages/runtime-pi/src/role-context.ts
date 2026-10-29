@@ -8,12 +8,9 @@ const DEFAULT_TOTAL_CHARACTERS = 64000;
 const DEFAULT_EVIDENCE_REFS = 64;
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
 const isolatedRoleMessageNames = {
-  // No longer run. The role stays so older recorded role runs still type-check.
-  capability_router: ["turn", "prior_conversation"],
   session_compactor: ["compaction_input"],
   session_titler: ["first_message"],
   history_reranker: ["candidates"],
-  signal_interpreter: ["turn", "related_history"],
   reflector: [
     "settled_turn",
     "current_capabilities",
@@ -26,17 +23,10 @@ const isolatedRoleMessageNames = {
     "evidence",
     "active_capabilities",
     "user_preferences",
-    "working_adjustment_context",
     "pending_capability",
     "user_change_request",
   ],
   session_reviewer: ["session_review", "current_capabilities", "related_history"],
-  revision_author: ["hypothesis", "source_cases"],
-  case_generator: ["behavioral_objective", "evidence", "user_criteria"],
-  trial: ["case", "arm"],
-  judge_critic: ["rubric", "arm_A", "arm_B", "relevant_traces"],
-  revision_agent: ["failures", "judgment_evidence"],
-  ux_explainer: ["evidence", "diff", "report", "activation_lineage"],
 } as const satisfies Readonly<Record<Exclude<AgentRole, "foreground">, readonly string[]>>;
 export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPolicy {
   const foreground = role === "foreground";
@@ -63,9 +53,7 @@ export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPoli
             }
           : undefined,
       )
-      .add({
-        includeCapabilityRevisions: role !== "judge_critic",
-      } as const)
+      .add({ includeCapabilityRevisions: true } as const)
       .finish(),
   );
 }
@@ -86,8 +74,6 @@ export function createRestrictedRoleContextPolicy(
     if (requested !== undefined && requested > maximum)
       throw new Error(`Restricted role context cannot widen ${name} beyond ${maximum}`);
   }
-  if (!base.includeCapabilityRevisions && overrides.includeCapabilityRevisions === true)
-    throw new Error("Restricted role context cannot expose capability revisions");
   let allowedMessageNames = base.allowedMessageNames;
   if (base.allowedMessageNames && overrides.allowedMessageNames) {
     const baseNames = new Set(base.allowedMessageNames);

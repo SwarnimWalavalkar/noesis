@@ -8,7 +8,6 @@ export default defineConfig({
     ...config.test,
     include: [
       "packages/{agent-types,context,domain,policy}/test/**/*.test.ts",
-      "packages/capabilities/test/{atomic,effects}.test.ts",
       "packages/tools/test/broker.test.ts",
       "packages/runtime/test/{capability-coordinator,session-compaction,turn-interaction,turn-settlement}.test.ts",
       "packages/runtime-pi/test/{context-budget,context-inspection,execute-tool,image-input,prompt-efficiency}.test.ts",

@@ -53,25 +53,38 @@ async function applyMigrations(connection: DatabaseSync, now: () => string): Pro
     }
   }
 
-  for (const file of files) {
-    const match = /^(\d+)_/.exec(file);
-    if (!match?.[1]) throw new Error(`Invalid workspace migration filename: ${file}`);
-    const version = Number(match[1]);
-    if (applied.has(version)) continue;
-    const sql = await readFile(new URL(file, migrationDirectory), "utf8");
-    connection.exec("BEGIN IMMEDIATE");
-    try {
-      connection.exec(sql);
-      connection
-        .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
-        .run(version, file, now());
-      connection.exec("COMMIT");
-    } catch (error) {
-      connection.exec("ROLLBACK");
-      throw new Error(`Workspace migration ${file} failed`, {
-        cause: error,
-      });
+  // SQLite cannot rebuild a table that other tables reference while foreign keys are enforced, and
+  // the setting cannot change inside a transaction. Each migration therefore runs with foreign keys
+  // off and commits only if the whole database still passes the foreign key check.
+  connection.exec("PRAGMA foreign_keys = OFF");
+  try {
+    for (const file of files) {
+      const match = /^(\d+)_/.exec(file);
+      if (!match?.[1]) throw new Error(`Invalid workspace migration filename: ${file}`);
+      const version = Number(match[1]);
+      if (applied.has(version)) continue;
+      const sql = await readFile(new URL(file, migrationDirectory), "utf8");
+      connection.exec("BEGIN IMMEDIATE");
+      try {
+        connection.exec(sql);
+        const violation = connection.prepare("PRAGMA foreign_key_check").get();
+        if (violation !== undefined)
+          throw new Error(
+            `Foreign key check failed in ${String(violation["table"])} referencing ${String(violation["parent"])}`,
+          );
+        connection
+          .prepare("INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)")
+          .run(version, file, now());
+        connection.exec("COMMIT");
+      } catch (error) {
+        connection.exec("ROLLBACK");
+        throw new Error(`Workspace migration ${file} failed`, {
+          cause: error,
+        });
+      }
     }
+  } finally {
+    connection.exec("PRAGMA foreign_keys = ON");
   }
 }
 

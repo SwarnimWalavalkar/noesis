@@ -1,5 +1,4 @@
 import type { AgentMessage, AgentUsage, StructuredInferencePort } from "@noesis/agent-types";
-import { capabilityEffects } from "@noesis/capabilities";
 import {
   type CapabilityBinding,
   type CapabilityDefinition,
@@ -192,9 +191,9 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
       bindings.map(async (binding) => {
         const definition = definitions.get(binding.capabilityId);
         const revision = await options.store.getRevision(binding.revision);
-        const first = revision ? capabilityEffects(revision.revision)[0] : undefined;
+        const first = revision?.revision.effects[0];
         const material =
-          first && (first.kind === "instruction" || first.kind === "skill")
+          first?.kind === "instruction"
             ? new TextDecoder().decode(await options.workspace.reads.readRevision(first.material))
             : undefined;
         const record = records.get(binding.revision.capabilityRevisionId);

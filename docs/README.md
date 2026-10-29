@@ -4,6 +4,7 @@ These documents describe the current product. Use the document whose purpose mat
 
 - [Configuration and everyday use](configuration.md) covers provider keys, models, context budgets, sessions, MCP servers, upgrades, and uninstalling.
 - [Long sessions and compaction](session-compaction.md) explains how immutable notes preserve session continuity, how to use them, and where potential cost savings come from.
+- [Bring back your Capabilities](migrating-capabilities.md) explains the Capability reset after Noesis 0.0.5 and gives a prompt that recreates your old Capabilities.
 - [Codemode, context, and subagents](codemode.md) describes tool composition, the context API, agent lifecycle, and inspection.
 - [Product thesis](product-thesis.md) explains who Noesis is for, which problem it addresses, and how the product decides what belongs.
 - [Product experience](product-experience.md) explains how sessions, turn traces, reflection, Capabilities, and user control fit together.

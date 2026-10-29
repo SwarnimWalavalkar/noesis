@@ -5,7 +5,7 @@ import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
 import { link, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
 import {
@@ -31,41 +31,20 @@ import {
   type DefinitionPublicationRequest,
   type DefinitionWriteRequest,
   declaredAuthorityFor,
-  type EvaluationRecord,
-  EvaluationRecordSchema,
   type EvidenceKind,
   type EvidenceRef,
   EvidenceRefSchema,
   type EvidenceRevisionRef,
   type EvidenceWriteRequest,
-  type Experiment,
-  ExperimentSchema,
-  type ExperimentStatus,
-  type ExperimentTrial,
-  ExperimentTrialSchema,
-  type FeedbackSignal,
-  FeedbackSignalSchema,
   type FileRevisionRef,
   FileRevisionRefSchema,
-  GrantSchema,
-  isExperimentTransitionAllowed,
-  type LedgerEvent,
-  LedgerEventSchema,
-  type PreflightPlan,
-  PreflightPlanSchema,
-  type PreflightReport,
-  PreflightReportSchema,
-  preflightReportMatchesPlan,
-  sameCapabilityRevisionRef,
   sha256,
   type JsonValue,
   JsonValueSchema,
 } from "@noesis/domain";
 import { z } from "zod";
-import { createProtectedActivationStore } from "./activation-store.ts";
 import { createWorkspaceAuthorityBoundary } from "./authority-state.ts";
 import { createBackup, inspectWorkspaceIntegrity } from "./backup.ts";
-import { createCompoundingMeasurementStore } from "./compounding-measurements.ts";
 import { createCapabilityLifecycleStore } from "./capability-lifecycle.ts";
 import {
   openWorkspaceDatabase,
@@ -78,8 +57,6 @@ import {
 import {
   decodeCodeExecution,
   decodeAgentMailboxMessage,
-  decodeExperiment,
-  decodeFeedbackSignal,
   decodeFileRevisionRef,
   decodeMessage,
   decodeModelCall,
@@ -92,7 +69,6 @@ import {
   decodeSubAgentModelCall,
   decodeSubAgentTask,
   decodeSubAgentTimeline,
-  decodeStored,
   decodeToolCall,
   decodeUserIntent,
   decodeVector,
@@ -102,8 +78,7 @@ import {
   SearchConfigurationSchema,
   SensitivitySchema,
 } from "./decoders.ts";
-import { createProtectedFeedbackStore } from "./feedback-store.ts";
-import { importLegacyWorkspace } from "./importer.ts";
+import { createProtectedTurnPlanStore } from "./turn-plan-store.ts";
 import { createDurableJobStore } from "./jobs.ts";
 import { createMcpConnectionCycleAllocator } from "./mcp-connection-cycles.ts";
 import {
@@ -117,14 +92,12 @@ import { createProtectedWorkspaceRuntime, registerWorkspaceRuntimeInternals } fr
 import type {
   CanonicalSearchSource,
   AgentMailboxMessageRecord,
-  ClassifyOutcomeRequest,
   CodeExecutionRecord,
   ContextCheckpointRecord,
   MessageRecord,
   ModelCallRecord,
   NoesisWorkspaceStore,
   OperationalRepositories,
-  OperationalCutoverReport,
   OutcomeRecord,
   SearchCandidate,
   SearchConfiguration,
@@ -135,15 +108,12 @@ import type {
   SubAgentRecord,
   SubAgentTaskRecord,
   SubAgentTimelineRecord,
-  StageDefinitionRequest,
-  StagedDefinition,
   ToolCallRecord,
   UserIntentRecord,
   WorkflowPhaseRunRecord,
   WorkflowRunRecord,
   WorkspacePaths,
 } from "./types.ts";
-import { createProtectedWorkingAdjustmentStore } from "./working-adjustments.ts";
 export interface WorkspaceStoreOptions {
   readonly now?: () => string;
   readonly createId?: (prefix: string) => string;
@@ -151,34 +121,12 @@ export interface WorkspaceStoreOptions {
   readonly runtimeOwnerId?: string;
   readonly afterRuntimeOwnerAcquiredForTesting?: () => void;
   readonly afterDefinitionCommitForTesting?: () => void;
-  readonly beforeActivationCommitForTesting?: () => void;
-  readonly duringActivationCommitForTesting?: () => void;
-  readonly afterActivationCommitForTesting?: () => void;
-  readonly beforeOutcomeCommitForTesting?: () => void;
-  readonly duringOutcomeCommitForTesting?: () => void;
-  readonly afterOutcomeCommitForTesting?: () => void;
 }
 const ActorSchema = z.strictObject({
   actorId: z.string().min(1),
   kind: z.enum(["user", "noesis", "external_system", "system"]),
 });
-const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const SearchSourceScopeSchema = z.enum([
-  "session_or_outcome",
-  "corrected_outcome",
-  "completed_experiment",
-]) satisfies z.ZodType<SearchSourceScope>;
-const ClassifyOutcomeRequestSchema: z.ZodType<ClassifyOutcomeRequest> = z.strictObject({
-  outcomeId: z.string().min(1),
-  sessionId: z.string().min(1),
-  turnId: z.string().min(1),
-  classification: z.enum(["correction", "preference", "other"]),
-  reason: z.string().min(1),
-});
-const OutcomeSemanticObservationSchema = z.strictObject({
-  kind: z.enum(["correction", "preference", "other"]),
-  reason: z.string().min(1),
-});
+const SearchSourceScopeSchema = z.enum(["session_or_outcome"]) satisfies z.ZodType<SearchSourceScope>;
 // BOUNDARY: Operational identities canonicalize arbitrary adapter payloads into durable JSON.
 const persistedJsonValue = (value: unknown): JsonValue | undefined => {
   const encoded = JSON.stringify(value);
@@ -213,18 +161,6 @@ const persistedToolCall = (
   status: record.status,
   completedAt: record.completedAt ?? null,
 });
-const LegacyImportReportSchema = z.strictObject({
-  sourceId: z.string().min(1),
-  alreadyImported: z.boolean(),
-  sessions: z.number().int().nonnegative(),
-  messages: z.number().int().nonnegative(),
-  toolCalls: z.number().int().nonnegative(),
-  outcomes: z.number().int().nonnegative(),
-  jobs: z.number().int().nonnegative(),
-  definitions: z.number().int().nonnegative(),
-  artifacts: z.number().int().nonnegative(),
-  warnings: z.array(z.string()),
-});
 const databaseRef = <Table extends DatabaseTable>(table: Table, rowId: string): DatabaseRowRef<Table> => ({
   kind: "database_row",
   table,
@@ -240,16 +176,6 @@ function evidenceReferenceIdentity(reference: EvidenceRef): string {
     case "artifact_file":
       return `${reference.kind}:${reference.artifactId}`;
   }
-}
-function mergeEvidenceReferences(
-  existing: readonly EvidenceRef[],
-  incoming: readonly EvidenceRef[],
-): readonly EvidenceRef[] {
-  const merged = new Map<string, EvidenceRef>();
-  for (const reference of [...existing, ...incoming]) {
-    merged.set(evidenceReferenceIdentity(reference), reference);
-  }
-  return [...merged.values()];
 }
 const PRIMARY_KEY_BY_TABLE = {
   sessions: "session_id",
@@ -632,23 +558,20 @@ export async function createWorkspaceStore(
       .get(workingPath);
     return row === undefined ? undefined : decodeFileRevisionRef(row);
   };
-  const insertRevision = (
-    request: {
-      readonly revisionId: string;
-      readonly revisionKind: "definition" | "candidate" | "active" | "evidence";
-      readonly workingPath: string;
-      readonly snapshotPath: string;
-      readonly contentDigest: string;
-      readonly actor: ActorRef;
-      readonly reason?: string;
-      readonly predecessorRevisionId?: string;
-      readonly evidenceKind?: EvidenceRevisionRef["evidenceKind"];
-      readonly supersedesRevisionId?: string;
-      readonly sensitivity: DataSensitivity;
-      readonly provenanceRefs: readonly EvidenceRef[];
-    },
-    stageId?: string,
-  ): void => {
+  const insertRevision = (request: {
+    readonly revisionId: string;
+    readonly revisionKind: "definition" | "candidate" | "active" | "evidence";
+    readonly workingPath: string;
+    readonly snapshotPath: string;
+    readonly contentDigest: string;
+    readonly actor: ActorRef;
+    readonly reason?: string;
+    readonly predecessorRevisionId?: string;
+    readonly evidenceKind?: EvidenceRevisionRef["evidenceKind"];
+    readonly supersedesRevisionId?: string;
+    readonly sensitivity: DataSensitivity;
+    readonly provenanceRefs: readonly EvidenceRef[];
+  }): void => {
     db.prepare(`INSERT INTO file_revisions(
         revision_id, revision_kind, working_path, snapshot_path, content_digest,
         predecessor_revision_id, actor_id, actor_kind, reason, recorded_at,
@@ -669,11 +592,6 @@ export async function createWorkspaceStore(
       request.sensitivity,
       JSON.stringify(request.provenanceRefs),
     );
-    if (stageId)
-      db.prepare("UPDATE staged_definitions SET registered_revision_id = ? WHERE stage_id = ?").run(
-        request.revisionId,
-        stageId,
-      );
     recordActivity(
       request.actor,
       request.revisionKind === "evidence" ? "evidence.appended" : "definition.revision_recorded",
@@ -687,7 +605,6 @@ export async function createWorkspaceStore(
     revisionKind: "definition" | "candidate" | "active",
     forcedArea?: "candidate" | "active",
     writeWorkingFile = true,
-    stageId?: string,
   ): Promise<FileRevisionRef> => {
     ActorSchema.parse(request.actor);
     for (const ref of request.provenanceRefs ?? []) assertStoredReference(db, ref);
@@ -695,7 +612,7 @@ export async function createWorkspaceStore(
     const bytes = Uint8Array.from(request.bytes);
     const contentDigest = sha256(bytes);
     const latest = latestRevisionFor(target.stored);
-    if (latest?.contentDigest === contentDigest && stageId === undefined) return latest;
+    if (latest?.contentDigest === contentDigest) return latest;
     if (writeWorkingFile) await persistAtomically(target.absolute, bytes);
     const revisionId = createId("revision");
     const snapshotAbsolute = join(paths.revisions, revisionId, basename(target.absolute) || "content");
@@ -720,7 +637,6 @@ export async function createWorkspaceStore(
             provenanceRefs: request.provenanceRefs ?? [],
           } as const)
           .finish(),
-        stageId,
       ),
     );
     return { kind: "file_revision", revisionId, workingPath: target.stored, snapshotPath, contentDigest };
@@ -908,156 +824,12 @@ export async function createWorkspaceStore(
       throw new Error(`Immutable file digest mismatch: ${storedPath}`);
     return bytes;
   };
-  const normalizeActiveWorkingPath = (workingPath: string): string =>
-    pathsForDefinition(workingPath, "active").stored;
-  const outcomePublicationDirectory = (operationId: string): string =>
-    join(paths.staging, "outcome-publications", sha256(operationId));
-  const stageActiveRevision = async (
-    operationId: string,
-    publicationKey: string,
-    sourceRevision: FileRevisionRef,
-  ): Promise<{
-    readonly workingPath: string;
-    readonly stagedPath: string;
-    readonly contentDigest: string;
-  }> => {
-    assertStoredReference(db, sourceRevision);
-    const bytes = await readVerifiedFile(sourceRevision.snapshotPath, sourceRevision.contentDigest);
-    const target = pathsForDefinition(sourceRevision.workingPath, "active");
-    const stagedAbsolute = join(outcomePublicationDirectory(operationId), sha256(publicationKey), "content");
-    await persistAtomically(stagedAbsolute, bytes);
-    return Object.freeze({
-      workingPath: target.stored,
-      stagedPath: workspaceRelative(paths, stagedAbsolute),
-      contentDigest: sourceRevision.contentDigest,
-    });
-  };
-  const publishStagedActiveRevision = async (publication: {
-    readonly workingPath: string;
-    readonly stagedPath: string;
-    readonly contentDigest: string;
-    readonly sourceRevision: FileRevisionRef;
-  }): Promise<void> => {
-    let bytes: Uint8Array;
-    try {
-      bytes = await readVerifiedFile(publication.stagedPath, publication.contentDigest);
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      bytes = await readVerifiedFile(
-        publication.sourceRevision.snapshotPath,
-        publication.sourceRevision.contentDigest,
-      );
-    }
-    await persistAtomically(pathsForDefinition(publication.workingPath, "active").absolute, bytes);
-  };
-  const deleteActiveDefinition = async (workingPath: string): Promise<void> => {
-    await unlink(pathsForDefinition(workingPath, "active").absolute).catch(ignoreMissing);
-  };
-  const cleanupOutcomePublicationStage = async (operationId: string): Promise<void> => {
-    await rm(outcomePublicationDirectory(operationId), { recursive: true, force: true });
-  };
   const resolveRevision = async (revisionId: string): Promise<FileRevisionRef | undefined> => {
     const row = db
       .prepare(`SELECT revision_id, working_path, snapshot_path, content_digest
          FROM file_revisions WHERE revision_id = ? AND revision_kind != 'evidence'`)
       .get(revisionId);
     return row === undefined ? undefined : decodeFileRevisionRef(row);
-  };
-  const stageDefinition = async (request: StageDefinitionRequest): Promise<StagedDefinition> => {
-    ActorSchema.parse(request.actor);
-    const relativePath = safeRelativePath(request.relativePath);
-    const stageId = createId("stage");
-    const stagedAbsolute = join(paths.staging, stageId, relativePath);
-    const bytes = Uint8Array.from(request.bytes);
-    await persistAtomically(stagedAbsolute, bytes);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const staged: StagedDefinition = createConditionalObject({
-      stageId,
-      targetArea: request.targetArea,
-      relativePath,
-      stagedPath: workspaceRelative(paths, stagedAbsolute),
-      contentDigest: sha256(bytes),
-      actor: request.actor,
-    } as const)
-      .addOptional(!(request.reason === undefined) ? { reason: request.reason } : undefined)
-      .add({
-        createdAt: now(),
-      } as const)
-      .finish();
-    database.transaction(() => {
-      db.prepare(`INSERT INTO staged_definitions(
-          stage_id, target_area, relative_path, staged_path, content_digest,
-          actor_id, actor_kind, reason, created_at, registered_revision_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`).run(
-        staged.stageId,
-        staged.targetArea,
-        staged.relativePath,
-        staged.stagedPath,
-        staged.contentDigest,
-        staged.actor.actorId,
-        staged.actor.kind,
-        staged.reason ?? null,
-        staged.createdAt,
-      );
-      recordActivity(staged.actor, "definition.staged", "staged_definition", stageId);
-    });
-    return staged;
-  };
-  const registerStagedDefinition = async (stageId: string): Promise<FileRevisionRef> => {
-    const row = db.prepare("SELECT * FROM staged_definitions WHERE stage_id = ?").get(stageId);
-    if (row === undefined) throw new Error(`Unknown staged definition ${stageId}`);
-    const registered = optionalString(row, "registered_revision_id");
-    if (registered) {
-      const existing = await resolveRevision(registered);
-      if (!existing)
-        throw new Error(`Staged definition ${stageId} references missing revision ${registered}`);
-      return existing;
-    }
-    const targetArea = requiredString(row, "target_area");
-    if (targetArea !== "candidate" && targetArea !== "active")
-      throw new Error(`Invalid staged target area ${targetArea}`);
-    const actor = ActorSchema.parse({
-      actorId: requiredString(row, "actor_id"),
-      kind: requiredString(row, "actor_kind"),
-    });
-    const bytes = await readVerifiedFile(
-      requiredString(row, "staged_path"),
-      requiredString(row, "content_digest"),
-    );
-    const storedReason = optionalString(row, "reason");
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    return await recordDefinitionBytes(
-      createConditionalObject({
-        workingPath: requiredString(row, "relative_path"),
-        bytes,
-        actor,
-      } as const)
-        .addOptional(!(storedReason === undefined) ? { reason: storedReason } : undefined)
-        .finish(),
-      targetArea,
-      targetArea,
-      true,
-      stageId,
-    );
-  };
-  const cleanupStagedDefinitions = async (): Promise<number> => {
-    const rows = db
-      .prepare("SELECT stage_id, staged_path FROM staged_definitions WHERE registered_revision_id IS NULL")
-      .all();
-    let removed = 0;
-    for (const row of rows) {
-      await rm(join(paths.staging, requiredString(row, "stage_id")), {
-        recursive: true,
-        force: true,
-      });
-      database.transaction(() => {
-        db.prepare(
-          "DELETE FROM staged_definitions WHERE stage_id = ? AND registered_revision_id IS NULL",
-        ).run(requiredString(row, "stage_id"));
-      });
-      removed += 1;
-    }
-    return removed;
   };
   const removeUnregisteredSnapshots = async (): Promise<number> => {
     const registered = new Set(
@@ -1076,18 +848,10 @@ export async function createWorkspaceStore(
     }
     return removed;
   };
-  const research = createResearchRepositories(database, recordActivity, now);
   const operational = createOperationalRepositories(database, recordActivity, readVerifiedFile);
   const jobs = createDurableJobStore(database, recordActivity, (reference) =>
     assertStoredReference(db, reference),
   );
-  const protectedWorkingAdjustments = createProtectedWorkingAdjustmentStore({
-    database,
-    now,
-    assertStoredReference: (reference) => assertStoredReference(db, reference),
-    recordActivity,
-  });
-  const compoundingMeasurements = createCompoundingMeasurementStore(database, now);
   const definitionMetadataRepository = createDefinitionMetadataRepository(database, recordActivity, now);
   const definitionMetadata: DefinitionMetadataPort = Object.freeze({
     getCurrent: definitionMetadataRepository.getCurrent,
@@ -1311,269 +1075,11 @@ export async function createWorkspaceStore(
           mediaType: requiredString(row, "media_type"),
         });
   };
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const protectedActivations = await createProtectedActivationStore(
-    createConditionalObject({
-      database,
-      now,
-    } as const)
-      .addOptional(
-        !(options.beforeActivationCommitForTesting === undefined)
-          ? {
-              beforeActivationCommitForTesting: options.beforeActivationCommitForTesting,
-            }
-          : undefined,
-      )
-      .addOptional(
-        !(options.duringActivationCommitForTesting === undefined)
-          ? {
-              duringActivationCommitForTesting: options.duringActivationCommitForTesting,
-            }
-          : undefined,
-      )
-      .addOptional(
-        !(options.afterActivationCommitForTesting === undefined)
-          ? {
-              afterActivationCommitForTesting: options.afterActivationCommitForTesting,
-            }
-          : undefined,
-      )
-      .add({
-        recordActivity,
-        assertStoredReference: (reference: EvidenceRef) => assertStoredReference(db, reference),
-        readVerifiedFile,
-        persistAtomically,
-        pathsForDefinition,
-        resolveRevision,
-        recordDefinitionBytes,
-      } as const)
-      .finish(),
-  );
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const protectedFeedback = await createProtectedFeedbackStore(
-    createConditionalObject({
-      database,
-      now,
-    } as const)
-      .addOptional(
-        !(options.beforeOutcomeCommitForTesting === undefined)
-          ? {
-              beforeOutcomeCommitForTesting: options.beforeOutcomeCommitForTesting,
-            }
-          : undefined,
-      )
-      .addOptional(
-        !(options.duringOutcomeCommitForTesting === undefined)
-          ? {
-              duringOutcomeCommitForTesting: options.duringOutcomeCommitForTesting,
-            }
-          : undefined,
-      )
-      .addOptional(
-        !(options.afterOutcomeCommitForTesting === undefined)
-          ? {
-              afterOutcomeCommitForTesting: options.afterOutcomeCommitForTesting,
-            }
-          : undefined,
-      )
-      .add({
-        recordActivity,
-        assertStoredReference: (reference: EvidenceRef) => assertStoredReference(db, reference),
-        stageActiveRevision,
-        publishStagedActiveRevision,
-        deleteActiveDefinition,
-        normalizeActiveWorkingPath,
-        cleanupOutcomePublicationStage,
-      } as const)
-      .finish(),
-  );
-  const cutoverLegacyOperationalAuthority = async (
-    legacyRoot: string,
-    actor: ActorRef,
-  ): Promise<OperationalCutoverReport> => {
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const cutoverName = "workspace-operational-authority" as const;
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const cutoverVersion = 1 as const;
-    const existing = db
-      .prepare(`SELECT source_digest FROM operational_cutovers
-         WHERE cutover_name = ? AND cutover_version = ?`)
-      .get(cutoverName, cutoverVersion);
-    if (existing !== undefined) {
-      const sourceId = sha256(resolve(legacyRoot));
-      const imported = db.prepare("SELECT report_json FROM import_runs WHERE source_id = ?").get(sourceId);
-      const legacyImport =
-        imported === undefined
-          ? Object.freeze({
-              sourceId,
-              alreadyImported: true,
-              sessions: 0,
-              messages: 0,
-              toolCalls: 0,
-              outcomes: 0,
-              jobs: 0,
-              definitions: 0,
-              artifacts: 0,
-              warnings: Object.freeze([
-                "Operational cutover marker exists without a retained legacy import report",
-              ]),
-            })
-          : Object.freeze({
-              ...LegacyImportReportSchema.parse(JSON.parse(requiredString(imported, "report_json"))),
-              alreadyImported: true,
-            });
-      return Object.freeze({
-        cutoverName,
-        cutoverVersion,
-        sourceDigest: requiredString(existing, "source_digest"),
-        alreadyCompleted: true,
-        legacyImport,
-      });
-    }
-    let journalBytes: Uint8Array;
-    try {
-      journalBytes = await readFile(join(legacyRoot, "ledger", "events.jsonl"));
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-      journalBytes = new Uint8Array();
-    }
-    const journalText = new TextDecoder("utf8", { fatal: true }).decode(journalBytes);
-    const legacyEvents: LedgerEvent[] = [];
-    for (const [index, line] of journalText.split(/\r?\n/u).entries()) {
-      if (!line.trim()) continue;
-      try {
-        legacyEvents.push(LedgerEventSchema.parse(JSON.parse(line)));
-      } catch (error) {
-        throw new Error(`Operational cutover rejected malformed legacy journal line ${index + 1}`, {
-          cause: error,
-        });
-      }
-    }
-    const sourceDigest = sha256(journalBytes);
-    await createBackup(paths, db, join(paths.root, "backups", "pre-operational-cutover-v1"), now());
-    const legacyImport = await importLegacyWorkspace({
-      legacyRoot,
-      actor,
-      paths,
-      database,
-      now,
-      createId,
-      recordDefinitionBytes,
-      writeArtifact,
-    });
-    const malformedWarning = legacyImport.warnings.find((warning) =>
-      warning.startsWith("Skipped invalid legacy journal line"),
-    );
-    if (malformedWarning) throw new Error(`Operational cutover rejected legacy import: ${malformedWarning}`);
-    database.transaction(() => {
-      for (const event of legacyEvents) {
-        if (event.type === "authority.grant_issued") {
-          const grant = GrantSchema.parse(event.payload["grant"]);
-          db.prepare(`INSERT OR IGNORE INTO authority_grants(
-              grant_id, principal, effects_json, resource_prefixes_json, expires_at,
-              max_uses, max_cost, issued_at, source_event_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-            grant.grantId,
-            grant.principal,
-            JSON.stringify(grant.effects),
-            JSON.stringify(grant.resourcePrefixes),
-            grant.expiresAt,
-            grant.maxUses,
-            grant.maxCost,
-            event.occurredAt,
-            event.eventId,
-          );
-          continue;
-        }
-        if (
-          event.type !== "effect.reserved" &&
-          event.type !== "effect.completed" &&
-          event.type !== "effect.failed" &&
-          event.type !== "effect.denied"
-        )
-          continue;
-        const operationId = z.string().min(1).parse(event.payload["operationId"]);
-        const idempotencyKey = z.string().min(1).parse(event.payload["idempotencyKey"]);
-        const fingerprint = DigestSchema.parse(event.payload["operationFingerprint"]);
-        const principal = z.string().min(1).parse(event.payload["principal"]);
-        const effect = z.string().min(1).parse(event.payload["effect"]);
-        const resource = z.string().min(1).parse(event.payload["resource"]);
-        const requestDigest = DigestSchema.parse(event.payload["requestDigest"]);
-        const estimatedCost = z.number().nonnegative().parse(event.payload["estimatedCost"]);
-        const grantId =
-          event.payload["grantId"] === undefined ? null : z.string().min(1).parse(event.payload["grantId"]);
-        const status =
-          event.type === "effect.completed"
-            ? "completed"
-            : event.type === "effect.failed"
-              ? "failed"
-              : event.type === "effect.denied"
-                ? "denied"
-                : "reserved";
-        const resultJson =
-          event.type === "effect.completed" ? JSON.stringify(event.payload["result"] ?? null) : null;
-        const failure =
-          event.type === "effect.failed" || event.type === "effect.denied"
-            ? z.string().min(1).parse(event.payload["reason"])
-            : null;
-        const lineage =
-          event.type === "effect.completed" || event.type === "effect.failed"
-            ? `legacy_receipt_${sha256(event.eventId).slice(0, 32)}`
-            : null;
-        const existingOperation = db
-          .prepare("SELECT operation_fingerprint, status FROM authority_operations WHERE operation_id = ?")
-          .get(operationId);
-        if (existingOperation !== undefined) {
-          if (requiredString(existingOperation, "operation_fingerprint") !== fingerprint)
-            throw new Error(`Legacy authority operation ${operationId} changed identity`);
-          if (status === "completed" || status === "failed")
-            db.prepare(`UPDATE authority_operations
-               SET status = ?, result_json = ?, failure = ?, receipt_lineage_id = ?, updated_at = ?
-               WHERE operation_id = ? AND status = 'reserved'`).run(
-              status,
-              resultJson,
-              failure,
-              lineage,
-              event.occurredAt,
-              operationId,
-            );
-          continue;
-        }
-        db.prepare(`INSERT INTO authority_operations(
-            operation_id, idempotency_key, operation_fingerprint, principal, effect, resource,
-            request_digest, estimated_cost, grant_id, status, result_json, failure,
-            receipt_lineage_id, source_event_id, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
-          operationId,
-          idempotencyKey,
-          fingerprint,
-          principal,
-          effect,
-          resource,
-          requestDigest,
-          estimatedCost,
-          grantId,
-          status,
-          resultJson,
-          failure,
-          lineage,
-          event.eventId,
-          event.occurredAt,
-          event.occurredAt,
-        );
-      }
-      db.prepare(`INSERT INTO operational_cutovers(
-          cutover_name, cutover_version, source_digest, completed_at
-        ) VALUES (?, ?, ?, ?)`).run(cutoverName, cutoverVersion, sourceDigest, now());
-    });
-    return Object.freeze({
-      cutoverName,
-      cutoverVersion,
-      sourceDigest,
-      alreadyCompleted: false,
-      legacyImport,
-    });
-  };
+  const protectedTurnPlans = createProtectedTurnPlanStore({
+    database,
+    recordActivity,
+    assertStoredReference: (reference) => assertStoredReference(db, reference),
+  });
   const workspace: NoesisWorkspaceStore = Object.freeze({
     paths,
     capabilities,
@@ -1703,35 +1209,13 @@ export async function createWorkspaceStore(
     revisions: Object.freeze({ resolveRevision, removeUnregisteredSnapshots }),
     evidence: Object.freeze({ appendEvidence }),
     artifacts: Object.freeze({ writeArtifact, importArtifact }),
-    research,
     jobs,
-    workingAdjustments: Object.freeze({
-      get: protectedWorkingAdjustments.get,
-      getActive: protectedWorkingAdjustments.getActive,
-      list: protectedWorkingAdjustments.list,
-      listSettledEvidence: protectedWorkingAdjustments.listSettledEvidence,
-    }),
     declaredAuthority: declaredAuthorityFor,
     operational,
     search,
     recordDirectEdit,
-    stageDefinition,
-    registerStagedDefinition,
-    cleanupStagedDefinitions,
     inspectIntegrity: async () => await inspectWorkspaceIntegrity(paths, db),
     backup: async (backupRoot: string) => await createBackup(paths, db, backupRoot, now()),
-    importLegacyWorkspace: async (legacyRoot: string, actor: ActorRef) =>
-      await importLegacyWorkspace({
-        legacyRoot,
-        actor,
-        paths,
-        database,
-        now,
-        createId,
-        recordDefinitionBytes,
-        writeArtifact,
-      }),
-    cutoverLegacyOperationalAuthority,
     close: () => {
       releaseRuntimeOwner();
       database.close();
@@ -1757,10 +1241,7 @@ export async function createWorkspaceStore(
         protectedRuntime: createProtectedWorkspaceRuntime({
           workspaceRoot: paths.root,
           authority,
-          activations: protectedActivations,
-          feedback: protectedFeedback,
-          measurements: compoundingMeasurements,
-          workingAdjustments: protectedWorkingAdjustments,
+          turnPlans: protectedTurnPlans,
         }),
       }),
     );
@@ -2393,14 +1874,8 @@ function createOperationalRepositories(
           AND NOT EXISTS(SELECT 1 FROM model_calls WHERE session_id = ?)
           AND NOT EXISTS(SELECT 1 FROM context_checkpoints WHERE session_id = ?)
           AND NOT EXISTS(SELECT 1 FROM session_context_state WHERE session_id = ?)
-          AND NOT EXISTS(SELECT 1 FROM job_observations WHERE source_session_id = ?)
-          AND NOT EXISTS(SELECT 1 FROM turn_activation_pins WHERE session_id = ?)
-          AND NOT EXISTS(SELECT 1 FROM frozen_turn_plans WHERE session_id = ?)
-          AND NOT EXISTS(SELECT 1 FROM experiment_observations WHERE session_id = ?)`)
+          AND NOT EXISTS(SELECT 1 FROM frozen_turn_plans WHERE session_id = ?)`)
           .run(
-            sessionId,
-            sessionId,
-            sessionId,
             sessionId,
             sessionId,
             sessionId,
@@ -4300,44 +3775,6 @@ function createOperationalRepositories(
       recordActivity(systemActor, "outcome.record", "outcome", record.outcomeId);
     });
   };
-  const classifyOutcome = async (value: ClassifyOutcomeRequest): Promise<OutcomeRecord> => {
-    const request = ClassifyOutcomeRequestSchema.parse(value);
-    return database.transaction(() => {
-      const row = db.prepare("SELECT * FROM outcomes WHERE outcome_id = ?").get(request.outcomeId);
-      if (row === undefined) throw new Error(`Outcome ${request.outcomeId} does not exist`);
-      const outcome = decodeOutcome(row);
-      if (outcome.sessionId !== request.sessionId || outcome.turnId !== request.turnId)
-        throw new Error(`Outcome ${request.outcomeId} does not belong to the classified turn`);
-      const recordedValue = outcome.metadata["semanticObservation"];
-      const recorded = OutcomeSemanticObservationSchema.safeParse(recordedValue);
-      if (Object.hasOwn(outcome.metadata, "semanticObservation") && !recorded.success)
-        throw new Error(`Outcome ${request.outcomeId} has malformed semantic classification metadata`);
-      if (recorded.success) {
-        if (recorded.data.kind !== request.classification)
-          throw new Error(`Outcome ${request.outcomeId} has a conflicting semantic classification`);
-        return outcome;
-      }
-      if (outcome.status !== "unknown")
-        throw new Error(`Outcome ${request.outcomeId} cannot be classified from ${outcome.status}`);
-      const status = request.classification === "correction" ? "corrected" : "unknown";
-      const metadata = Object.freeze({
-        ...outcome.metadata,
-        semanticObservation: Object.freeze({
-          kind: request.classification,
-          reason: request.reason,
-        }),
-      });
-      const changed = db
-        .prepare(`UPDATE outcomes
-           SET status = ?, metadata_json = ?
-           WHERE outcome_id = ? AND session_id = ? AND turn_id = ? AND status = 'unknown'`)
-        .run(status, JSON.stringify(metadata), request.outcomeId, request.sessionId, request.turnId);
-      if (changed.changes !== 1)
-        throw new Error(`Outcome ${request.outcomeId} changed before semantic classification`);
-      recordActivity(systemActor, "outcome.classified", "outcome", request.outcomeId);
-      return decodeOutcome(db.prepare("SELECT * FROM outcomes WHERE outcome_id = ?").get(request.outcomeId));
-    });
-  };
   const putSearchConfiguration = async (configuration: SearchConfiguration): Promise<DatabaseRowRef> => {
     SearchConfigurationSchema.parse(configuration);
     database.transaction(() => {
@@ -5041,7 +4478,6 @@ function createOperationalRepositories(
           decodeOutcome,
         ),
       put: putOutcome,
-      classify: classifyOutcome,
       listForSession: async (sessionId: string) =>
         db
           .prepare("SELECT * FROM outcomes WHERE session_id = ? ORDER BY created_at, outcome_id")
@@ -5054,379 +4490,6 @@ function createOperationalRepositories(
           db.prepare("SELECT * FROM search_configuration WHERE configuration_id = 'default'").get(),
         ),
       put: putSearchConfiguration,
-    }),
-  });
-}
-function createResearchRepositories(
-  database: WorkspaceDatabase,
-  recordActivity: (actor: ActorRef, kind: string, subjectKind: string, subjectId: string) => void,
-  now: () => string,
-): NoesisWorkspaceStore["research"] {
-  const db = database.connection;
-  const actor: ActorRef = { actorId: "workspace-store", kind: "system" };
-  const immutableInsert = (
-    table: "preflight_plans" | "preflight_reports" | "feedback_signals",
-    keyColumn: string,
-    key: string,
-    insert: () => void,
-    encoded: string,
-  ): void => {
-    const existing = db.prepare(`SELECT data_json FROM ${table} WHERE ${keyColumn} = ?`).get(key);
-    if (existing !== undefined) {
-      if (requiredString(existing, "data_json") !== encoded)
-        throw new Error(`Immutable ${table} row ${key} already exists with different data`);
-      return;
-    }
-    insert();
-  };
-  const insertPreflightReport = (value: PreflightReport): void => {
-    const plan = decodeStored(
-      db.prepare("SELECT data_json FROM preflight_plans WHERE plan_id = ?").get(value.planId),
-      PreflightPlanSchema,
-    );
-    if (!plan || !preflightReportMatchesPlan(plan, value))
-      throw new Error(`Preflight report ${value.preflightId} does not match its plan`);
-    for (const trialRef of value.trialRowRefs) {
-      if (trialRef.table !== "experiment_trials")
-        throw new Error(`Preflight trial reference points to ${trialRef.table}`);
-      assertStoredReference(db, trialRef);
-      const trial = db
-        .prepare("SELECT experiment_id FROM experiment_trials WHERE trial_id = ?")
-        .get(trialRef.rowId);
-      if (!trial || requiredString(trial, "experiment_id") !== value.experimentId)
-        throw new Error(`Preflight trial ${trialRef.rowId} belongs to another experiment`);
-    }
-    for (const ref of [
-      ...value.trialEvidence,
-      ...value.judgmentEvidence,
-      value.reportEvidence,
-      ...value.appliedCriteria.flatMap((criterion) => criterion.evidenceRefs),
-      ...value.railChecks.flatMap((rail) => rail.evidenceRefs),
-    ])
-      assertStoredReference(db, ref);
-    const encoded = JSON.stringify(value);
-    immutableInsert(
-      "preflight_reports",
-      "preflight_id",
-      value.preflightId,
-      () =>
-        db
-          .prepare(`INSERT INTO preflight_reports(
-              preflight_id, experiment_id, plan_id, decision, data_json, created_at,
-              approval_required
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-          .run(
-            value.preflightId,
-            value.experimentId,
-            value.planId,
-            value.decision === "approval_required" ? "inconclusive" : value.decision,
-            encoded,
-            now(),
-            value.decision === "approval_required" ? 1 : 0,
-          ),
-      encoded,
-    );
-    recordActivity(actor, "preflight.report_put", "preflight_report", value.preflightId);
-  };
-  const insertEvaluation = (value: EvaluationRecord): void => {
-    for (const ref of value.evidenceRefs) assertStoredReference(db, ref);
-    const current = db
-      .prepare("SELECT status FROM evaluations WHERE evaluation_id = ?")
-      .get(value.evaluationId);
-    const encoded = JSON.stringify(value);
-    if (current === undefined) {
-      db.prepare("INSERT INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?)").run(
-        value.evaluationId,
-        value.experimentId,
-        value.preflightId,
-        value.status,
-        encoded,
-        now(),
-        now(),
-      );
-    } else {
-      const from = requiredString(current, "status");
-      if (from !== value.status && !(from === "running" && ["completed", "failed"].includes(value.status)))
-        throw new Error(`Invalid evaluation transition ${from} -> ${value.status}`);
-      db.prepare(
-        "UPDATE evaluations SET status = ?, data_json = ?, updated_at = ? WHERE evaluation_id = ?",
-      ).run(value.status, encoded, now(), value.evaluationId);
-    }
-    recordActivity(actor, "evaluation.put", "evaluation", value.evaluationId);
-  };
-  return Object.freeze({
-    experiments: Object.freeze({
-      getExperiment: async (experimentId: string) =>
-        decodeExperiment(
-          db.prepare("SELECT data_json FROM experiments WHERE experiment_id = ?").get(experimentId),
-        ),
-      listExperiments: async (
-        request: Parameters<NoesisWorkspaceStore["research"]["experiments"]["listExperiments"]>[0],
-      ) => {
-        if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1000)
-          throw new Error("Experiment list limit must be an integer between 1 and 1000");
-        const clauses: string[] = [];
-        const values: Array<string | number> = [];
-        if (request.status !== undefined) {
-          clauses.push("status = ?");
-          values.push(request.status);
-        }
-        if (request.sourceAdjustmentIds !== undefined) {
-          const adjustmentIds = z.array(z.string().min(1)).max(1000).parse(request.sourceAdjustmentIds);
-          if (adjustmentIds.length === 0) clauses.push("0");
-          else {
-            clauses.push(
-              `json_extract(data_json, '$.sourceAdjustmentId') IN (${adjustmentIds.map(() => "?").join(", ")})`,
-            );
-            values.push(...adjustmentIds);
-          }
-        }
-        const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
-        const rows = db
-          .prepare(`SELECT data_json FROM experiments${where} ORDER BY experiment_id LIMIT ?`)
-          .all(...values, request.limit);
-        return rows.map((row) => {
-          const experiment = decodeExperiment(row);
-          if (!experiment) throw new Error("Experiment row is missing canonical data");
-          return experiment;
-        });
-      },
-      putExperiment: async (experiment: Experiment) => {
-        const requested = ExperimentSchema.parse(experiment);
-        database.transaction(() => {
-          const current = db
-            .prepare("SELECT status, data_json FROM experiments WHERE experiment_id = ?")
-            .get(requested.experimentId);
-          const stored = decodeExperiment(current);
-          if (stored !== undefined && stored.sourceAdjustmentId !== requested.sourceAdjustmentId)
-            throw new Error(
-              `Experiment ${requested.experimentId} cannot change its source working adjustment`,
-            );
-          const value = ExperimentSchema.parse({
-            ...requested,
-            evidenceRefs: mergeEvidenceReferences(stored?.evidenceRefs ?? [], requested.evidenceRefs),
-            feedbackSignalIds: [
-              ...new Set([...(stored?.feedbackSignalIds ?? []), ...requested.feedbackSignalIds]),
-            ],
-          });
-          const encoded = JSON.stringify(value);
-          if (
-            value.sourceAdjustmentId !== undefined &&
-            db
-              .prepare("SELECT 1 FROM working_adjustments WHERE adjustment_id = ?")
-              .get(value.sourceAdjustmentId) === undefined
-          )
-            throw new Error(
-              `Experiment ${value.experimentId} references unknown source working adjustment ${value.sourceAdjustmentId}`,
-            );
-          for (const ref of value.evidenceRefs) assertStoredReference(db, ref);
-          if (value.preflightRef) assertStoredReference(db, value.preflightRef);
-          if (current === undefined) {
-            db.prepare("INSERT INTO experiments VALUES (?, ?, ?, ?, ?)").run(
-              value.experimentId,
-              value.status,
-              encoded,
-              now(),
-              now(),
-            );
-          } else {
-            // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-            const from = requiredString(current, "status") as ExperimentStatus;
-            if (from === "completed" && requiredString(current, "data_json") !== encoded)
-              throw new Error(`Completed experiment ${value.experimentId} is immutable`);
-            if (from !== value.status && !isExperimentTransitionAllowed(from, value.status))
-              throw new Error(`Invalid experiment transition ${from} -> ${value.status}`);
-            db.prepare(
-              "UPDATE experiments SET status = ?, data_json = ?, updated_at = ? WHERE experiment_id = ?",
-            ).run(value.status, encoded, now(), value.experimentId);
-          }
-          recordActivity(actor, "experiment.put", "experiment", value.experimentId);
-        });
-        return databaseRef("experiments", requested.experimentId);
-      },
-    }),
-    trials: Object.freeze({
-      getTrial: async (trialId: string) =>
-        decodeStored(
-          db.prepare("SELECT data_json FROM experiment_trials WHERE trial_id = ?").get(trialId),
-          ExperimentTrialSchema,
-        ),
-      listTrials: async (experimentId: string) =>
-        db
-          .prepare("SELECT data_json FROM experiment_trials WHERE experiment_id = ? ORDER BY trial_id")
-          .all(experimentId)
-          .map((row) => ExperimentTrialSchema.parse(parseJson(requiredString(row, "data_json")))),
-      putTrial: async (trial: ExperimentTrial) => {
-        const value = ExperimentTrialSchema.parse(trial);
-        const encoded = JSON.stringify(value);
-        database.transaction(() => {
-          for (const ref of [...value.inputRefs, ...value.outputEvidenceRefs, ...value.traceEvidenceRefs])
-            assertStoredReference(db, ref);
-          const current = db
-            .prepare("SELECT status FROM experiment_trials WHERE trial_id = ?")
-            .get(value.trialId);
-          if (current === undefined) {
-            db.prepare("INSERT INTO experiment_trials VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
-              value.trialId,
-              value.experimentId,
-              value.comparisonGroupId,
-              value.arm,
-              value.status,
-              encoded,
-              now(),
-              now(),
-            );
-          } else {
-            const from = requiredString(current, "status");
-            const allowed = {
-              planned: ["running", "failed"],
-              running: ["completed", "failed"],
-              completed: [],
-              failed: [],
-            } satisfies Readonly<Record<string, readonly string[]>>;
-            if (from !== value.status && !permitsTransition(allowed, from, value.status))
-              throw new Error(`Invalid trial transition ${from} -> ${value.status}`);
-            db.prepare(
-              "UPDATE experiment_trials SET status = ?, data_json = ?, updated_at = ? WHERE trial_id = ?",
-            ).run(value.status, encoded, now(), value.trialId);
-          }
-          recordActivity(actor, "trial.put", "experiment_trial", value.trialId);
-        });
-        return databaseRef("experiment_trials", value.trialId);
-      },
-    }),
-    preflights: Object.freeze({
-      getPreflightPlan: async (planId: string) =>
-        decodeStored(
-          db.prepare("SELECT data_json FROM preflight_plans WHERE plan_id = ?").get(planId),
-          PreflightPlanSchema,
-        ),
-      putPreflightPlan: async (plan: PreflightPlan) => {
-        const value = PreflightPlanSchema.parse(plan);
-        const encoded = JSON.stringify(value);
-        database.transaction(() => {
-          for (const ref of value.caseRefs) assertStoredReference(db, ref);
-          immutableInsert(
-            "preflight_plans",
-            "plan_id",
-            value.planId,
-            () =>
-              db
-                .prepare("INSERT INTO preflight_plans VALUES (?, ?, ?, ?)")
-                .run(value.planId, value.experimentId, encoded, now()),
-            encoded,
-          );
-          recordActivity(actor, "preflight.plan_put", "preflight_plan", value.planId);
-        });
-        return databaseRef("preflight_plans", value.planId);
-      },
-      getPreflightReport: async (preflightId: string) =>
-        decodeStored(
-          db.prepare("SELECT data_json FROM preflight_reports WHERE preflight_id = ?").get(preflightId),
-          PreflightReportSchema,
-        ),
-      putPreflightReport: async (report: PreflightReport) => {
-        const value = PreflightReportSchema.parse(report);
-        database.transaction(() => insertPreflightReport(value));
-        return databaseRef("preflight_reports", value.preflightId);
-      },
-      completePreflight: async (input: {
-        readonly report: PreflightReport;
-        readonly evaluation: EvaluationRecord;
-      }) => {
-        const report = PreflightReportSchema.parse(input.report);
-        const evaluation = EvaluationRecordSchema.parse(input.evaluation);
-        if (
-          evaluation.experimentId !== report.experimentId ||
-          evaluation.preflightId !== report.preflightId ||
-          !sameCapabilityRevisionRef(evaluation.candidateRevision, report.candidateRevision)
-        )
-          throw new Error(`Evaluation ${evaluation.evaluationId} does not match its preflight report`);
-        database.transaction(() => {
-          insertPreflightReport(report);
-          insertEvaluation(evaluation);
-        });
-        return Object.freeze({
-          report: databaseRef("preflight_reports", report.preflightId),
-          evaluation: databaseRef("evaluations", evaluation.evaluationId),
-        });
-      },
-    }),
-    evaluations: Object.freeze({
-      getEvaluation: async (evaluationId: string) =>
-        decodeStored(
-          db.prepare("SELECT data_json FROM evaluations WHERE evaluation_id = ?").get(evaluationId),
-          EvaluationRecordSchema,
-        ),
-      listEvaluations: async (experimentId: string) =>
-        db
-          .prepare("SELECT data_json FROM evaluations WHERE experiment_id = ? ORDER BY evaluation_id")
-          .all(experimentId)
-          .map((row) => EvaluationRecordSchema.parse(parseJson(requiredString(row, "data_json")))),
-      putEvaluation: async (evaluation: EvaluationRecord) => {
-        const value = EvaluationRecordSchema.parse(evaluation);
-        database.transaction(() => insertEvaluation(value));
-        return databaseRef("evaluations", value.evaluationId);
-      },
-    }),
-    feedbackSignals: Object.freeze({
-      getFeedbackSignal: async (signalId: string) =>
-        decodeFeedbackSignal(
-          db.prepare("SELECT data_json FROM feedback_signals WHERE signal_id = ?").get(signalId),
-        ),
-      listFeedbackSignals: async (
-        request: Parameters<
-          NonNullable<NoesisWorkspaceStore["research"]["feedbackSignals"]["listFeedbackSignals"]>
-        >[0],
-      ) => {
-        if (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 1000)
-          throw new Error("Feedback signal list limit must be an integer between 1 and 1000");
-        const experimentId =
-          request.experimentId === undefined ? undefined : z.string().min(1).parse(request.experimentId);
-        const rows =
-          experimentId !== undefined
-            ? db
-                .prepare(
-                  "SELECT data_json FROM feedback_signals WHERE experiment_id = ? ORDER BY created_at DESC, signal_id LIMIT ?",
-                )
-                .all(experimentId, request.limit)
-            : db
-                .prepare("SELECT data_json FROM feedback_signals ORDER BY created_at DESC, signal_id LIMIT ?")
-                .all(request.limit);
-        return Object.freeze(
-          rows.map((row) => {
-            const signal = decodeFeedbackSignal(row);
-            if (!signal) throw new Error("Feedback signal row is missing canonical data");
-            return signal;
-          }),
-        );
-      },
-      recordFeedbackSignal: async (signal: FeedbackSignal) => {
-        const value = FeedbackSignalSchema.parse(signal);
-        const encoded = JSON.stringify(value);
-        database.transaction(() => {
-          for (const ref of value.evidenceRefs) assertStoredReference(db, ref);
-          immutableInsert(
-            "feedback_signals",
-            "signal_id",
-            value.signalId,
-            () =>
-              db
-                .prepare("INSERT INTO feedback_signals VALUES (?, ?, ?, ?, ?, ?)")
-                .run(
-                  value.signalId,
-                  value.experimentId ?? null,
-                  value.capabilityRevisionId ?? null,
-                  value.sensitivity,
-                  encoded,
-                  now(),
-                ),
-            encoded,
-          );
-          recordActivity(actor, "feedback.record", "feedback_signal", value.signalId);
-        });
-        return databaseRef("feedback_signals", value.signalId);
-      },
     }),
   });
 }
@@ -5505,22 +4568,6 @@ function createSearchIndex(
           : failClosed;
       }
       if (ref.table === "file_revisions") return resolveFileRevision(ref.rowId);
-      if (ref.table === "feedback_signals") {
-        const row = db
-          .prepare("SELECT sensitivity, data_json FROM feedback_signals WHERE signal_id = ?")
-          .get(ref.rowId);
-        if (row === undefined) return failClosed;
-        const sensitivity = SensitivitySchema.safeParse(requiredString(row, "sensitivity"));
-        const feedback = FeedbackSignalSchema.safeParse(parseJson(requiredString(row, "data_json")));
-        if (!sensitivity.success || !feedback.success) return failClosed;
-        return mergeResolutions(sensitivity.data, [resolveRefs(feedback.data.evidenceRefs)]);
-      }
-      if (ref.table === "experiments") {
-        const row = db.prepare("SELECT data_json FROM experiments WHERE experiment_id = ?").get(ref.rowId);
-        if (row === undefined) return failClosed;
-        const experiment = ExperimentSchema.safeParse(parseJson(requiredString(row, "data_json")));
-        return experiment.success ? resolveRefs(experiment.data.evidenceRefs) : failClosed;
-      }
       return failClosed;
     };
     const resolveArtifact = (artifactId: string): ProvenanceResolution => {
@@ -5655,25 +4702,6 @@ function createSearchIndex(
         requiredString(row, "sensitivity") as SearchDocument["sensitivity"],
         requiredString(row, "session_id"),
       );
-    for (const row of db.prepare("SELECT * FROM experiments WHERE status = 'completed'").all()) {
-      const body = requiredString(row, "data_json");
-      const experiment = ExperimentSchema.safeParse(parseJson(body));
-      const resolution = experiment.success
-        ? resolveProvenance("normal", experiment.data.evidenceRefs)
-        : failClosed;
-      add(
-        {
-          kind: "database_row",
-          table: "experiments",
-          rowId: requiredString(row, "experiment_id"),
-          field: "data_json",
-        },
-        body,
-        requiredString(row, "updated_at"),
-        resolution.sensitivity,
-        singleSessionId(resolution),
-      );
-    }
     for (const row of db.prepare("SELECT * FROM file_revisions").all()) {
       const snapshotPath = requiredString(row, "snapshot_path");
       let body: string;
@@ -5739,32 +4767,13 @@ function createSearchIndex(
       .all(options.includePrivate ? 1 : 0, options.includeSecret ? 1 : 0);
     return rows.map(decodeSearchDocument);
   };
-  const sourceScopeParameters = (
-    value: SearchSourceScope | undefined,
-  ): readonly [number, number, number, number] => {
+  const sourceScopeParameters = (value: SearchSourceScope | undefined): readonly [number, number] => {
     const scope = value === undefined ? undefined : SearchSourceScopeSchema.parse(value);
-    return [
-      scope === undefined ? 1 : 0,
-      scope === "session_or_outcome" ? 1 : 0,
-      scope === "corrected_outcome" ? 1 : 0,
-      scope === "completed_experiment" ? 1 : 0,
-    ];
+    return [scope === undefined ? 1 : 0, scope === "session_or_outcome" ? 1 : 0];
   };
   const sourceScopeSql = `(
     ? = 1
     OR (? = 1 AND source_kind = 'database_row' AND source_table IN ('sessions', 'outcomes'))
-    OR (? = 1 AND source_kind = 'database_row' AND source_table = 'outcomes'
-      AND EXISTS (
-        SELECT 1 FROM outcomes
-        WHERE outcomes.outcome_id = search_documents.source_id
-          AND outcomes.status = 'corrected'
-      ))
-    OR (? = 1 AND source_kind = 'database_row' AND source_table = 'experiments'
-      AND EXISTS (
-        SELECT 1 FROM experiments
-        WHERE experiments.experiment_id = search_documents.source_id
-          AND experiments.status = 'completed'
-      ))
   )`;
   return Object.freeze({
     clear: async () => {
@@ -5923,7 +4932,6 @@ async function openCanonicalSource(
       trace: "tool_name || '\n' || request_json || '\n' || COALESCE(response_json, '')",
     },
     outcomes: { key: "outcome_id", summary: "summary" },
-    experiments: { key: "experiment_id", data_json: "data_json" },
   } as const;
   const table = mapping[source.table];
   if (!(source.field in table) || source.field === "key") return undefined;

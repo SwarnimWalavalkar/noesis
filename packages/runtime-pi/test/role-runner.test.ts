@@ -4,8 +4,6 @@ import { describe, expect, test } from "vitest";
 import { z } from "zod";
 import {
   createAgentRoleRunner,
-  createBlindedJudgeFixture,
-  createComparableRoleVariantFixture,
   createDefaultRoleContextPolicy,
   createRestrictedRoleContextPolicy,
   createStructuredInferencePort,
@@ -137,15 +135,15 @@ describe("adapter-neutral role runner", () => {
     const backend = createScriptedRoleModelBackend({ respond: () => ({ text: "not json" }) });
     const runner = createAgentRoleRunner({
       backend,
-      variants: [configuration("case_generator", "cases-v1")],
+      variants: [configuration("session_reviewer", "review-v1")],
     });
     const structured = createStructuredInferencePort({ runner, maxRepairAttempts: 1 });
 
     let failure: unknown;
     try {
       await structured.run(
-        request("case_generator", "cases-v1", [
-          { role: "user", name: "behavioral_objective", content: "preserve voice" },
+        request("session_reviewer", "review-v1", [
+          { role: "user", name: "session_review", content: "preserve voice" },
         ]),
         z.strictObject({ cases: z.array(z.string()) }),
       );
@@ -249,100 +247,6 @@ describe("adapter-neutral role runner", () => {
       trace: { telemetry: { stopReason: "aborted", status: "aborted" } },
     });
   });
-
-  test("runs comparable variants against identical bounded inputs", async () => {
-    const prompts: RoleBackendRequest[] = [];
-    const backend = createScriptedRoleModelBackend({
-      respond(backendRequest) {
-        prompts.push(backendRequest);
-        return { text: JSON.stringify({ model: backendRequest.model }) };
-      },
-    });
-    const runner = createAgentRoleRunner({
-      backend,
-      variants: [
-        configuration("reflector", "reflect-baseline"),
-        configuration("reflector", "reflect-candidate"),
-      ],
-    });
-    const fixture = createComparableRoleVariantFixture({
-      request: {
-        runId: "comparison-run",
-        role: "reflector",
-        messages: [{ role: "user", name: "signals", content: "same observed correction" }],
-        evidenceRefs: [],
-        availableTools: [],
-      },
-      baselineVariant: roleVariant("reflect-baseline"),
-      candidateVariant: roleVariant("reflect-candidate"),
-      capabilityRevisions: [capabilityRevision],
-    });
-
-    const [baseline, candidate] = await Promise.all([
-      runner.run({ ...fixture.baseline, runId: "comparison-baseline" }),
-      runner.run({ ...fixture.candidate, runId: "comparison-candidate" }),
-    ]);
-
-    expect(fixture.baseline.messages).toEqual(fixture.candidate.messages);
-    expect(fixture.baseline.evidenceRefs).toEqual(fixture.candidate.evidenceRefs);
-    expect(fixture.baseline.capabilityRevisions).toEqual(fixture.candidate.capabilityRevisions);
-    expect(prompts.map((entry) => JSON.parse(entry.prompt).messages)).toEqual([
-      fixture.baseline.messages,
-      fixture.candidate.messages,
-    ]);
-    expect([baseline.trace.variant.variantId, candidate.trace.variant.variantId]).toEqual([
-      "reflect-baseline",
-      "reflect-candidate",
-    ]);
-  });
-
-  test("runs one two-variant fixture through swappable scripted trial and judge roles with stable capability identity", async () => {
-    const runner = createScriptedAgentRoleRunner({
-      variants: [
-        configuration("trial", "trial-baseline"),
-        configuration("trial", "trial-candidate"),
-        configuration("judge_critic", "judge-comparison"),
-      ],
-      respond: (backendRequest) => ({
-        text: backendRequest.model.includes("judge")
-          ? JSON.stringify({ winner: "B", reason: "more cited evidence" })
-          : JSON.stringify({ answer: backendRequest.model, citations: ["source-1"] }),
-      }),
-    });
-    const fixture = createComparableRoleVariantFixture({
-      request: {
-        runId: "research-comparison",
-        role: "trial",
-        messages: [
-          { role: "user", name: "case", content: "Research the same bounded fixture." },
-          { role: "user", name: "arm", content: "Apply the configured role variant." },
-        ],
-        evidenceRefs: [],
-        availableTools: [],
-      },
-      baselineVariant: roleVariant("trial-baseline"),
-      candidateVariant: roleVariant("trial-candidate"),
-      capabilityRevisions: [capabilityRevision],
-    });
-    const [baseline, candidate] = await Promise.all([
-      runner.run({ ...fixture.baseline, runId: "research-baseline" }),
-      runner.run({ ...fixture.candidate, runId: "research-candidate" }),
-    ]);
-    const blinded = createBlindedJudgeFixture({
-      first: JSON.parse(baseline.text),
-      second: JSON.parse(candidate.text),
-      swap: false,
-      rubric: "Prefer the answer with stronger cited evidence.",
-    });
-    const judgment = await runner.run(request("judge_critic", "judge-comparison", blinded.messages));
-
-    expect(fixture.baseline.messages).toEqual(fixture.candidate.messages);
-    expect(baseline.capabilityRevisions).toEqual(fixture.capabilityRevisions);
-    expect(candidate.capabilityRevisions).toEqual(fixture.capabilityRevisions);
-    expect(baseline.trace.capabilityRevisions).toEqual(candidate.trace.capabilityRevisions);
-    expect(judgment.capabilityRevisions).toEqual(fixture.capabilityRevisions);
-    expect(JSON.parse(judgment.text)).toEqual({ winner: "B", reason: "more cited evidence" });
-  });
 });
 
 describe("research role isolation", () => {
@@ -368,52 +272,33 @@ describe("research role isolation", () => {
     ).toThrow("rejects messages beyond its message bound");
   });
 
-  test("restricts capability routing to the current turn payload", () => {
-    const policy = createRestrictedRoleContextPolicy("capability_router");
-
-    expect(policy.allowedMessageNames).toEqual([
-      "turn",
-      "prior_conversation",
-      "output_contract",
-      "output_repair",
-    ]);
-    expect(policy.maxTools).toBe(0);
-  });
-
   test("derives custom isolated-role policies without weakening the default whitelist", () => {
-    const policy = createRestrictedRoleContextPolicy("judge_critic", {
-      policyId: "application-judge-v1",
+    const policy = createRestrictedRoleContextPolicy("session_reviewer", {
+      policyId: "application-reviewer-v1",
       maxMessages: 12,
     });
 
     expect(policy.allowedMessageNames).toEqual([
-      "rubric",
-      "arm_A",
-      "arm_B",
-      "relevant_traces",
+      "session_review",
+      "current_capabilities",
+      "related_history",
       "output_contract",
       "output_repair",
     ]);
-    expect(policy.includeCapabilityRevisions).toBe(false);
     expect(policy.maxMessages).toBe(12);
     expect(() =>
-      createRestrictedRoleContextPolicy("judge_critic", {
+      createRestrictedRoleContextPolicy("session_reviewer", {
         maxTotalCharacters: 65_000,
       }),
     ).toThrow("cannot widen maxTotalCharacters");
     expect(() =>
-      createRestrictedRoleContextPolicy("judge_critic", {
-        allowedMessageNames: ["rubric", "candidate_identity"],
+      createRestrictedRoleContextPolicy("session_reviewer", {
+        allowedMessageNames: ["session_review", "candidate_identity"],
       }),
     ).toThrow("cannot add undeclared message names");
-    expect(() =>
-      createRestrictedRoleContextPolicy("judge_critic", {
-        includeCapabilityRevisions: true,
-      }),
-    ).toThrow("cannot expose capability revisions");
   });
 
-  test("preserves long structured router context as valid JSON and rejects overflow instead of slicing", async () => {
+  test("preserves long structured isolated-role context as valid JSON and rejects overflow instead of slicing", async () => {
     let capturedPrompt = "";
     const backend = createScriptedRoleModelBackend({
       respond(backendRequest) {
@@ -423,19 +308,19 @@ describe("research role isolation", () => {
     });
     const runner = createAgentRoleRunner({
       backend,
-      variants: [configuration("capability_router", "router-context-v1")],
+      variants: [configuration("session_reviewer", "review-context-v1")],
     });
     const longContent = "x".repeat(12_000);
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const messages = [
       Object.freeze({
         role: "user" as const,
-        name: "turn",
+        name: "session_review",
         content: JSON.stringify({ userInput: "Continue", candidates: [] }),
       }),
       Object.freeze({
         role: "user" as const,
-        name: "prior_conversation",
+        name: "related_history",
         content: JSON.stringify({
           messageId: "history-long",
           role: "user",
@@ -445,7 +330,7 @@ describe("research role isolation", () => {
       }),
     ];
 
-    await runner.run(request("capability_router", "router-context-v1", messages));
+    await runner.run(request("session_reviewer", "review-context-v1", messages));
     const rendered = z
       .object({ messages: z.array(z.object({ name: z.string(), content: z.string() })) })
       .parse(JSON.parse(capturedPrompt));
@@ -457,10 +342,10 @@ describe("research role isolation", () => {
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     await expect(
       runner.run(
-        request("capability_router", "router-context-v1", [
+        request("session_reviewer", "review-context-v1", [
           Object.freeze({
             role: "user" as const,
-            name: "prior_conversation",
+            name: "related_history",
             content: "x".repeat(16_001),
           }),
         ]),
@@ -548,54 +433,20 @@ describe("research role isolation", () => {
     expect(capturedSystem).toContain("x".repeat(5_000));
   });
 
-  test("rejects undeclared revision-author context", async () => {
+  test("rejects undeclared isolated-role context", async () => {
     const backend = createScriptedRoleModelBackend({ respond: () => ({ text: "unused" }) });
     const runner = createAgentRoleRunner({
       backend,
-      variants: [configuration("revision_author", "author-v1")],
+      variants: [configuration("session_titler", "titler-v1")],
     });
 
     await expect(
       runner.run(
-        request("revision_author", "author-v1", [
+        request("session_titler", "titler-v1", [
           { role: "user", name: "judgment_evidence", content: "judge preferred arm A" },
         ]),
       ),
     ).rejects.toThrow("rejects undeclared message judgment_evidence");
-  });
-
-  test("blinds judge arm labels and excludes capability identity from model context", async () => {
-    let capturedPrompt = "";
-    const backend = createScriptedRoleModelBackend({
-      respond(backendRequest) {
-        capturedPrompt = backendRequest.prompt;
-        return { text: '{"winner":"A"}' };
-      },
-    });
-    const runner = createAgentRoleRunner({
-      backend,
-      variants: [configuration("judge_critic", "judge-v1")],
-    });
-    const blinded = createBlindedJudgeFixture({
-      first: { answer: "one" },
-      second: { answer: "two" },
-      swap: true,
-      rubric: "Prefer the clearer answer.",
-    });
-
-    const result = await runner.run(request("judge_critic", "judge-v1", blinded.messages));
-    const rendered = JSON.parse(capturedPrompt);
-
-    expect(rendered.messages.map((message: { name: string }) => message.name)).toEqual([
-      "rubric",
-      "arm_A",
-      "arm_B",
-    ]);
-    expect(capturedPrompt).not.toContain(capabilityRevision.capabilityId);
-    expect(capturedPrompt).not.toMatch(/baseline|candidate|authority|promotion/i);
-    expect(blinded.labels).toEqual({ A: "second", B: "first" });
-    expect(result.trace.capabilityRevisions).toEqual([capabilityRevision]);
-    expect(result.capabilityRevisions).toEqual([capabilityRevision]);
   });
 });
 

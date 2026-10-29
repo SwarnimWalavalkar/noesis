@@ -255,8 +255,8 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
       ]),
       relations: Object.freeze([
         {
-          label: "experiment",
-          targetId: "experiment:experiment-1",
+          label: "revision",
+          targetId: "capability_revision:revision-1",
           targetTitle: "Use narrower\nresearch first",
         },
       ]),
@@ -284,20 +284,20 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
       consideredEvidenceCount: 4,
     }),
     record({
-      id: "experiment:experiment-1",
-      kind: "experiment",
+      id: "capability_revision:revision-1",
+      kind: "capability_revision",
       group: "history",
       status: "observing",
       title: "Use narrower research first",
-      summary: "A project experiment",
+      summary: "A project revision",
       sessionId: "session-2",
       occurredAt: "2026-08-14T00:00:01.000Z",
       rawJson: '{"hypothesis":"Use narrower research first"}',
     }),
     record({
-      id: "trial:trial-1",
-      kind: "trial",
-      group: "evaluation",
+      id: "capability_gate:gate-1",
+      kind: "capability_gate",
+      group: "activation",
       status: "completed · baseline",
       tone: "positive",
       title: "baseline trial",
@@ -306,9 +306,9 @@ const snapshot: TuiLearningAuditSnapshot = Object.freeze({
       occurredAt: "2026-08-14T00:00:00.500Z",
     }),
     record({
-      id: "evaluation:evaluation-1",
-      kind: "evaluation",
-      group: "evaluation",
+      id: "capability_gate:gate-2",
+      kind: "capability_gate",
+      group: "activation",
       status: "passed",
       title: "Evaluation\u001b]8;;https://hostile.test\u0007injected\u001b]8;;\u0007",
     }),
@@ -572,13 +572,13 @@ describe("learning audit overlay", () => {
     expect(harness.output(160)).toContain("LEARNING · reflection");
   });
   test("opens /learning onto a remembered decision", async () => {
-    const harness = createHarness("experiment:experiment-1");
-    await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · experiment"));
+    const harness = createHarness("capability_revision:revision-1");
+    await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · capability revision"));
     expect(harness.output(160)).toContain("Use narrower research first");
-    expect(harness.output(160)).toContain("▸ RECORD");
+    expect(harness.output(160)).toContain("▸ REVISION");
   });
   test("finishes loading when a remembered record is outside the bounded snapshot", async () => {
-    const harness = createHarness("experiment:outside-bounded-snapshot");
+    const harness = createHarness("capability_revision:outside-bounded-snapshot");
     await vi.waitFor(() => expect(harness.output(160)).toContain("LEARNING · capabilities"));
     expect(harness.output(160)).not.toContain("Refreshing the learning ledger");
     expect(harness.output(160)).toContain("Use the existing adaptation path");

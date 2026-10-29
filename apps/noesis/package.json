@@ -8,7 +8,6 @@
   "type": "module",
   "dependencies": {
     "@noesis/agent-types": "workspace:*",
-    "@noesis/capabilities": "workspace:*",
     "@noesis/codemode": "workspace:*",
     "@noesis/config": "workspace:*",
     "@noesis/context": "workspace:*",

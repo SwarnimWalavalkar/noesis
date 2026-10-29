@@ -2,34 +2,14 @@ import { describe, expect, test } from "vitest";
 import {
   ArtifactFileRefSchema,
   GrantSchema,
-  LedgerEventSchema,
   StableEffectOperationAttemptSchema,
-  assertLedgerEvent,
   durableJobFailureError,
   durableJobFailureFromError,
   effectOperationFingerprint,
   toJsonValue,
 } from "../src/index.ts";
 
-// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-const ledgerEvent = {
-  schemaVersion: 1,
-  eventId: "evt-1",
-  sequence: 1,
-  occurredAt: "2026-01-01T00:00:00.000Z",
-  principal: "system",
-  type: "projection.rebuilt",
-  payload: { nested: [null, true, 1, "value", { durable: true }] },
-  previousChecksum: null,
-  checksum: "a".repeat(64),
-} as const;
-
 describe("domain Zod schemas", () => {
-  test("accepts the durable event shape and rejects unknown top-level keys with a JSON-pointer path", () => {
-    expect(LedgerEventSchema.parse(ledgerEvent)).toEqual(ledgerEvent);
-    expect(() => assertLedgerEvent({ ...ledgerEvent, unexpected: true })).toThrow("/unexpected");
-  });
-
   test("preserves grant constraints and strict unknown-key rejection", () => {
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const grant = {

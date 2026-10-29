@@ -240,7 +240,6 @@ describe("first-party architecture boundaries", () => {
   test("keeps the TUI behind its narrow runtime port", async () => {
     const tuiRoot = resolve(repositoryRoot, "packages/tui");
     const forbiddenModules = new Set([
-      "@noesis/capabilities",
       "@noesis/ledger",
       "@noesis/learning",
       "@noesis/policy",
@@ -356,7 +355,7 @@ describe("first-party architecture boundaries", () => {
       "utf8",
     );
     const operationalRepositoriesStart = workspaceTypes.indexOf("export interface OperationalRepositories");
-    const operationalRepositoriesEnd = workspaceTypes.indexOf("export interface StagedDefinition");
+    const operationalRepositoriesEnd = workspaceTypes.indexOf("export type CanonicalSearchSource");
     expect(operationalRepositoriesStart).toBeGreaterThanOrEqual(0);
     expect(operationalRepositoriesEnd).toBeGreaterThan(operationalRepositoriesStart);
     const operationalRepositories = workspaceTypes.slice(

@@ -19,7 +19,6 @@
     "baseUrl": ".",
     "paths": {
       "@noesis/agent-types": ["packages/agent-types/src/index.ts"],
-      "@noesis/capabilities": ["packages/capabilities/src/index.ts"],
       "@noesis/config": ["packages/config/src/index.ts"],
       "@noesis/context": ["packages/context/src/index.ts"],
       "@noesis/codemode": ["packages/codemode/src/index.ts"],

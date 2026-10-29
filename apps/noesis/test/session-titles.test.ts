@@ -47,7 +47,7 @@ test("names a new session from its first message with the configured title model
   const titlerRoutes: unknown[] = [];
   const runtime = await createApplicationRuntimeComposition({
     config: await resolveNoesisConfig({ home, env: {} }),
-    createAgent: (_, codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
+    createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
     createRoleRunner: (configurations) => {
       for (const configuration of configurations)
         if (configuration.role === "session_titler")
@@ -112,7 +112,7 @@ test("keeps a title set during the first turn instead of the generated one", asy
   });
   const runtime = await createApplicationRuntimeComposition({
     config: await resolveNoesisConfig({ home, env: {} }),
-    createAgent: (_, codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
+    createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
     createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
   });
   try {
@@ -140,7 +140,7 @@ test("does not call a title model when titles are disabled", async () => {
   });
   const runtime = await createApplicationRuntimeComposition({
     config: await resolveNoesisConfig({ home, env: {} }),
-    createAgent: (_, codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
+    createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
     createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
   });
   try {

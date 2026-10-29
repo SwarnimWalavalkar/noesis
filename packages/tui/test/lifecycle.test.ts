@@ -1106,9 +1106,9 @@ describe("Noesis TUI lifecycle", () => {
     expect(resumed.requestedSessions).toEqual([selected.trailId]);
   });
 
-  test("shows a completed working adjustment once after its foreground turn", async () => {
+  test("shows a completed learning change once after its foreground turn", async () => {
     const base = await createRuntime({
-      name: "working-adjustment-notice",
+      name: "learning-change-notice",
       async run(request) {
         return {
           text: `reply:${request.prompt}`,
@@ -1127,14 +1127,13 @@ describe("Noesis TUI lifecycle", () => {
       listLearningActivity: async (sessionId: string) =>
         Object.freeze([
           Object.freeze({
-            jobId: "job-working-adjustment",
+            jobId: "job-learning-change",
             stage: "reflection" as const,
-            status: "adjusted" as const,
+            status: "activated" as const,
             summary: "Verify observable state before claiming success",
             updatedAt: "2026-08-01T00:00:00.000Z",
             turnId: `${sessionId}:interaction:2`,
             projectId: "project_noesis",
-            adjustmentId: "adjustment_1",
           }),
         ]),
     });
@@ -1144,14 +1143,16 @@ describe("Noesis TUI lifecycle", () => {
 
     terminal.type("verify this\r");
     await vi.waitFor(() =>
-      expect(terminal.output).toContain("adjusted · Verify observable state before claiming success"),
+      expect(terminal.output).toContain(
+        "Capability active · Verify observable state before claiming success",
+      ),
     );
 
     terminal.type("/quit\n");
     await running;
   });
 
-  test("shows one late adjustment notice while a subsequent turn is already running", async () => {
+  test("shows one late learning notice while a subsequent turn is already running", async () => {
     let runCount = 0;
     let secondTurnStarted = false;
     let releaseSecondTurn: (() => void) | undefined;
@@ -1159,7 +1160,7 @@ describe("Noesis TUI lifecycle", () => {
       releaseSecondTurn = resolve;
     });
     const base = await createRuntime({
-      name: "late-working-adjustment-notice",
+      name: "late-learning-change-notice",
       async run(request) {
         runCount += 1;
         if (runCount === 2) {
@@ -1220,24 +1221,17 @@ describe("Noesis TUI lifecycle", () => {
       Object.freeze({
         jobId: "job-late-adjustment",
         stage: "reflection",
-        status: "adjusted",
+        status: "activated",
         summary: "Verify observable state before claiming success",
         updatedAt: "2026-08-01T00:00:01.000Z",
         turnId: "first-turn",
-        workingAdjustment: Object.freeze({
-          adjustmentId: "adjustment-late",
-          projectId: "project-1",
-          status: "active",
-          strategy: "Verify observable state before claiming success.",
-          successSignal: "Claims cite observed state.",
-          servedEvidence: Object.freeze([]),
-        }),
       }),
     );
     await vi.waitFor(() =>
-      expect(terminal.output).toContain("✦ adjusted · Verify observable state before claiming success"),
+      expect(terminal.output).toContain(
+        "✦ Capability active · Verify observable state before claiming success",
+      ),
     );
-    expect(terminal.output).not.toContain("\nstrategy ·");
     expect(waitedJobIds).toEqual(["job-late-adjustment"]);
 
     releaseSecondTurn?.();

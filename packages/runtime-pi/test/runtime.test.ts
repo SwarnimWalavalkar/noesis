@@ -21,10 +21,14 @@ import {
   frozenSubAgentPlanDigest,
   frozenTurnPlanDigest,
 } from "@noesis/agent-types";
-import { type FileRevisionRef, isJsonObject, type JsonValue, sha256 } from "@noesis/domain";
-import type { SessionToolDefinition, SessionToolName } from "@noesis/intelligence";
+import {
+  type FileRevisionRef,
+  isJsonObject,
+  type JsonValue,
+  learnedCapabilitySkillName,
+  sha256,
+} from "@noesis/domain";
 import { describe, expect, test, vi } from "vitest";
-import { z } from "zod";
 import {
   createAssistantDeltaAggregator,
   createBrokerToolAliases,
@@ -32,13 +36,10 @@ import {
   createPiRoleModelBackend,
   createPiExecuteTool,
   createPiSubAgentTaskRunner,
-  type FrozenSessionToolResolver,
-  frozenPlanMaterialUses,
   type PiCodeExecutionAdapter,
   type PiFrozenToolCatalog,
   type PiSkillLibrary,
   type PreparedPiCodeExecution,
-  resolveFrozenSessionToolDefinitions,
   resolvePiSkillInvocation,
   toAgentActionPayload,
 } from "../src/index.ts";
@@ -49,14 +50,6 @@ import {
   controlledToolCallResponse,
 } from "./support/controlled-pi-models.ts";
 
-// SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-const sessionToolNames = [
-  "search_sessions",
-  "open_session_evidence",
-  "find_corrections",
-  "find_similar_tasks",
-  "prior_experiment_outcomes",
-] as const satisfies readonly SessionToolName[];
 const TEST_TOOL_INVOCATION: AgentHarnessToolInvocation = Object.freeze({
   invocationId: "test-invocation",
   operationId: "test-operation",
@@ -79,45 +72,28 @@ function material(revisionId: string, workingPath: string, content: string): Fro
 function frozenPlan(
   conversationHistory: NonNullable<FrozenTurnPlan["conversationHistory"]> = Object.freeze([]),
 ): FrozenTurnPlan {
-  const prompt = material("prompt-v1", "prompts/grounded.md", "Use exact session evidence.");
-  const skill = material("skill-v1", "skills/grounded.md", "Search before answering.");
-  const router = material(
-    "router-v1",
-    "capabilities/grounded-router.json",
-    JSON.stringify({ strategyId: "session-search.fts-only.v1" }),
-  );
+  const prompt = material("prompt-v1", "definitions/capabilities/grounded.md", "Use exact session evidence.");
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
   const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = Object.freeze({
-    schemaVersion: 1,
+    schemaVersion: 2,
     planId: "plan-runtime-tools",
     sessionId: "trail-runtime-tools",
     turnId: "turn-runtime-tools",
-    activationId: "activation-runtime-tools",
-    activationRevision: 1,
     selectedCapabilities: Object.freeze([
       Object.freeze({
         capabilityId: "grounded",
         name: "Grounded",
         description: "Use exact session evidence.",
         applicability: "When prior session evidence is needed.",
-        scope: "general",
         selectionReason: "controlled runtime test",
+        delivery: "prompt",
         revision: Object.freeze({
           kind: "capability_revision",
           capabilityId: "grounded",
           capabilityRevisionId: "grounded-v1",
           bundleDigest: sha256("grounded-v1"),
         }),
-        baseline: Object.freeze({ kind: "genesis" as const }),
-        promptModules: Object.freeze([prompt]),
-        skills: Object.freeze([skill]),
-        tools: Object.freeze([]),
-        router,
-        permissionManifest: Object.freeze({
-          effects: Object.freeze([]),
-          resourcePatterns: Object.freeze([]),
-          credentialRefs: Object.freeze([]),
-        }),
+        effects: Object.freeze([Object.freeze({ kind: "instruction", material: prompt })]),
       }),
     ]),
     conversationHistory,
@@ -131,30 +107,9 @@ function frozenPlan(
       credentialRefs: Object.freeze([]),
     }),
     retrievalCitations: Object.freeze([]),
-    routing: Object.freeze({
-      strategyId: "session-search.fts-only.v1",
-      reason: "Exact frozen router selected session search",
-    }),
     createdAt: "2026-07-25T00:00:00.000Z",
   });
   return Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
-}
-
-function definitions(marker: string): readonly SessionToolDefinition[] {
-  // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-  return sessionToolNames.map((name) =>
-    Object.freeze({
-      name,
-      label: name,
-      description: `Frozen runtime test ${name}`,
-      inputSchema: z.strictObject({ query: z.string().min(1) }),
-      execute: async () =>
-        Object.freeze({
-          ok: true as const,
-          value: Object.freeze({ fragments: Object.freeze([{ content: marker }]) }),
-        }),
-    }),
-  );
 }
 
 function emptyCatalog(catalogId: string) {
@@ -181,12 +136,8 @@ function catalogWithTools(catalogId: string, names: readonly string[]): PiFrozen
   });
 }
 
-function controlledCodeExecution(
-  resolver: FrozenSessionToolResolver,
-  marker: string,
-): PiCodeExecutionAdapter {
-  const prepare: PiCodeExecutionAdapter["prepare"] = async (plan, signal) => {
-    await resolveFrozenSessionToolDefinitions(plan, resolver, signal);
+function controlledCodeExecution(marker: string): PiCodeExecutionAdapter {
+  const prepare: PiCodeExecutionAdapter["prepare"] = async () => {
     return Object.freeze({
       catalog: emptyCatalog("catalog-controlled"),
       execute: async () =>
@@ -972,18 +923,7 @@ describe("agent runtime factories", () => {
       },
     });
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      codeExecution: controlledCodeExecution(
-        {
-          resolve: async (received) =>
-            Object.freeze({
-              planId: received.planId,
-              canonicalDigest: received.canonicalDigest,
-              consumedMaterials: frozenPlanMaterialUses(received),
-              definitions: definitions("unused"),
-            }),
-        },
-        "unused",
-      ),
+      codeExecution: controlledCodeExecution("unused"),
     });
     // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
     const request = {
@@ -1050,18 +990,7 @@ describe("agent runtime factories", () => {
       },
     });
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      codeExecution: controlledCodeExecution(
-        {
-          resolve: async (received) =>
-            Object.freeze({
-              planId: received.planId,
-              canonicalDigest: received.canonicalDigest,
-              consumedMaterials: frozenPlanMaterialUses(received),
-              definitions: definitions("unused"),
-            }),
-        },
-        "unused",
-      ),
+      codeExecution: controlledCodeExecution("unused"),
     });
 
     await expect(
@@ -1153,18 +1082,7 @@ describe("agent runtime factories", () => {
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
       skills,
       requirePinnedSkillSnapshot: true,
-      codeExecution: controlledCodeExecution(
-        {
-          resolve: async (received) =>
-            Object.freeze({
-              planId: received.planId,
-              canonicalDigest: received.canonicalDigest,
-              consumedMaterials: frozenPlanMaterialUses(received),
-              definitions: definitions("unused"),
-            }),
-        },
-        "unused",
-      ),
+      codeExecution: controlledCodeExecution("unused"),
     });
 
     const result = await runtime.run(
@@ -1185,12 +1103,12 @@ describe("agent runtime factories", () => {
     expect(snapshotReads).toBe(0);
   });
 
-  test("serves a Capability skill through Pi progressive disclosure without injecting its body", async () => {
+  test("serves an on-demand Capability through Pi progressive disclosure without injecting its body", async () => {
     const base = frozenPlan();
-    const capabilitySkill = material(
-      "capability-skill-v1",
-      "capabilities/evidence-synthesis/skills/evidence-synthesis/SKILL.md",
-      "PRIVATE CAPABILITY SKILL BODY: inspect every cited source before synthesis.",
+    const body = material(
+      "capability-on-demand-v1",
+      "definitions/capabilities/evidence-synthesis.md",
+      "PRIVATE CAPABILITY BODY: inspect every cited source before synthesis.",
     );
     const selected = base.selectedCapabilities[0];
     if (!selected) throw new Error("Frozen plan fixture has no capability");
@@ -1201,44 +1119,26 @@ describe("agent runtime factories", () => {
       selectedCapabilities: Object.freeze([
         Object.freeze({
           ...selected,
-          effects: Object.freeze([
-            Object.freeze({
-              kind: "skill" as const,
-              name: "evidence-synthesis",
-              description: "Inspect cited sources before producing a synthesis.",
-              material: capabilitySkill,
-            }),
-          ]),
-          promptModules: Object.freeze([]),
-          skills: Object.freeze([]),
+          delivery: "on_demand" as const,
+          effects: Object.freeze([Object.freeze({ kind: "instruction" as const, material: body })]),
         }),
       ]),
       renderedSystemPrompt: "Noesis protected kernel.",
     });
     const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const skillName = learnedCapabilitySkillName(selected.capabilityId, selected.name);
     const controlled = createControlledPiModels({
       respond: ({ systemPrompt }) => {
-        expect(systemPrompt).toContain("evidence-synthesis");
-        expect(systemPrompt).toContain("Inspect cited sources before producing a synthesis.");
+        expect(systemPrompt).toContain(skillName);
+        expect(systemPrompt).toContain(selected.applicability);
         expect(systemPrompt).toContain("tools.skills.load({ name })");
-        expect(systemPrompt).not.toContain(capabilitySkill.revision.workingPath);
-        expect(systemPrompt).not.toContain("PRIVATE CAPABILITY SKILL BODY");
+        expect(systemPrompt).not.toContain(body.revision.workingPath);
+        expect(systemPrompt).not.toContain("PRIVATE CAPABILITY BODY");
         return "Capability skill is discoverable.";
       },
     });
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      codeExecution: controlledCodeExecution(
-        {
-          resolve: async (received) =>
-            Object.freeze({
-              planId: received.planId,
-              canonicalDigest: received.canonicalDigest,
-              consumedMaterials: frozenPlanMaterialUses(received),
-              definitions: definitions("unused"),
-            }),
-        },
-        "unused",
-      ),
+      codeExecution: controlledCodeExecution("unused"),
     });
 
     await expect(
@@ -1256,6 +1156,39 @@ describe("agent runtime factories", () => {
         () => undefined,
       ),
     ).resolves.toMatchObject({ text: "Capability skill is discoverable." });
+  });
+
+  test("fails before model execution when an on-demand Capability has no codemode adapter", async () => {
+    const base = frozenPlan();
+    const selected = base.selectedCapabilities[0];
+    if (!selected) throw new Error("Frozen plan fixture has no capability");
+    const { canonicalDigest: _baseDigest, ...baseUnsigned } = base;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = Object.freeze({
+      ...baseUnsigned,
+      selectedCapabilities: Object.freeze([Object.freeze({ ...selected, delivery: "on_demand" as const })]),
+      renderedSystemPrompt: "Noesis protected kernel.",
+    });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const controlled = createControlledPiModels();
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Use the learned skill.",
+          activeCapabilities: Object.freeze([]),
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow("without a codemode execution adapter");
+    expect(controlled.provider.state.callCount).toBe(0);
   });
 
   test("budgets the expanded explicit skill prompt before model inference", async () => {
@@ -1286,18 +1219,7 @@ describe("agent runtime factories", () => {
         configured: () => Object.freeze([]),
       },
       requirePinnedSkillSnapshot: true,
-      codeExecution: controlledCodeExecution(
-        {
-          resolve: async (received) =>
-            Object.freeze({
-              planId: received.planId,
-              canonicalDigest: received.canonicalDigest,
-              consumedMaterials: frozenPlanMaterialUses(received),
-              definitions: definitions("budgeted-skill"),
-            }),
-        },
-        "budgeted-skill",
-      ),
+      codeExecution: controlledCodeExecution("budgeted-skill"),
     });
 
     await expect(
@@ -1793,32 +1715,7 @@ describe("agent runtime factories", () => {
     auth.mockRestore();
   });
 
-  test("fails before model execution when frozen non-prompt material has no exact resolver", async () => {
-    const controlled = createControlledPiModels();
-    const plan = frozenPlan();
-    const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      now: () => "2026-01-01T00:00:00.000Z",
-    });
-
-    await expect(
-      runtime.run(
-        {
-          trailId: plan.sessionId,
-          provider: plan.provider,
-          model: plan.model,
-          thinkingLevel: plan.thinkingLevel,
-          systemPrompt: plan.renderedSystemPrompt,
-          prompt: "Use session evidence.",
-          activeCapabilities: [{ name: "Grounded", version: 1 }],
-          frozenTurnPlan: plan,
-        },
-        () => undefined,
-      ),
-    ).rejects.toThrow("without a codemode execution adapter");
-    expect(controlled.provider.state.callCount).toBe(0);
-  });
-
-  test("serves behavior through session tools resolved from exact frozen material", async () => {
+  test("serves a turn through the prepared codemode execution", async () => {
     const marker = "immutable-session-result-v1";
     const controlled = createControlledPiModels({
       respond: ({ context }) => {
@@ -1835,18 +1732,7 @@ describe("agent runtime factories", () => {
     });
     const plan = frozenPlan();
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      codeExecution: controlledCodeExecution(
-        {
-          resolve: async (received) =>
-            Object.freeze({
-              planId: received.planId,
-              canonicalDigest: received.canonicalDigest,
-              consumedMaterials: frozenPlanMaterialUses(received),
-              definitions: definitions(marker),
-            }),
-        },
-        marker,
-      ),
+      codeExecution: controlledCodeExecution(marker),
     });
 
     const result = await runtime.run(
@@ -2323,7 +2209,7 @@ describe("agent runtime factories", () => {
     expect(responses).toBe(2);
   });
 
-  test("rejects sabotaged immutable bytes and incomplete tool registration before prompting", async () => {
+  test("rejects sabotaged immutable bytes before prompting", async () => {
     const controlled = createControlledPiModels();
     const plan = frozenPlan();
     const [selection] = plan.selectedCapabilities;
@@ -2333,7 +2219,17 @@ describe("agent runtime factories", () => {
       selectedCapabilities: Object.freeze([
         Object.freeze({
           ...selection,
-          router: Object.freeze({ ...selection.router, content: '{"strategyId":"sabotaged"}' }),
+          effects: Object.freeze([
+            Object.freeze({
+              kind: "instruction" as const,
+              material: Object.freeze({
+                ...(selection.effects[0]?.kind === "instruction"
+                  ? selection.effects[0].material
+                  : material("missing", "missing.md", "missing")),
+                content: "Sabotaged guidance.",
+              }),
+            }),
+          ]),
         }),
       ]),
       canonicalDigest: undefined,
@@ -2345,18 +2241,7 @@ describe("agent runtime factories", () => {
       canonicalDigest: frozenTurnPlanDigest(unsigned),
     }) as FrozenTurnPlan;
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      codeExecution: controlledCodeExecution(
-        {
-          resolve: async (received) =>
-            Object.freeze({
-              planId: received.planId,
-              canonicalDigest: received.canonicalDigest,
-              consumedMaterials: frozenPlanMaterialUses(received).slice(1),
-              definitions: definitions("must-not-run"),
-            }),
-        },
-        "must-not-run",
-      ),
+      codeExecution: controlledCodeExecution("must-not-run"),
     });
     const request = {
       trailId: plan.sessionId,
@@ -2371,11 +2256,6 @@ describe("agent runtime factories", () => {
 
     await expect(runtime.run(request, () => undefined)).rejects.toThrow("failed content digest verification");
     expect(controlled.provider.state.callCount).toBe(0);
-
-    await expect(runtime.run({ ...request, frozenTurnPlan: plan }, () => undefined)).rejects.toThrow(
-      "left frozen material unsupported",
-    );
-    expect(controlled.provider.state.callCount).toBe(0);
   });
 
   test("rejects a complete request that exceeds its frozen budget before model invocation", async () => {
@@ -2385,18 +2265,7 @@ describe("agent runtime factories", () => {
     const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 8 });
     const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      codeExecution: controlledCodeExecution(
-        {
-          resolve: async (received) =>
-            Object.freeze({
-              planId: received.planId,
-              canonicalDigest: received.canonicalDigest,
-              consumedMaterials: frozenPlanMaterialUses(received),
-              definitions: definitions("budgeted"),
-            }),
-        },
-        "budgeted",
-      ),
+      codeExecution: controlledCodeExecution("budgeted"),
     });
 
     await expect(
@@ -2427,18 +2296,7 @@ describe("agent runtime factories", () => {
     const unsigned = Object.freeze({ ...baseUnsigned, requestTokenBudget: 600 });
     const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
     const runtime = createPiAgentRuntime(process.cwd(), controlled.models, {
-      codeExecution: controlledCodeExecution(
-        {
-          resolve: async (received) =>
-            Object.freeze({
-              planId: received.planId,
-              canonicalDigest: received.canonicalDigest,
-              consumedMaterials: frozenPlanMaterialUses(received),
-              definitions: definitions("token-dense"),
-            }),
-        },
-        "token-dense",
-      ),
+      codeExecution: controlledCodeExecution("token-dense"),
     });
 
     await expect(

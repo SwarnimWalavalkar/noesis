@@ -39,16 +39,14 @@ Keep controlled Pi AgentHarness journeys for integration coverage. Keep distinct
 
 When a scenario already has a fixture at the appropriate boundary, add its related assertions there instead of repeating the setup in another suite. Keep scenarios separate when they exercise different failure paths or need different prerequisites.
 
-| Contract                                                                                            | Retained coverage                                                                                                                                         |
-| --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Backspace, grapheme deletion, terminal resize, direct resume, and empty-session cleanup             | Real PTY journeys in `apps/noesis/test/quit.test.ts`                                                                                                      |
-| Shutdown ordering, repeated quit signals, cancellation, and cleanup failures                        | `packages/tui/test/lifecycle.test.ts`; the gated closing test also checks that stop and drain happen once                                                 |
-| Action transitions, nested action identity, duration, and navigation                                | `packages/tui/test/reducer.test.ts`; transition and cursor scenarios own these assertions                                                                 |
-| Collapsed/expanded tool rows, selection width, nested indentation, and retained subagents           | `packages/tui/test/rendering.test.ts`; each representative tree is reused for its display states                                                          |
-| Learning command opens a usable audit overlay                                                       | `packages/tui/test/learning-audit.test.ts`                                                                                                                |
-| Criterion revision history, pin protection, scoped snapshots, retirement, and malformed definitions | `packages/config/test/workspace-criteria.test.ts`, using real SQLite and immutable files; concurrent publication and crash recovery remain separate cases |
-| OpenCode provider isolation and credential precedence                                               | One environment-to-stored-credentials journey in `packages/runtime-pi/test/auth.test.ts`                                                                  |
-| Preflight binding and rejected evidence variants                                                    | The request/report fixture in `packages/runtime/test/protected-activation.test.ts`                                                                        |
+| Contract                                                                                  | Retained coverage                                                                                         |
+| ----------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| Backspace, grapheme deletion, terminal resize, direct resume, and empty-session cleanup   | Real PTY journeys in `apps/noesis/test/quit.test.ts`                                                      |
+| Shutdown ordering, repeated quit signals, cancellation, and cleanup failures              | `packages/tui/test/lifecycle.test.ts`; the gated closing test also checks that stop and drain happen once |
+| Action transitions, nested action identity, duration, and navigation                      | `packages/tui/test/reducer.test.ts`; transition and cursor scenarios own these assertions                 |
+| Collapsed/expanded tool rows, selection width, nested indentation, and retained subagents | `packages/tui/test/rendering.test.ts`; each representative tree is reused for its display states          |
+| Learning command opens a usable audit overlay                                             | `packages/tui/test/learning-audit.test.ts`                                                                |
+| OpenCode provider isolation and credential precedence                                     | One environment-to-stored-credentials journey in `packages/runtime-pi/test/auth.test.ts`                  |
 
 Consolidation should remove repeated fixtures and redundant assertions, while preserving assertions that distinguish a failure. A smaller test count alone is not evidence of a faster or better suite.
 

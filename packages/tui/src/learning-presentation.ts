@@ -40,14 +40,9 @@ export interface SettledTurnPresentation {
 }
 export function learningAuditFocusId(activity: TuiLearningActivitySummary): string {
   if (activity.capabilityId) return `capability:${activity.capabilityId}`;
-  if (activity.stage === "reflection" && (activity.status === "unapplied" || activity.status === "stale"))
-    return `reflection:${activity.jobId}`;
-  if (activity.adjustmentId) return `working_adjustment:${activity.adjustmentId}`;
-  if (activity.experimentId) return `experiment:${activity.experimentId}`;
-  if (activity.stage === "reflection") return `reflection:${activity.jobId}`;
-  return `job:${activity.jobId}`;
+  return `reflection:${activity.jobId}`;
 }
-export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): string | undefined {
+export function learningActivityNotice(activity: TuiLearningActivitySummary): string | undefined {
   const summary = safeTerminalText(activity.summary).replaceAll(/\s+/g, " ").trim();
   if (activity.status === "activated") return `Capability active · ${summary}`;
   if (activity.status === "revised") return `Capability updated · ${summary}`;
@@ -55,12 +50,6 @@ export function workingAdjustmentNotice(activity: TuiLearningActivitySummary): s
   if (activity.status === "paused") return `Capability paused · ${summary}`;
   if (activity.status === "restored") return `Capability restored · ${summary}`;
   if (activity.status === "binding_changed") return `Capability settings updated · ${summary}`;
-  if (activity.status === "adjusted" || activity.status === "replaced") {
-    const strategy = activity.workingAdjustment?.strategy;
-    const strategySummary = strategy ? safeTerminalText(strategy).replaceAll(/\s+/g, " ").trim() : undefined;
-    return `adjusted · ${summary}${strategySummary ? ` · strategy · ${strategySummary}` : ""}`;
-  }
-  if (activity.status === "unapplied") return `unapplied · ${summary}`;
   if (activity.status === "stale") return `unchanged · ${summary}`;
   return undefined;
 }
@@ -99,7 +88,7 @@ export function startLateLearningNoticeRefresh(
     .waitForLearningActivity(request.trailId, request.jobId)
     .then((activity) => {
       if (!activity) return;
-      const notice = workingAdjustmentNotice(activity);
+      const notice = learningActivityNotice(activity);
       const earlier = request.earlierNotices ?? 0;
       if (notice)
         request.onNotice(
@@ -110,14 +99,14 @@ export function startLateLearningNoticeRefresh(
     }, request.onFailure)
     .catch(request.onError);
 }
-/** Present the first user-visible working-adjustment outcome for a settled turn. */
-export function workingAdjustmentNoticeForTurn(
+/** Present the first user-visible learning outcome for a settled turn. */
+export function learningActivityNoticeForTurn(
   activities: readonly TuiLearningActivitySummary[],
   turnId: string,
 ): string | undefined {
   return activities
     .filter((activity) => activity.turnId === turnId)
-    .map(workingAdjustmentNotice)
+    .map(learningActivityNotice)
     .find((notice) => notice !== undefined);
 }
 /** Load authoritative settled state and project it into the actions rendered by the TUI. */
@@ -169,11 +158,11 @@ export async function settledTurnPresentation(
   const notable = learning.activities.filter(
     (activity) =>
       (releasedByThisTurn(activity) || activity.turnId === request.turnId) &&
-      workingAdjustmentNotice(activity) !== undefined,
+      learningActivityNotice(activity) !== undefined,
   );
   const focusActivity = notable[0];
   // One notice per turn: the first change, plus how many others /learning holds.
-  const firstNotice = focusActivity ? workingAdjustmentNotice(focusActivity) : undefined;
+  const firstNotice = focusActivity ? learningActivityNotice(focusActivity) : undefined;
   const learningNotice =
     firstNotice && notable.length > 1
       ? `${firstNotice} · ${String(notable.length - 1)} more in /learning`

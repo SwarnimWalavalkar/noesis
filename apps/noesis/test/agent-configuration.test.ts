@@ -91,7 +91,7 @@ test("Pi codemode inspects and updates configuration and signs in through the el
         return { action: "accept" };
       },
     },
-    createAgent: (_, codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
+    createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
     createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
   });
   try {
@@ -229,7 +229,7 @@ test("Pi codemode validates route changes against the routes they will actually 
       route(CONTROLLED_PI_PROVIDER, CONTROLLED_PI_MODEL, ["off", "high"]),
       route("other-provider", "other-model", ["low", "high"]),
     ],
-    createAgent: (_, codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
+    createAgent: (codeExecution) => createPiAgentRuntime(home, controlled.models, { codeExecution }),
     createRoleRunner: (configurations) => createPiAgentRoleRunner(home, controlled.models, configurations),
   });
   try {

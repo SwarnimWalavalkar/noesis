@@ -3,24 +3,14 @@ import type { DatabaseRow } from "./database.ts";
 import { validateFrozenSubAgentPlan } from "@noesis/agent-types";
 import {
   createConditionalObject,
-  CapabilityRevisionRefSchema,
-  ExperimentSchema,
-  FeedbackSignalSchema,
   FileRevisionRefSchema,
   JsonValueSchema,
-  type Experiment,
-  type FeedbackSignal,
   type FileRevisionRef,
 } from "@noesis/domain";
 import { z } from "zod";
 import { optionalString, parseJson, requiredNumber, requiredString } from "./database.ts";
 import type {
-  ActivationApprovalRecord,
   AgentMailboxMessageRecord,
-  ActivationEvidenceBinding,
-  ActivationMaterializationRecord,
-  ActivationOperationRecord,
-  ActivationRecord,
   CanonicalSearchSource,
   CodeExecutionRecord,
   ModelCallContextRef,
@@ -35,7 +25,6 @@ import type {
   SubAgentTaskRecord,
   SubAgentTimelineRecord,
   ToolCallRecord,
-  TurnActivationPinRecord,
   UserIntentRecord,
   WorkflowPhaseRunRecord,
   WorkflowRunRecord,
@@ -86,31 +75,6 @@ const WorkflowRunStatusSchema = z.enum(["running", "paused", "completed", "faile
 const WorkflowPhaseStatusSchema = z.enum(["pending", "running", "completed", "failed", "cancelled"]);
 const OutcomeStatusSchema = z.enum(["accepted", "corrected", "failed", "unknown"]);
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
-const ActivationEvidenceBindingSchema: z.ZodType<ActivationEvidenceBinding> = z.strictObject({
-  experimentId: z.string().min(1),
-  candidateRevision: CapabilityRevisionRefSchema,
-  manifestRevision: FileRevisionRefSchema,
-  preflightId: z.string().min(1),
-  planId: z.string().min(1),
-  candidateDigest: DigestSchema,
-  manifestDigest: DigestSchema,
-  suiteDigest: DigestSchema,
-  preflightDigest: DigestSchema,
-  reportDigest: DigestSchema,
-  definitionSetDigest: DigestSchema,
-  controlRevisionId: z.string().min(1).nullable(),
-  sourceAdjustmentId: z.string().min(1).optional(),
-});
-const ActivationPolicyDecisionSchema = z.enum(["block", "approval_required", "eligible_auto_activate"]);
-const ActivationOperationStatusSchema = z.enum([
-  "blocked",
-  "staged",
-  "pending_approval",
-  "approved",
-  "rejected",
-  "committed",
-]);
-const ActivationPolicySnapshotSchema = z.record(z.string(), JsonValueSchema);
 export function decodeFileRevisionRef(row: DatabaseRow | undefined): FileRevisionRef {
   return FileRevisionRefSchema.parse({
     kind: "file_revision",
@@ -675,113 +639,6 @@ export function decodeOutcome(row: DatabaseRow | undefined): OutcomeRecord {
     } as const)
     .finish();
 }
-export function decodeActivation(row: DatabaseRow | undefined): ActivationRecord {
-  const preflightId = optionalString(row, "preflight_id");
-  const storedCapabilityRevisions = z
-    .record(z.string(), z.unknown())
-    .parse(parseJson(requiredString(row, "capability_revisions_json")));
-  const activeCapabilityRevisions = Object.fromEntries(
-    Object.entries(storedCapabilityRevisions).map(([capabilityId, value]) => {
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      const revision =
-        typeof value === "string"
-          ? {
-              kind: "legacy_capability_revision" as const,
-              capabilityId,
-              capabilityRevisionId: value,
-            }
-          : CapabilityRevisionRefSchema.parse(value);
-      if (revision.capabilityId !== capabilityId)
-        throw new Error(`Stored activation capability key ${capabilityId} is mismatched`);
-      return [capabilityId, revision];
-    }),
-  );
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return createConditionalObject({
-    activationId: requiredString(row, "activation_id"),
-    revision: requiredNumber(row, "revision"),
-    previousActivationId: optionalString(row, "previous_activation_id") ?? null,
-    activeDefinitions: z
-      .record(z.string(), FileRevisionRefSchema)
-      .parse(parseJson(requiredString(row, "definitions_json"))),
-    activeCapabilityRevisions,
-  } as const)
-    .addOptional(!(preflightId === undefined) ? { preflightId } : undefined)
-    .add({
-      createdAt: requiredString(row, "created_at"),
-    } as const)
-    .finish();
-}
-export function decodeActivationApproval(row: DatabaseRow | undefined): ActivationApprovalRecord {
-  const decidedAt = optionalString(row, "decided_at");
-  const decisionActor = optionalString(row, "decision_actor");
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return Object.freeze(
-    createConditionalObject({
-      approvalId: requiredString(row, "approval_id"),
-      operationId: requiredString(row, "operation_id"),
-      bindingDigest: DigestSchema.parse(requiredString(row, "binding_digest")),
-      policyDigest: DigestSchema.parse(requiredString(row, "policy_digest")),
-      status: z.enum(["pending", "approved", "rejected"]).parse(requiredString(row, "status")),
-      requestedAt: requiredString(row, "requested_at"),
-    } as const)
-      .addOptional(!(decidedAt === undefined) ? { decidedAt } : undefined)
-      .addOptional(!(decisionActor === undefined) ? { decisionActor } : undefined)
-      .finish(),
-  );
-}
-export function decodeActivationOperationRow(
-  row: DatabaseRow | undefined,
-  materializations: readonly ActivationMaterializationRecord[],
-): ActivationOperationRecord {
-  const operationId = requiredString(row, "operation_id");
-  const approvalId = optionalString(row, "approval_id");
-  const committedAt = optionalString(row, "committed_at");
-  const supersededByOperationId = optionalString(row, "superseded_by_operation_id");
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return Object.freeze(
-    createConditionalObject({
-      operationId,
-      idempotencyKey: requiredString(row, "idempotency_key"),
-      activationId: requiredString(row, "activation_id"),
-      binding: ActivationEvidenceBindingSchema.parse(parseJson(requiredString(row, "binding_json"))),
-      bindingDigest: DigestSchema.parse(requiredString(row, "binding_digest")),
-      policySnapshot: Object.freeze(
-        ActivationPolicySnapshotSchema.parse(parseJson(requiredString(row, "policy_snapshot_json"))),
-      ),
-      policyDigest: DigestSchema.parse(requiredString(row, "policy_digest")),
-      decision: ActivationPolicyDecisionSchema.parse(requiredString(row, "decision")),
-      status: ActivationOperationStatusSchema.parse(requiredString(row, "status")),
-      expectedActivationRevision: requiredNumber(row, "expected_activation_revision"),
-      previousActivationId: optionalString(row, "previous_activation_id") ?? null,
-    } as const)
-      .addOptional(!(approvalId === undefined) ? { approvalId } : undefined)
-      .addOptional(!(supersededByOperationId === undefined) ? { supersededByOperationId } : undefined)
-      .add({
-        materializations,
-        createdAt: requiredString(row, "created_at"),
-        updatedAt: requiredString(row, "updated_at"),
-      } as const)
-      .addOptional(!(committedAt === undefined) ? { committedAt } : undefined)
-      .finish(),
-  );
-}
-export function decodeTurnActivationPin(row: DatabaseRow | undefined): TurnActivationPinRecord {
-  return Object.freeze({
-    turnKey: requiredString(row, "turn_key"),
-    sessionId: requiredString(row, "session_id"),
-    turnId: requiredString(row, "turn_id"),
-    activationId: requiredString(row, "activation_id"),
-    activationRevision: requiredNumber(row, "activation_revision"),
-    activeDefinitions: z
-      .record(z.string(), FileRevisionRefSchema)
-      .parse(parseJson(requiredString(row, "definitions_json"))),
-    activeCapabilityRevisions: z
-      .record(z.string(), CapabilityRevisionRefSchema)
-      .parse(parseJson(requiredString(row, "capability_revisions_json"))),
-    pinnedAt: requiredString(row, "pinned_at"),
-  });
-}
 export function decodeSearchConfiguration(row: DatabaseRow | undefined): SearchConfiguration {
   return SearchConfigurationSchema.parse({
     lexicalLimit: requiredNumber(row, "lexical_limit"),
@@ -798,7 +655,7 @@ export function decodeSearchDocument(row: DatabaseRow | undefined): SearchDocume
     .discriminatedUnion("kind", [
       z.strictObject({
         kind: z.literal("database_row"),
-        table: z.enum(["sessions", "messages", "tool_calls", "outcomes", "experiments"]),
+        table: z.enum(["sessions", "messages", "tool_calls", "outcomes"]),
         rowId: z.string(),
         field: z.string(),
       }),
@@ -828,25 +685,6 @@ export function decodeOptional<T>(
   decode: (value: DatabaseRow) => T,
 ): T | undefined {
   return row === undefined ? undefined : decode(row);
-}
-export function decodeStored<T>(row: DatabaseRow | undefined, schema: z.ZodType<T>): T | undefined {
-  return row === undefined ? undefined : schema.parse(parseJson(requiredString(row, "data_json")));
-}
-export function decodeExperiment(row: DatabaseRow | undefined): Experiment | undefined {
-  if (row === undefined) return undefined;
-  const parsed = ExperimentSchema.safeParse(parseJson(requiredString(row, "data_json")));
-  if (!parsed.success) throw parsed.error;
-  // Zod's optional-property inference includes explicit undefined while the domain uses exact optionals.
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return parsed.data as Experiment;
-}
-export function decodeFeedbackSignal(row: DatabaseRow | undefined): FeedbackSignal | undefined {
-  if (row === undefined) return undefined;
-  const parsed = FeedbackSignalSchema.safeParse(parseJson(requiredString(row, "data_json")));
-  if (!parsed.success) throw parsed.error;
-  // Zod's optional-property inference includes explicit undefined while the domain uses exact optionals.
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  return parsed.data as FeedbackSignal;
 }
 export function decodeVector(value: string): readonly number[] {
   return z.array(z.number().finite()).min(1).parse(JSON.parse(value));

@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import { sha256, type FileRevisionRef } from "@noesis/domain";
 import type { HistoryPort } from "@noesis/intelligence";
 import { createWorkspaceStore } from "@noesis/workspace";
@@ -106,10 +105,8 @@ test("creates a Capability from a need repeated across sessions and skips supers
                   anticipatedEffect: "Release notes follow the user's format without asking.",
                   effects: [
                     {
-                      kind: "skill",
-                      name: "release-notes-by-area",
-                      description: "Write release notes from merged pull requests, grouped by area.",
-                      instructions: "List merged pull requests since the last tag and group them by area.",
+                      kind: "instruction",
+                      content: "List merged pull requests since the last tag and group them by area.",
                     },
                   ],
                   consequence: "ordinary",
@@ -135,7 +132,6 @@ test("creates a Capability from a need repeated across sessions and skips supers
       publisher: createCapabilityPublisher({
         workspace,
         store: workspace.capabilities,
-        registry: createAtomicCapabilityRegistry(),
       }),
       reviewer: Object.freeze({
         variant: Object.freeze({

@@ -1,7 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createAtomicCapabilityRegistry } from "@noesis/capabilities";
 import type { EvidenceRef, FileRevisionRef, ProjectRef } from "@noesis/domain";
 import { learnedCapabilitySkillName, sha256 } from "@noesis/domain";
 import type { HistoryPort } from "@noesis/intelligence";
@@ -53,7 +52,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       history: emptyHistory,
       inference,
       reflector: Object.freeze({
@@ -77,7 +75,6 @@ describe("Capability learning loop", () => {
             userMessage: "hey hey",
             outcome: "failed",
             cause: "failed_before_output",
-            servedWorkingAdjustmentOutcomes: [],
             scope: "global",
             sensitivity: "normal",
             occurredAt: "2026-10-28T14:56:48.000Z",
@@ -92,6 +89,7 @@ describe("Capability learning loop", () => {
           }),
           project,
           selectedCapabilities: [],
+          promptCapabilityIds: [],
         }),
         new AbortController().signal,
       ),
@@ -171,10 +169,8 @@ describe("Capability learning loop", () => {
                   content: "Prefer concise synthesis.",
                 }),
                 Object.freeze({
-                  kind: "skill",
-                  name: "concise-evidence-synthesis",
-                  description: "Synthesize primary evidence into a concise answer.",
-                  instructions: "Load primary evidence, retain exact citations, then compress the prose.",
+                  kind: "instruction",
+                  content: "Load primary evidence, retain exact citations, then compress the prose.",
                 }),
               ]),
               scope: "global",
@@ -245,7 +241,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       history: emptyHistory,
       inference,
       reflector: Object.freeze({
@@ -285,7 +280,6 @@ describe("Capability learning loop", () => {
           userMessage: "Keep future research answers concise.",
           assistantMessage: "Understood.",
           outcome: "accepted",
-          servedWorkingAdjustmentOutcomes: [],
           scope: "general",
           sensitivity: "normal",
           evidenceRefs: [
@@ -314,6 +308,7 @@ describe("Capability learning loop", () => {
         }),
         project: Object.freeze({ projectId: "project-1", root }),
         selectedCapabilities: Object.freeze([]),
+        promptCapabilityIds: [],
       }),
       new AbortController().signal,
     );
@@ -391,7 +386,6 @@ describe("Capability learning loop", () => {
           userMessage: "Teach recovery behavior, but do not apply it before I approve it.",
           assistantMessage: "Understood.",
           outcome: "accepted",
-          servedWorkingAdjustmentOutcomes: [],
           scope: "general",
           sensitivity: "normal",
           evidenceRefs: [
@@ -411,6 +405,7 @@ describe("Capability learning loop", () => {
         }),
         project: Object.freeze({ projectId: "project-1", root }),
         selectedCapabilities: Object.freeze([activeBinding.revision]),
+        promptCapabilityIds: [],
       }),
       new AbortController().signal,
     );
@@ -622,7 +617,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       history: emptyHistory,
       inference,
       reflector: Object.freeze({
@@ -649,7 +643,6 @@ describe("Capability learning loop", () => {
             userMessage: "Research several providers and improve how you perform this work next time.",
             assistantMessage: assistantContent,
             outcome: "accepted",
-            servedWorkingAdjustmentOutcomes: [],
             scope: "global",
             sensitivity: "normal",
             evidenceRefs: [...evidenceRefs],
@@ -658,6 +651,7 @@ describe("Capability learning loop", () => {
           }),
           project,
           selectedCapabilities: Object.freeze([]),
+          promptCapabilityIds: [],
         }),
         new AbortController().signal,
       ),
@@ -775,7 +769,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry: createAtomicCapabilityRegistry(),
       history: emptyHistory,
       inference,
       reflector: Object.freeze({
@@ -802,7 +795,6 @@ describe("Capability learning loop", () => {
             turnId: "turn-workflow",
             userMessage: "Reuse the saved evidence synthesis workflow when this comes up again.",
             outcome: "accepted",
-            servedWorkingAdjustmentOutcomes: [],
             scope: "general",
             sensitivity: "normal",
             evidenceRefs: [
@@ -817,6 +809,7 @@ describe("Capability learning loop", () => {
           }),
           project,
           selectedCapabilities: Object.freeze([]),
+          promptCapabilityIds: [],
         }),
         new AbortController().signal,
       ),
@@ -844,7 +837,6 @@ describe("Capability learning loop", () => {
     const workspace = await createWorkspaceStore(root);
     opened.push({ root, workspace });
     const project: ProjectRef = Object.freeze({ projectId: "project-outcomes", root });
-    const registry = createAtomicCapabilityRegistry();
     await workspace.operational.sessions.put({
       sessionId: "session-outcomes",
       title: "Outcomes",
@@ -879,7 +871,6 @@ describe("Capability learning loop", () => {
     const publisher = createCapabilityPublisher({
       workspace,
       store: workspace.capabilities,
-      registry,
       now: () => "2026-10-29T10:00:01.000Z",
       nextId,
     });
@@ -926,7 +917,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      registry,
       history: emptyHistory,
       inference,
       publisher,
@@ -969,7 +959,6 @@ describe("Capability learning loop", () => {
             userMessage: "Fix the parser bug.",
             outcome: "unknown",
             cause: "completed",
-            servedWorkingAdjustmentOutcomes: [],
             scope: "global",
             sensitivity: "normal",
             occurredAt: `2026-10-29T10:${String(minute)}0:00.000Z`,

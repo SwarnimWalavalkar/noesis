@@ -1,6 +1,5 @@
 import {
   canonicalJson,
-  createConditionalObject,
   type DurableJobFailure,
   type DurableJobRecord,
   durableJobFailureFromError,
@@ -58,7 +57,7 @@ const CapabilityReflectionJobPayloadSchema = z.strictObject({
       bundleDigest: z.string().regex(/^[a-f0-9]{64}$/u),
     }),
   ),
-  promptCapabilityIds: z.array(z.string().min(1)).optional(),
+  promptCapabilityIds: z.array(z.string().min(1)),
 });
 
 export interface CapabilityReflectionJobView {
@@ -113,19 +112,12 @@ function decodeJob(job: DurableJobRecord): CapabilityReflectionJobView {
   const parsed = CapabilityReflectionJobPayloadSchema.parse(job.payload);
   return Object.freeze({
     job,
-    payload: Object.freeze(
-      createConditionalObject({
-        turn: parsed.turn,
-        project: Object.freeze(parsed.project),
-        selectedCapabilities: Object.freeze(parsed.selectedCapabilities),
-      } as const)
-        .addOptional(
-          parsed.promptCapabilityIds
-            ? { promptCapabilityIds: Object.freeze(parsed.promptCapabilityIds) }
-            : undefined,
-        )
-        .finish(),
-    ),
+    payload: Object.freeze({
+      turn: parsed.turn,
+      project: Object.freeze(parsed.project),
+      selectedCapabilities: Object.freeze(parsed.selectedCapabilities),
+      promptCapabilityIds: Object.freeze(parsed.promptCapabilityIds),
+    }),
   });
 }
 
@@ -166,18 +158,13 @@ export function createCapabilityCoordinator(
   };
 
   const observeSettledTurn: CapabilityCoordinator["observeSettledTurn"] = async (input) => {
-    const payload = CapabilityReflectionJobPayloadSchema.parse(
-      createConditionalObject({
-        schemaVersion: 1,
-        turn: input.turn,
-        project: input.project,
-        selectedCapabilities: input.selectedCapabilities,
-      } as const)
-        .addOptional(
-          input.promptCapabilityIds ? { promptCapabilityIds: input.promptCapabilityIds } : undefined,
-        )
-        .finish(),
-    );
+    const payload = CapabilityReflectionJobPayloadSchema.parse({
+      schemaVersion: 1,
+      turn: input.turn,
+      project: input.project,
+      selectedCapabilities: input.selectedCapabilities,
+      promptCapabilityIds: input.promptCapabilityIds,
+    });
     const jobId = jobIdFor(input);
     await authorizeScheduledJob(options.authority, {
       jobId,

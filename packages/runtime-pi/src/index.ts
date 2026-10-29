@@ -31,7 +31,6 @@ import {
   type PiCodeExecutionAdapter,
   type PreparedPiCodeExecution,
 } from "./execute-tool.ts";
-import { frozenPlanMaterialUses } from "./frozen-session-tools.ts";
 import {
   createBrokerToolAliases,
   createPiBrokerTools,
@@ -59,14 +58,6 @@ export * from "./auth.ts";
 export * from "./auth-recovery.ts";
 export * from "./context-budget.ts";
 export * from "./execute-tool.ts";
-export * from "./experiment-fixtures.ts";
-export type {
-  FrozenPlanMaterialKind,
-  FrozenPlanMaterialUse,
-  FrozenSessionToolResolution,
-  FrozenSessionToolResolver,
-} from "./frozen-session-tools.ts";
-export { frozenPlanMaterialUses, resolveFrozenSessionToolDefinitions } from "./frozen-session-tools.ts";
 export * from "./broker-tools.ts";
 export { foregroundToolContext } from "./context-inspection.ts";
 export * from "./model-catalog.ts";
@@ -157,16 +148,9 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | und
   for (const selection of plan.selectedCapabilities) {
     // An on-demand Capability reaches the model as a skill, so its text is not in the prompt.
     if (selection.delivery === "on_demand") continue;
-    for (const prompt of selection.promptModules) {
-      // A Capability file reaches the prompt as its guidance only.
-      const content = capabilityGuidance(prompt.content).trim();
-      if (content && !plan.renderedSystemPrompt.includes(content))
-        throw new Error(
-          `Frozen turn plan ${plan.planId} does not serve prompt material ${prompt.revision.revisionId}`,
-        );
-    }
-    for (const effect of selection.effects ?? []) {
+    for (const effect of selection.effects) {
       if (effect.kind !== "instruction") continue;
+      // A Capability file reaches the prompt as its guidance only.
       const content = capabilityGuidance(effect.material.content).trim();
       if (content && !plan.renderedSystemPrompt.includes(content))
         throw new Error(
@@ -183,10 +167,9 @@ function verifyFrozenRequest(request: AgentRuntimeRequest): FrozenTurnPlan | und
 function onDemandCapabilitySkill(
   selection: FrozenTurnPlan["selectedCapabilities"][number],
 ): PiSkillResource | undefined {
-  const instructions =
-    selection.effects !== undefined
-      ? selection.effects.flatMap((effect) => (effect.kind === "instruction" ? [effect.material] : []))
-      : [...selection.promptModules, ...selection.skills];
+  const instructions = selection.effects.flatMap((effect) =>
+    effect.kind === "instruction" ? [effect.material] : [],
+  );
   const first = instructions[0];
   if (!first) return undefined;
   const content = [
@@ -207,28 +190,10 @@ function onDemandCapabilitySkill(
 function capabilitySkillResources(plan: FrozenTurnPlan | undefined): readonly PiSkillResource[] {
   if (!plan) return Object.freeze([]);
   return Object.freeze(
-    plan.selectedCapabilities.flatMap((selection) => [
-      ...(selection.delivery === "on_demand"
-        ? [onDemandCapabilitySkill(selection)].filter(
-            (skill): skill is PiSkillResource => skill !== undefined,
-          )
-        : []),
-      ...(selection.effects ?? []).flatMap((effect) =>
-        effect.kind === "skill"
-          ? [
-              Object.freeze({
-                name: effect.name,
-                description: effect.description,
-                content: effect.material.content,
-                filePath: effect.material.revision.workingPath,
-                contentDigest: effect.material.revision.contentDigest,
-                capabilityRevision: effect.material.revision,
-                disableModelInvocation: false,
-              }),
-            ]
-          : [],
-      ),
-    ]),
+    plan.selectedCapabilities.flatMap((selection) => {
+      const skill = selection.delivery === "on_demand" ? onDemandCapabilitySkill(selection) : undefined;
+      return skill ? [skill] : [];
+    }),
   );
 }
 function mergeSkillResources(
@@ -585,9 +550,18 @@ export function createPiAgentRuntime(
               skills: skillSnapshot.skills,
             })
           : undefined;
-      if (plan && !preparedCode && frozenPlanMaterialUses(plan).length > 0)
+      // Learned skills and saved Programs are reached only through codemode.
+      if (
+        plan &&
+        !preparedCode &&
+        plan.selectedCapabilities.some(
+          (selection) =>
+            selection.delivery === "on_demand" ||
+            selection.effects.some((effect) => effect.kind === "program"),
+        )
+      )
         throw new Error(
-          `Frozen turn plan ${plan.planId} contains skill, router, or tool material without a codemode execution adapter`,
+          `Frozen turn plan ${plan.planId} has a learned skill or Program without a codemode execution adapter`,
         );
       if (preparedCode) execution.preparedCode = preparedCode;
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
