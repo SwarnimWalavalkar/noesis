@@ -266,12 +266,17 @@ export interface ExperimentVariantRef {
  * A Capability revision carries exactly one instruction effect first and may attach one Program.
  * Throws when the effects break that shape.
  */
-export function validateCapabilityEffects(effects: readonly CapabilityEffect[]): readonly CapabilityEffect[] {
+/** A Capability revision is its instruction effect, optionally followed by one Program effect. */
+export function isCapabilityRevisionEffects(effects: readonly { readonly kind: string }[]): boolean {
   const [first, ...rest] = effects;
-  if (first?.kind !== "instruction")
-    throw new Error("A Capability revision must start with its instruction effect");
-  if (rest.length > 1 || rest.some((effect) => effect.kind !== "program"))
-    throw new Error("A Capability revision may attach at most one Program after its instruction");
+  return (
+    first?.kind === "instruction" && rest.length <= 1 && rest.every((effect) => effect.kind === "program")
+  );
+}
+
+export function validateCapabilityEffects(effects: readonly CapabilityEffect[]): readonly CapabilityEffect[] {
+  if (!isCapabilityRevisionEffects(effects))
+    throw new Error("A Capability revision is its instruction effect and at most one Program effect");
   return Object.freeze([...effects]);
 }
 

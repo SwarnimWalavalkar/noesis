@@ -449,10 +449,10 @@ Not built yet:
 
 The follow-up branch removes everything that served older learning systems or older Capability formats, so one system remains:
 
-- A Capability revision is its Markdown file plus at most one saved Program. Skill effects, prompt modules, routing records, permission manifests, and the in-memory Capability registry are gone.
-- Turns are admitted from Capability bindings alone. The genesis baseline and the activation pipeline are gone; the genesis guidance lines are now part of the base system prompt.
+- A Capability revision is its Markdown file plus at most one saved Program. Skill effects, prompt modules, routing records, Capability permission manifests, and the in-memory Capability registry are gone. Tool authorization keeps its own permission manifests.
+- Turns are admitted from Capability bindings alone. The genesis baseline and the activation pipeline are gone; the genesis guidance lines, which state Noesis's identity and collaboration posture and were already in every turn's prompt, are now part of the base system prompt. They are not operational guidance for authoring Capabilities, which stays in the `noesis` skill.
 - Experiments, preflights, evaluations, feedback signals, working adjustments, compounding replay, outcome classification, criteria, the history tools built on them, the legacy JSONL importer, and the operational cutover are deleted.
 - Migrations 054 to 057 drop their tables. Migration 056 resets learned Capabilities. This supersedes the phase 6 startup migration of older Capabilities into files, which is removed; `docs/migrating-capabilities.md` gives a prompt that recreates them from the files still on disk. Migration 058 rewrites conversations from the old importer into the history shape a forked session uses, so resumed sessions still replay them.
 - Migrations now run with foreign keys off and must pass `PRAGMA foreign_key_check` before they commit, which is SQLite's documented procedure for rebuilding tables.
 
-The old experiment and activation tables and the evaluation records listed under "Not built yet" above are therefore removed, not kept.
+The old experiment and activation tables and the evaluation records listed under "Not built yet" above are therefore removed, not kept. The archive export is withdrawn: both installs had no rows in those tables, and the beta allows the break.

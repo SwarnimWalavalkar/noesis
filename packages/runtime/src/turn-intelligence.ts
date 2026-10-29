@@ -450,12 +450,15 @@ export function createTurnIntelligencePlanner(
       ),
       freezeContextDocument(options.workspace, request.sessionId),
     ]);
+    const definitions = new Map(
+      (
+        await options.workspace.capabilities.getDefinitions(bindings.map((binding) => binding.capabilityId))
+      ).map((definition) => [definition.capabilityId, definition] as const),
+    );
     const resolved = await Promise.all(
       bindings.map(async (binding) => {
-        const [definition, lifecycle] = await Promise.all([
-          options.workspace.capabilities.getDefinition(binding.capabilityId),
-          options.workspace.capabilities.getRevision(binding.revision),
-        ]);
+        const definition = definitions.get(binding.capabilityId);
+        const lifecycle = await options.workspace.capabilities.getRevision(binding.revision);
         if (!definition || !lifecycle)
           throw new Error(
             `Active capability ${binding.revision.capabilityRevisionId} cannot be read from immutable state`,

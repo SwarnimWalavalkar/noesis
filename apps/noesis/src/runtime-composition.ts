@@ -50,7 +50,6 @@ import {
   JsonValueSchema,
   isJsonObject,
   type ProjectRef,
-  sameCapabilityRevisionRef,
   sha256,
   toJsonValue,
 } from "@noesis/domain";
@@ -5343,22 +5342,23 @@ export async function createApplicationRuntimeComposition(
           priority: 90,
         }),
       ];
-      // Each selected Capability is labeled with the binding revision that admission verified.
-      const selectedBindings = new Map(
-        (
-          await workspace.capabilities.getBindings(
-            plan.selectedCapabilities.map((selection) => selection.capabilityId),
-          )
-        ).map((binding) => [binding.capabilityId, binding] as const),
-      );
+      // Each selected Capability is labeled with the position of its frozen revision in the
+      // Capability's immutable lineage, so a later binding change cannot relabel this turn.
       const usedCapabilities: Readonly<Record<string, number>> = Object.freeze(
         Object.fromEntries(
-          plan.selectedCapabilities.flatMap((selection) => {
-            const binding = selectedBindings.get(selection.capabilityId);
-            return binding && sameCapabilityRevisionRef(binding.revision, selection.revision)
-              ? [[selection.capabilityId, binding.revisionNumber] as const]
-              : [];
-          }),
+          await Promise.all(
+            plan.selectedCapabilities.map(async (selection) => {
+              const lineage = await workspace.capabilities.listRevisions(selection.capabilityId);
+              const position = lineage.findIndex(
+                (entry) => entry.revision.capabilityRevisionId === selection.revision.capabilityRevisionId,
+              );
+              if (position < 0)
+                throw new Error(
+                  `Capability revision ${selection.revision.capabilityRevisionId} is missing from its lineage`,
+                );
+              return [selection.capabilityId, position + 1] as const;
+            }),
+          ),
         ),
       );
       const context = compileContext(contextFragments, usedCapabilities, {

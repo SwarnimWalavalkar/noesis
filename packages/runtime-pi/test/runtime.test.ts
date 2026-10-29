@@ -1158,6 +1158,39 @@ describe("agent runtime factories", () => {
     ).resolves.toMatchObject({ text: "Capability skill is discoverable." });
   });
 
+  test("fails before model execution when an on-demand Capability has no codemode adapter", async () => {
+    const base = frozenPlan();
+    const selected = base.selectedCapabilities[0];
+    if (!selected) throw new Error("Frozen plan fixture has no capability");
+    const { canonicalDigest: _baseDigest, ...baseUnsigned } = base;
+    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
+    const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = Object.freeze({
+      ...baseUnsigned,
+      selectedCapabilities: Object.freeze([Object.freeze({ ...selected, delivery: "on_demand" as const })]),
+      renderedSystemPrompt: "Noesis protected kernel.",
+    });
+    const plan = Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+    const controlled = createControlledPiModels();
+    const runtime = createPiAgentRuntime(process.cwd(), controlled.models);
+
+    await expect(
+      runtime.run(
+        {
+          trailId: plan.sessionId,
+          provider: plan.provider,
+          model: plan.model,
+          thinkingLevel: plan.thinkingLevel,
+          systemPrompt: plan.renderedSystemPrompt,
+          prompt: "Use the learned skill.",
+          activeCapabilities: Object.freeze([]),
+          frozenTurnPlan: plan,
+        },
+        () => undefined,
+      ),
+    ).rejects.toThrow("without a codemode execution adapter");
+    expect(controlled.provider.state.callCount).toBe(0);
+  });
+
   test("budgets the expanded explicit skill prompt before model inference", async () => {
     const base = frozenPlan();
     const { canonicalDigest: _digest, ...baseUnsigned } = base;

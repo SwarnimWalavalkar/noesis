@@ -18,6 +18,7 @@ import {
   canonicalJson,
   EvidenceRefSchema,
   FileRevisionRefSchema,
+  isCapabilityRevisionEffects,
   JsonValueSchema,
   ProjectRefSchema,
   sha256,
@@ -643,11 +644,8 @@ const FrozenCapabilitySelectionSchema = z.strictObject({
   revision: CapabilityRevisionRefSchema,
   effects: z
     .array(FrozenCapabilityEffectSchema)
-    .min(1)
-    .max(2)
     .refine(
-      ([first, ...rest]) =>
-        first?.kind === "instruction" && rest.every((effect) => effect.kind === "program"),
+      isCapabilityRevisionEffects,
       "A frozen Capability starts with its instruction and may attach one Program",
     ),
 });

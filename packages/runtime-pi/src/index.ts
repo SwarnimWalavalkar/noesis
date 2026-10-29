@@ -550,6 +550,19 @@ export function createPiAgentRuntime(
               skills: skillSnapshot.skills,
             })
           : undefined;
+      // Learned skills and saved Programs are reached only through codemode.
+      if (
+        plan &&
+        !preparedCode &&
+        plan.selectedCapabilities.some(
+          (selection) =>
+            selection.delivery === "on_demand" ||
+            selection.effects.some((effect) => effect.kind === "program"),
+        )
+      )
+        throw new Error(
+          `Frozen turn plan ${plan.planId} has a learned skill or Program without a codemode execution adapter`,
+        );
       if (preparedCode) execution.preparedCode = preparedCode;
       if (execution.controller.signal.aborted) return abortedBeforePrompt();
       const brokerRecordedDirectActionIds = new Set<string>();

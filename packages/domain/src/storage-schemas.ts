@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ProjectRef } from "./research.ts";
-import { DATABASE_TABLES } from "./research.ts";
+import { DATABASE_TABLES, isCapabilityRevisionEffects } from "./research.ts";
 
 const ContentDigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const StoredPathSchema = z.string().min(1);
@@ -105,11 +105,8 @@ export const CapabilityRevisionSchema = z.strictObject({
   predecessorRevisionId: z.string().min(1).optional(),
   effects: z
     .array(CapabilityEffectSchema)
-    .min(1)
-    .max(2)
     .refine(
-      ([first, ...rest]) =>
-        first?.kind === "instruction" && rest.every((effect) => effect.kind === "program"),
+      isCapabilityRevisionEffects,
       "A Capability revision starts with its instruction and may attach one Program",
     ),
   evidenceRefs: z.array(EvidenceRefSchema),

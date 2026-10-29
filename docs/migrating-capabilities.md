@@ -9,14 +9,14 @@ Your old Capability text is still on disk. The upgrade does not delete any files
 
 ## Recreate them with Noesis
 
-Start Noesis in a project and paste the prompt below. Noesis can publish one Capability decision per turn, so it recreates one Capability, lists what is left, and waits. Reply `next` to recreate the next one, and keep replying until it says nothing is left. You can stop at any time, and you can pause or edit any recreated Capability later in `/learning` or in its file.
+Start Noesis in a project and paste the prompt below. Noesis can publish one Capability decision per turn, so it recreates one Capability, lists what is left, and waits. Reply `next` to recreate the next one, and keep replying until it says nothing is left. You can stop at any time. Later, you can pause a recreated Capability in `/learning` or by asking Noesis, and you can edit its guidance in its file.
 
 ```text
 Load the `noesis` skill. I want to bring back my learned Capabilities from the previous format.
 
 1. Use `config.inspect` to find my Noesis home. With the shell, list everything under `<home>/definitions/capabilities/`, including subfolders.
 2. Read each distinct Capability's latest guidance:
-   - For each folder named `capability_<id>`, pick its newest revision folder by modification time (`ls -t`). Read every `instruction-*.md` file in it, and every `skills/*/SKILL.md` file if there are any. Join them into one guidance text.
+   - For each folder named `capability_<id>`, pick its newest revision folder by modification time (`ls -t`). Revision folder names do not show their order, so if a folder holds more than one revision folder, tell me which one you picked and wait for me to confirm before recreating it. Read every `instruction-*.md` file in it, and every `skills/*/SKILL.md` file if there are any. Join them into one guidance text.
    - For each `<name>-<id>.md` file, take `name`, `when`, and `description` from the frontmatter. The guidance is the text between the closing `---` of the frontmatter and the line that starts with `<!-- Noesis writes everything below this line`.
 3. Skip any Capability whose guidance repeats or nearly repeats another one. Prefer the `.md` file, because it has a name and a `when` text. Use `capabilities.inspect` to skip anything that already exists in my current Capabilities with the same name or the same guidance.
 4. Recreate the first remaining Capability with one `capabilities.refine` call. Ask `noesis.describe("capabilities.refine")` for the exact schema first. Use a `create` decision:
