@@ -78,17 +78,18 @@ Automatic compaction is on by default. Use `/compact [FOCUS]` to compact manuall
 
 ![The Noesis compounding loop. Every turn returns a result. Some turns teach Noesis a new way to help.](docs/assets/noesis-compounding-loop.jpg)
 
-You get a result from the current turn before ambient learning runs. After the turn settles, Noesis reflects. Most turns change nothing. When the evidence supports it, Noesis creates or revises a Capability. Later turns can use that Capability when it is relevant.
+You get a result from the current turn before ambient learning runs. Noesis then waits for your reaction, which is your next message or the session going idle, and reflects on the turn and that reaction together. Most turns change nothing. When the evidence supports it, Noesis creates or revises a Capability. You can also ask Noesis to change what it has learned, or use `/refine`. Later turns can use the new version right away.
 
-A Capability is an ability Noesis can reuse. Each version has one or more exact effects:
+A Capability is an ability Noesis can reuse. It has two parts:
 
-- **Instruction** adds trusted instructions to a matching turn.
-- **Skill** exposes an instructional package that the model loads only when needed.
-- **Program** attaches one exact saved project Program revision in script or workflow mode.
+- **Instruction** is the guidance in the Capability's Markdown file, under `definitions/capabilities/` in your Noesis home. You can edit this file directly, and Noesis records your edit as a new version before the next turn.
+- **Program** is optional. It attaches one exact saved project Program revision in script or workflow mode. Program effects use the same saved Programs you create during a turn, and they stay in the project that owns that definition.
 
-Program effects use the same saved Programs you create during a turn. They stay in the project that owns that definition.
+New Capabilities apply anywhere they are relevant. The model sees each one's name and when it applies, and loads the guidance only when it needs it. You can narrow a Capability to a project or session, or make it always active.
 
-New Capabilities apply anywhere they are relevant. You can narrow one to a project or session, or make it always active. Use `/learning` to inspect the reasoning and evidence, challenge a Capability, pause it, or restore an earlier version.
+Each Capability keeps a track record of whether it helped or hurt in the turns that used it. Noesis pauses a version that hurt twice and never helped, and tells you. Use `/learning` to inspect the reasoning, evidence, and track record, challenge a Capability, pause it, or restore an earlier version.
+
+If you used Capabilities in Noesis 0.0.5 or earlier, see [bring back your Capabilities](docs/migrating-capabilities.md).
 
 ## Commands
 
