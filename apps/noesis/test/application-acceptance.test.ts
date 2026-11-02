@@ -91,14 +91,7 @@ describe("credential-free Pi application acceptance", () => {
       const rankedSearch = z
         .object({
           output: z.object({
-            hits: z
-              .array(
-                z.object({
-                  fragmentId: z.string(),
-                  rerankReason: z.string(),
-                }),
-              )
-              .min(2),
+            hits: z.array(z.object({ fragmentId: z.string(), score: z.number().positive() })).min(2),
             fragments: z
               .array(
                 z.object({
@@ -113,22 +106,11 @@ describe("credential-free Pi application acceptance", () => {
           }),
         })
         .parse(relatedSearchCall?.response).output;
-      const citationsByFragmentId = new Map(
-        rankedSearch.fragments.map((fragment) => [fragment.id, fragment.citation]),
+      const scores = rankedSearch.hits.map((hit) => hit.score);
+      expect(scores).toEqual(scores.toSorted((left, right) => right - left));
+      expect(rankedSearch.hits.map((hit) => hit.fragmentId)).toEqual(
+        rankedSearch.fragments.map((fragment) => fragment.id),
       );
-      let previousRank = 0;
-      for (const hit of rankedSearch.hits) {
-        const citation = citationsByFragmentId.get(hit.fragmentId);
-        expect(citation).toBeDefined();
-        const reason = z
-          .string()
-          .regex(/^Controlled reverse rank \d+ for [a-f0-9]{64}\.$/u)
-          .parse(hit.rerankReason);
-        expect(reason).toContain(`for ${citation?.documentId}.`);
-        const rank = Number.parseInt(reason.match(/rank (\d+)/u)?.[1] ?? "0", 10);
-        expect(rank).toBeGreaterThan(previousRank);
-        previousRank = rank;
-      }
 
       const unrelatedSession = await runtime.startTrail({ title: "Unrelated return" });
       const unrelated = await runtime.debug.runTurn(unrelatedSession.trailId, "Draft a meeting agenda.");

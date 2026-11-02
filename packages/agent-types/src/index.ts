@@ -28,7 +28,6 @@ export type AgentRole =
   | "foreground"
   | "session_compactor"
   | "session_titler"
-  | "history_reranker"
   | "reflector"
   | "session_reviewer";
 export interface AgentMessage {

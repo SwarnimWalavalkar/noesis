@@ -105,7 +105,7 @@ The foreground agent authors the complete semantic decision. Protected runtime c
 Work in one coherent `execute` program when practical:
 
 1. Use `capabilities.inspect` as the single learning inspector before creating an overlapping Capability. Start with the paginated `list`, request `detail` for one binding and lifecycle counts, then page through `revisions`, `feedback`, or `gates` and load an exact bounded `material` slice only when needed.
-2. Gather the evidence needed to understand the problem using ordinary tools and session history. Tool calls completed earlier in the same foreground execution, together with the current user message, become authoritative publication evidence.
+2. Gather the evidence needed to understand the problem using ordinary tools and session history. Session search matches words, not meaning, so reformulate and fan out several queries with `Promise.all` to find repeated needs. Tool calls completed earlier in the same foreground execution, together with the current user message, become authoritative publication evidence.
 3. For a Program effect, load the `execute` skill, save and verify the Program, and then attach that immutable saved definition.
 4. Ask `noesis.describe("capabilities.refine")` for the exact current input and output schemas. Author one complete decision and call `capabilities.refine` once.
 5. Report what was activated, revised, paused, restored, retargeted, left unchanged, or sent to a protected decision gate.

@@ -5,13 +5,9 @@ import { canonicalJson, sha256 } from "@noesis/domain";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
-  createDeterministicEmbeddingPort,
-  createDeterministicRerankPort,
   createHistoryPort,
   createSessionSearchTools,
   type HistoryPort,
-  selectSessionRetrievalStrategy,
-  SESSION_RETRIEVAL_STRATEGIES,
   type SessionSearchAuthorization,
   type SessionSearchTools,
 } from "../src/index.ts";
@@ -160,17 +156,11 @@ describe("AC-07 session search tools", () => {
     });
     await workspace.operational.searchConfiguration.put({
       lexicalLimit: 32,
-      semanticLimit: 32,
-      rerankLimit: 16,
       maxExcerptChars: 256,
       includePrivate: true,
       updatedAt: later,
     });
-    history = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: createDeterministicRerankPort(),
-    });
+    history = createHistoryPort({ workspace });
   });
 
   afterEach(async () => {
@@ -198,7 +188,6 @@ describe("AC-07 session search tools", () => {
     const search = await sessionTools.searchSessions({
       query: "preserve voice exact citations release research",
       maxResults: 8,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
     });
     expect(search.ok).toBe(true);
     if (!search.ok) return;
@@ -216,7 +205,7 @@ describe("AC-07 session search tools", () => {
     expect(JSON.stringify(search.value)).not.toContain("Orphan preserve voice");
   });
 
-  test("defaults automatic retrieval to hybrid and only searches prior session-linked evidence", async () => {
+  test("searches only prior session-linked evidence by default", async () => {
     await workspace.operational.toolCalls.put({
       toolCallId: "tool-call-current-evidence",
       sessionId: "session-b",
@@ -228,35 +217,8 @@ describe("AC-07 session search tools", () => {
       createdAt: later,
       completedAt: later,
     });
-    expect(
-      selectSessionRetrievalStrategy({
-        query: "secret token message_session-b",
-        requested: "automatic",
-      }),
-    ).toEqual({
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid,
-      reason: "automatic hybrid default",
-    });
-    expect(
-      selectSessionRetrievalStrategy({
-        query: "anything",
-        requested: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
-      }),
-    ).toEqual({
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly,
-      reason: "explicit strategy",
-    });
-
     const automatic = await tools().searchSessions({ query: "marigold continuity note" });
-    expect(automatic).toMatchObject({
-      ok: true,
-      value: {
-        telemetry: {
-          strategyId: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
-          routeReason: "automatic hybrid default",
-        },
-      },
-    });
+    expect(automatic.ok).toBe(true);
     if (!automatic.ok) return;
     expect(
       automatic.value.fragments.every(
@@ -287,7 +249,6 @@ describe("AC-07 session search tools", () => {
     const currentToolEvidence = await tools().searchSessions({
       query: "obsidian linker failure sentinel",
       scope: "current",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(currentToolEvidence.ok).toBe(true);
     if (!currentToolEvidence.ok) return;
@@ -335,7 +296,6 @@ describe("AC-07 session search tools", () => {
     const result = await tools().searchSessions({
       query,
       maxResults: 4,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -354,7 +314,6 @@ describe("AC-07 session search tools", () => {
   test("carries exact evidence revision, session, message, and provenance identity", async () => {
     const result = await tools().searchSessions({
       query: "Public evidence revision canonical citations",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -380,7 +339,6 @@ describe("AC-07 session search tools", () => {
       query: "acquisition zephyr",
       sessionId: "session-private",
       includePrivate: true,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(denied).toMatchObject({ ok: false, error: { code: "unauthorized" } });
 
@@ -391,7 +349,6 @@ describe("AC-07 session search tools", () => {
       query: "acquisition zephyr",
       sessionId: "session-private",
       includePrivate: true,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(allowed.ok).toBe(true);
     if (!allowed.ok) return;
@@ -413,7 +370,6 @@ describe("AC-07 session search tools", () => {
   test("keeps a title at its session's authoritative private sensitivity", async () => {
     const unauthorized = await tools().searchSessions({
       query: "Private oriole acquisition title",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(unauthorized.ok).toBe(true);
     if (!unauthorized.ok) return;
@@ -426,7 +382,6 @@ describe("AC-07 session search tools", () => {
       query: "Private oriole acquisition title",
       sessionId: "session-private-title",
       includePrivate: true,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(authorized.ok).toBe(true);
     if (!authorized.ok) return;
@@ -448,7 +403,6 @@ describe("AC-07 session search tools", () => {
   test("opens only bounded authorized windows and rejects tampered or stale citations", async () => {
     const search = await tools().searchSessions({
       query: "Source grounded release research",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(search.ok).toBe(true);
     if (!search.ok) return;
@@ -505,7 +459,6 @@ describe("AC-07 session search tools", () => {
     ).searchSessions({
       query: "release research citations preserve voice",
       maxResults: 8,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -524,7 +477,6 @@ describe("AC-07 session search tools", () => {
     const search = await sessionTools.searchSessions({
       query: "release research citations preserve voice",
       maxResults: 8,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
     });
     expect(search.ok).toBe(true);
     if (!search.ok) return;
@@ -544,51 +496,7 @@ describe("AC-07 session search tools", () => {
     expect(opened.value.fragment.content.length).toBeLessThanOrEqual(20);
   });
 
-  test("uses model ranking before a context budget truncates an otherwise fully returned candidate set", async () => {
-    let rerankCalls = 0;
-    const semanticHistory = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: {
-        rerank: async (request) => {
-          rerankCalls += 1;
-          return [...request.candidates]
-            .sort((left, right) => {
-              const leftPreferred = left.excerpt.includes("Always preserve") ? 1 : 0;
-              const rightPreferred = right.excerpt.includes("Always preserve") ? 1 : 0;
-              return rightPreferred - leftPreferred;
-            })
-            .map((candidate) => ({
-              documentId: candidate.documentId,
-              reason: "Controlled semantic preference.",
-            }));
-        },
-      },
-    });
-    const result = await tools(
-      { currentSessionId: "session-b" },
-      { maxFragmentChars: 40, maxTotalContextChars: 40, maxResults: 8 },
-      semanticHistory,
-    ).searchSessions({
-      query: "release research citations preserve voice",
-      maxResults: 8,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
-    });
-
-    expect(result.ok).toBe(true);
-    if (!result.ok) return;
-    expect(result.value.telemetry.candidateCount).toBeGreaterThan(1);
-    expect(result.value.telemetry.candidateCount).toBeLessThanOrEqual(8);
-    expect(rerankCalls).toBe(1);
-    expect(result.value.fragments).toHaveLength(1);
-    expect(result.value.fragments[0]?.citation.identity).toEqual({
-      kind: "message",
-      sessionId: "session-a",
-      messageId: "message-public",
-    });
-  });
-
-  test("keeps generic private-by-provenance evidence out of the provider reranker", async () => {
+  test("keeps generic private-by-provenance evidence out of results", async () => {
     await Promise.all([
       workspace.operational.messages.put({
         messageId: "message-violet-public-one",
@@ -617,40 +525,24 @@ describe("AC-07 session search tools", () => {
       sensitivity: "normal",
       provenanceRefs: [{ kind: "database_row", table: "messages", rowId: "message-private" }],
     });
-    const rerankedExcerpts: string[] = [];
-    const privacyHistory = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: {
-        rerank: async (request) => {
-          rerankedExcerpts.push(...request.candidates.map((candidate) => candidate.excerpt));
-          return request.candidates.map((candidate) => ({
-            documentId: candidate.documentId,
-            reason: "Controlled authorized ordering.",
-          }));
-        },
-      },
-    });
 
     const result = await tools(
       { currentSessionId: "session-b" },
       { maxResults: 4, maxCandidates: 16 },
-      privacyHistory,
     ).searchSessions({
       query: "violet continuity provenance",
       maxResults: 4,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
     });
 
     expect(result.ok).toBe(true);
-    expect(rerankedExcerpts.length).toBeGreaterThan(0);
-    expect(rerankedExcerpts.join(" ")).not.toContain("private late provenance payload");
+    if (!result.ok) return;
+    expect(result.value.fragments.length).toBeGreaterThan(0);
+    expect(JSON.stringify(result.value)).not.toContain("private late provenance payload");
   });
 
   test("filters similar tasks by authoritative type", async () => {
     const similar = await tools().findSimilarTasks({
       description: "source grounded release research",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(similar.ok).toBe(true);
     if (similar.ok)
@@ -662,48 +554,18 @@ describe("AC-07 session search tools", () => {
       ).toBe(true);
   });
 
-  test("requests a broad hybrid ranking before focused tools filter and backfill results", async () => {
-    const requestedResultLimits: number[] = [];
-    const broadHistory = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: {
-        rerank: async (request) => {
-          requestedResultLimits.push(request.maxResults);
-          const priority = (excerpt: string): number => {
-            if (excerpt.includes("Always preserve") || excerpt.includes("Public evidence")) return 0;
-            if (excerpt.includes("needed exact citations")) return 2;
-            return 1;
-          };
-          return [...request.candidates]
-            .sort(
-              (left, right) =>
-                priority(left.excerpt) - priority(right.excerpt) ||
-                left.documentId.localeCompare(right.documentId),
-            )
-            .map((candidate) => ({
-              documentId: candidate.documentId,
-              reason: "Controlled rejected-first ordering.",
-            }));
-        },
-      },
-    });
-
+  test("filters similar tasks before the result bound", async () => {
     const similar = await tools(
       { currentSessionId: "session-b" },
       { maxResults: 1, maxCandidates: 8 },
-      broadHistory,
     ).findSimilarTasks({
       description: "release research exact citations",
       maxResults: 1,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
     });
     expect(similar.ok).toBe(true);
     if (!similar.ok) return;
     expect(similar.value.fragments).toHaveLength(1);
     expect(["session", "outcome"]).toContain(similar.value.fragments[0]?.citation.identity.kind);
-    expect(requestedResultLimits.length).toBeGreaterThan(0);
-    expect(requestedResultLimits.every((limit) => limit === 8)).toBe(true);
   });
 
   test("retains outcome-linked file revisions in exact and previous-session scopes", async () => {
@@ -736,14 +598,12 @@ describe("AC-07 session search tools", () => {
       query: "cobalt decision artifact outcome provenance",
       sessionId: "session-a",
       maxResults: 8,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
     });
     expect(includesEvidence(exact)).toBe(true);
 
     const previous = await tools().searchSessions({
       query: "cobalt decision artifact outcome provenance",
       maxResults: 8,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
     });
     expect(includesEvidence(previous)).toBe(true);
   });
@@ -784,7 +644,6 @@ describe("AC-07 session search tools", () => {
       sessionId: "session-a",
       maxResults: 4,
       includePrivate: true,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     if (!search.ok) throw new Error(JSON.stringify(search.error));
     expect(search).toMatchObject({ ok: true });
@@ -832,7 +691,6 @@ describe("AC-07 session search tools", () => {
       query: "Public evidence revision canonical citations",
       sessionId: "session-a",
       maxResults: 4,
-      strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
     });
     expect(legacySearch.ok).toBe(true);
     if (!legacySearch.ok) return;
@@ -852,37 +710,170 @@ describe("AC-07 session search tools", () => {
     });
   });
 
-  test("exposes comparable telemetry for FTS, hybrid, and conservative variants", async () => {
-    const variants = await Promise.all([
-      tools().searchSessions({
-        query: "release research",
-        strategy: SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
-      }),
-      tools().searchSessions({
-        query: "release research",
-        strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
-      }),
-      tools().searchSessions({
-        query: "release research",
-        strategy: SESSION_RETRIEVAL_STRATEGIES.conservative.strategyId,
-      }),
-    ]);
-    expect(variants.every((result) => result.ok)).toBe(true);
-    const telemetry = variants.flatMap((result) => (result.ok ? [result.value.telemetry] : []));
-    expect(telemetry.map((item) => item.strategyId)).toEqual([
-      SESSION_RETRIEVAL_STRATEGIES.ftsOnly.strategyId,
-      SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
-      SESSION_RETRIEVAL_STRATEGIES.conservative.strategyId,
-    ]);
-    expect(telemetry.map((item) => Object.keys(item).sort())).toEqual([
-      Object.keys(telemetry[0] ?? {}).sort(),
-      Object.keys(telemetry[0] ?? {}).sort(),
-      Object.keys(telemetry[0] ?? {}).sort(),
-    ]);
-    if (variants[2]?.ok) {
-      expect(variants[2].value.fragments).toEqual([]);
-      expect(variants[2].value.telemetry.status).toBe("abstained");
-    }
+  describe("plain keyword search", () => {
+    const putMessage = async (messageId: string, content: string, at = createdAt) =>
+      await workspace.operational.messages.put({
+        messageId,
+        sessionId: "session-a",
+        role: "user",
+        content,
+        sensitivity: "normal",
+        createdAt: at,
+        metadata: {},
+      });
+    const messageIds = (result: Awaited<ReturnType<SessionSearchTools["searchSessions"]>>) =>
+      result.ok
+        ? result.value.fragments.flatMap((fragment) =>
+            fragment.citation.identity.kind === "message" ? [fragment.citation.identity.messageId] : [],
+          )
+        : [];
+
+    test("matches stemmed words and centers the excerpt on the match", async () => {
+      const padding = "unrelated filler sentence ".repeat(100);
+      await putMessage("message-stemmed", `${padding}We deployed the quokka gateways yesterday. ${padding}`);
+
+      const result = await tools().searchSessions({ query: "deploying quokka gateway" });
+
+      expect(messageIds(result)).toEqual(["message-stemmed"]);
+      if (!result.ok) return;
+      expect(result.value.fragments[0]?.content).toContain("deployed the quokka gateways");
+    });
+
+    test("treats double-quoted text as one exact phrase", async () => {
+      await putMessage("message-phrase", "The ocelot harbor plan is final.");
+      await putMessage("message-apart", "The harbor saw an ocelot on the plan.");
+
+      expect(messageIds(await tools().searchSessions({ query: '"ocelot harbor"' }))).toEqual([
+        "message-phrase",
+      ]);
+      expect(messageIds(await tools().searchSessions({ query: "ocelot harbor" })).toSorted()).toEqual([
+        "message-apart",
+        "message-phrase",
+      ]);
+    });
+
+    test("ignores query text FTS5 would treat as syntax", async () => {
+      await putMessage("message-syntax", "The wombat NEAR the fence ate (carefully).");
+
+      for (const query of ['wombat"', '"wombat', "wombat AND", "wombat* (--- NEAR", 'wombat "---"'])
+        expect(messageIds(await tools().searchSessions({ query }))[0]).toBe("message-syntax");
+    });
+
+    test("ranks a document matching more of the query above one matching less", async () => {
+      await putMessage("message-one-term", "A lone pangolin walked past.");
+      await putMessage("message-both-terms", "A pangolin crossed the marsh.");
+
+      const result = await tools().searchSessions({ query: "pangolin marsh" });
+
+      expect(messageIds(result)[0]).toBe("message-both-terms");
+      if (!result.ok) return;
+      const scores = result.value.hits.map((hit) => hit.score);
+      expect(scores[0]).toBeGreaterThan(scores[1] ?? Number.POSITIVE_INFINITY);
+    });
+
+    test("filters by date range with an inclusive start and an exclusive end", async () => {
+      await putMessage("message-march", "Lemur note from March.", "2026-03-10T12:00:00.000Z");
+      await putMessage("message-april", "Lemur note from April.", "2026-04-10T12:00:00.000Z");
+      await putMessage("message-may", "Lemur note from May.", "2026-05-01T00:00:00.000Z");
+
+      const ids = async (bounds: { readonly after?: string; readonly before?: string }) =>
+        messageIds(await tools().searchSessions({ query: "lemur", ...bounds })).toSorted();
+
+      expect(await ids({ after: "2026-04-01" })).toEqual(["message-april", "message-may"]);
+      expect(await ids({ before: "2026-05-01" })).toEqual(["message-april", "message-march"]);
+      expect(await ids({ after: "2026-03-10T12:00:00Z", before: "2026-04-01T00:00:00+05:30" })).toEqual([
+        "message-march",
+      ]);
+      expect(
+        await tools().searchSessions({ query: "lemur", after: "2026-05-01", before: "2026-04-01" }),
+      ).toMatchObject({ ok: false, error: { code: "invalid_input" } });
+      expect(await tools().searchSessions({ query: "lemur", after: "last week" })).toMatchObject({
+        ok: false,
+        error: { code: "invalid_input" },
+      });
+    });
+
+    test("filters by message or tool output", async () => {
+      await putMessage("message-tapir", "The tapir message.");
+      await workspace.operational.toolCalls.put({
+        toolCallId: "tool-tapir",
+        sessionId: "session-a",
+        toolName: "shell.run",
+        request: Object.freeze({ command: "echo tapir" }),
+        response: Object.freeze({ stdout: "tapir" }),
+        status: "completed",
+        sensitivity: "normal",
+        createdAt,
+        completedAt: later,
+      });
+      const kinds = async (source?: "message" | "tool_output") => {
+        const result = await tools().searchSessions(
+          source === undefined ? { query: "tapir" } : { query: "tapir", source },
+        );
+        return result.ok ? result.value.fragments.map((fragment) => fragment.citation.identity.kind) : [];
+      };
+
+      expect((await kinds()).toSorted()).toEqual(["message", "tool_call"]);
+      expect(await kinds("message")).toEqual(["message"]);
+      expect(await kinds("tool_output")).toEqual(["tool_call"]);
+    });
+
+    test("runs one index rebuild for a fan-out of queries", async () => {
+      let rebuilds = 0;
+      const counted: HistoryPort = {
+        ...history,
+        rebuild: async () => {
+          rebuilds += 1;
+          return await history.rebuild();
+        },
+      };
+      const turn = createSessionSearchTools({
+        workspace,
+        history: counted,
+        authorization: { currentSessionId: "session-b" },
+      });
+
+      await Promise.all(["release", "research", "citations"].map((query) => turn.searchSessions({ query })));
+
+      expect(rebuilds).toBe(1);
+    });
+
+    test("keeps enough budget for a fan-out and reports when the budget withholds results", async () => {
+      await workspace.operational.searchConfiguration.put({
+        lexicalLimit: 32,
+        maxExcerptChars: 1200,
+        includePrivate: true,
+        updatedAt: later,
+      });
+      await Promise.all(
+        Array.from({ length: 24 }, async (_, index) => {
+          const padding = "budget filler words ".repeat(25);
+          await putMessage(`message-gecko-${String(index)}`, `Gecko ${padding}`);
+          await putMessage(`message-newt-${String(index)}`, `Newt ${padding}`);
+          await putMessage(`message-skink-${String(index)}`, `Skink ${padding}`);
+          await putMessage(`message-iguana-${String(index)}`, `Iguana ${padding}`);
+          await putMessage(`message-anole-${String(index)}`, `Anole ${padding}`);
+        }),
+      );
+      const turn = tools();
+
+      const results = await Promise.all(
+        ["gecko", "newt", "skink", "iguana", "anole"].map(
+          async (query) => await turn.searchSessions({ query }),
+        ),
+      );
+
+      const values = results.flatMap((result) => (result.ok ? [result.value] : []));
+      expect(values).toHaveLength(5);
+      expect(values.slice(0, 3).map((value) => value.fragments.length)).toEqual([20, 20, 20]);
+      expect(values.slice(0, 3).every((value) => value.telemetry.status === "completed")).toBe(true);
+      const withheld = values.at(-1);
+      expect(withheld?.telemetry.status).toBe("budget_exhausted");
+      expect(withheld?.telemetry.omittedResults).toBeGreaterThan(0);
+      expect(values.reduce((sum, value) => sum + value.telemetry.contextCharacters, 0)).toBeLessThanOrEqual(
+        32768,
+      );
+    });
   });
 
   test("returns typed validation, cancellation, and backend errors", async () => {
@@ -894,22 +885,10 @@ describe("AC-07 session search tools", () => {
     const cancelled = await tools().searchSessions(
       {
         query: "release research",
-        strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
       },
       { signal: preAborted.signal },
     );
     expect(cancelled).toMatchObject({ ok: false, error: { code: "cancelled", retryable: true } });
-    const conservativeCancelled = await tools().searchSessions(
-      {
-        query: "release research",
-        strategy: SESSION_RETRIEVAL_STRATEGIES.conservative.strategyId,
-      },
-      { signal: preAborted.signal },
-    );
-    expect(conservativeCancelled).toMatchObject({
-      ok: false,
-      error: { code: "cancelled", retryable: true },
-    });
 
     let release: (() => void) | undefined;
     const blocked = new Promise<void>((resolve) => {
@@ -931,7 +910,6 @@ describe("AC-07 session search tools", () => {
     }).searchSessions(
       {
         query: "release research",
-        strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
       },
       { signal: controller.signal },
     );
@@ -952,7 +930,6 @@ describe("AC-07 session search tools", () => {
       refreshBeforeSearch: false,
     }).searchSessions({
       query: "release research",
-      strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid.strategyId,
     });
     expect(failed).toMatchObject({ ok: false, error: { code: "backend_failure", retryable: true } });
   });
