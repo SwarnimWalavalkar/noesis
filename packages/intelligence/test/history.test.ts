@@ -2,12 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
-import {
-  createDeterministicEmbeddingPort,
-  createDeterministicRerankPort,
-  createHistoryPort,
-  type HistoryRerankPort,
-} from "../src/index.ts";
+import { createHistoryPort } from "../src/index.ts";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 describe("longitudinal history", () => {
@@ -59,8 +54,6 @@ describe("longitudinal history", () => {
     ]);
     await workspace.operational.searchConfiguration.put({
       lexicalLimit: 8,
-      semanticLimit: 8,
-      rerankLimit: 4,
       maxExcerptChars: 80,
       includePrivate: true,
       updatedAt: "2026-01-01T00:04:00.000Z",
@@ -73,11 +66,7 @@ describe("longitudinal history", () => {
   });
 
   test("rebuilds identical canonical refs and resolves exact stable citations", async () => {
-    const history = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: createDeterministicRerankPort(),
-    });
+    const history = createHistoryPort({ workspace });
     await history.rebuild();
     const firstRefs = (
       await workspace.search.listDocuments({ includePrivate: true, includeSecret: true })
@@ -102,21 +91,8 @@ describe("longitudinal history", () => {
     expect(await history.resolve([citation])).toEqual([citation]);
   });
 
-  test("bounds rerank context and excludes private or secret history unless explicitly allowed", async () => {
-    const observed: string[] = [];
-    const boundedReranker: HistoryRerankPort = {
-      rerank: async (request) => {
-        observed.push(...request.candidates.map((candidate) => candidate.excerpt));
-        expect(request.candidates.length).toBeLessThanOrEqual(4);
-        expect(request.candidates.every((candidate) => candidate.excerpt.length <= 64)).toBe(true);
-        return createDeterministicRerankPort().rerank(request);
-      },
-    };
-    const history = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: boundedReranker,
-    });
+  test("bounds excerpts and excludes private or secret history unless explicitly allowed", async () => {
+    const history = createHistoryPort({ workspace });
     await history.rebuild();
 
     const normal = await history.search({
@@ -130,7 +106,8 @@ describe("longitudinal history", () => {
           hit.citation.source.kind !== "database_row" || hit.citation.source.rowId !== "message-private",
       ),
     ).toBe(true);
-    expect(observed.join(" ")).not.toContain("ultrasecretvalue");
+    expect(JSON.stringify(normal.hits)).not.toContain("ultrasecretvalue");
+    expect(normal.hits.every((hit) => hit.citation.excerpt.length <= 64)).toBe(true);
 
     const privateResult = await history.search({
       query: "project codename zephyr",
@@ -150,14 +127,6 @@ describe("longitudinal history", () => {
           hit.citation.source.kind !== "database_row" || hit.citation.source.rowId !== "message-secret",
       ),
     ).toBe(true);
-    expect(privateResult.appliedBounds).toMatchObject({
-      lexicalLimit: 8,
-      semanticLimit: 8,
-      rerankLimit: 4,
-      resultLimit: 1,
-      maxExcerptChars: 64,
-    });
-    expect(observed.length).toBeGreaterThan(0);
   });
 
   test("retrieves bounded prior evidence with an immutable file-revision citation", async () => {
@@ -176,17 +145,12 @@ describe("longitudinal history", () => {
       evidenceKind: "output",
       sensitivity: "private",
     });
-    const history = createHistoryPort({
-      workspace,
-      embeddings: createDeterministicEmbeddingPort(),
-      reranker: createDeterministicRerankPort(),
-    });
+    const history = createHistoryPort({ workspace });
     await history.rebuild();
     const result = await history.search({
       query: "longitudinal evidence hypothesis",
       limit: 1,
-      lexicalLimit: 3,
-      semanticLimit: 3,
+      candidateLimit: 3,
       maxExcerptChars: 48,
     });
 

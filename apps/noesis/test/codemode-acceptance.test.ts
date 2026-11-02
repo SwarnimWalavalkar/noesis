@@ -2314,33 +2314,6 @@ describe("production codemode journey", () => {
           variants: configurations,
           respond: (request) => {
             roleRequests.push(request.runId);
-            if (request.runId.startsWith("history-rerank")) {
-              const envelope = z
-                .object({ messages: z.array(z.object({ content: z.string() })) })
-                .parse(JSON.parse(request.prompt));
-              const documentIds = envelope.messages.flatMap((message) =>
-                (() => {
-                  try {
-                    const parsed = z
-                      .object({ candidates: z.array(z.object({ documentId: z.string() })) })
-                      .safeParse(JSON.parse(message.content));
-                    return parsed.success
-                      ? parsed.data.candidates.map((candidate) => candidate.documentId)
-                      : [];
-                  } catch {
-                    return [];
-                  }
-                })(),
-              );
-              return {
-                text: JSON.stringify({
-                  ranking: documentIds.map((documentId) => ({
-                    documentId,
-                    reason: "Controlled acceptance ordering.",
-                  })),
-                }),
-              };
-            }
             return {
               text: '{"decision":"no_change","reason":"The foreground agent already published the deliberate refinement."}',
             };

@@ -6,7 +6,7 @@ import {
 } from "../../../../packages/runtime-pi/test/support/controlled-pi-models.ts";
 
 const RolePromptSchema = z.object({
-  role: z.enum(["history_reranker", "reflector"]),
+  role: z.literal("reflector"),
   messages: z.array(z.object({ name: z.string().optional(), content: z.string() })),
   capabilityRevisions: z.array(CapabilityRevisionRefSchema),
 });
@@ -25,12 +25,6 @@ function namedMessage(prompt: RolePrompt, name: string): string {
 
 function parsedMessage(prompt: RolePrompt, name: string): JsonValue {
   return JsonValueSchema.parse(JSON.parse(namedMessage(prompt, name)));
-}
-
-function structuredPayload(content: string): JsonValue {
-  const payload = content.split("\n\nReturn JSON only.", 1)[0]?.split("\n\nRepair the following", 1)[0];
-  if (!payload) throw new Error("Controlled role received no structured payload");
-  return JsonValueSchema.parse(JSON.parse(payload));
 }
 
 export function researchLoopControlledResponse(
@@ -64,27 +58,6 @@ export function researchLoopControlledResponse(
     return `Controlled Pi completion for: ${input.lastUserText}`;
   }
   const prompt = parseRolePrompt(input.lastUserText);
-  if (prompt.role === "history_reranker") {
-    const candidates = prompt.messages
-      .filter((message) => message.name === "candidates")
-      .flatMap(
-        (message) =>
-          z
-            .object({
-              candidates: z.array(z.object({ documentId: z.string() })),
-            })
-            .parse(structuredPayload(message.content)).candidates,
-      );
-    if (candidates.length < 2)
-      throw new Error("Controlled history reranker requires at least two candidates to prove ordering");
-    const reversed = candidates.toReversed();
-    return JSON.stringify({
-      ranking: reversed.map((candidate, index) => ({
-        documentId: candidate.documentId,
-        reason: `Controlled reverse rank ${String(index + 1)} for ${candidate.documentId}.`,
-      })),
-    });
-  }
   if (prompt.role === "reflector") {
     const settled = z.object({ userMessage: z.string() }).parse(parsedMessage(prompt, "settled_turn"));
     const current = z

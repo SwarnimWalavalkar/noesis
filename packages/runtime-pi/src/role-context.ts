@@ -10,7 +10,6 @@ const DEFAULT_EVIDENCE_REFS = 64;
 const isolatedRoleMessageNames = {
   session_compactor: ["compaction_input"],
   session_titler: ["first_message"],
-  history_reranker: ["candidates"],
   reflector: [
     "settled_turn",
     "current_capabilities",
@@ -26,7 +25,7 @@ const isolatedRoleMessageNames = {
     "pending_capability",
     "user_change_request",
   ],
-  session_reviewer: ["session_review", "current_capabilities", "related_history"],
+  session_reviewer: ["session_review", "current_capabilities", "write_search_queries", "related_history"],
 } as const satisfies Readonly<Record<Exclude<AgentRole, "foreground">, readonly string[]>>;
 export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPolicy {
   const foreground = role === "foreground";

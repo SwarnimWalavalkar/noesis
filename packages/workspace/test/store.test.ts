@@ -825,24 +825,10 @@ describe("WorkspaceStore", () => {
     expect(ordinaryLexical.every((candidate) => !sensitiveDocumentIds.includes(candidate.documentId))).toBe(
       true,
     );
-    // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-    await store.search.putEmbeddings(
-      "sensitivity-test",
-      new Map(rebuilt.map((document) => [document.documentId, [1, 0] as const])),
-    );
-    const ordinarySemantic = await store.search.semanticCandidates({
-      modelId: "sensitivity-test",
-      vector: [1, 0],
-      limit: 8,
-      includePrivate: false,
-    });
-    expect(ordinarySemantic.every((candidate) => !sensitiveDocumentIds.includes(candidate.documentId))).toBe(
-      true,
-    );
     store.close();
   });
   // SAFETY: This test fixture intentionally supplies a controlled representation at this boundary.
-  test("applies typed source scopes before lexical and semantic candidate limits", async () => {
+  test("applies typed source scopes before the candidate limit", async () => {
     const store = await createWorkspaceStore(await temporary("search-source-scopes"));
     await store.operational.sessions.put({
       ...session("session-source-scopes"),
@@ -877,7 +863,7 @@ describe("WorkspaceStore", () => {
       createdAt: "2026-08-10T00:00:01.000Z",
       metadata: Object.freeze({}),
     });
-    const documents = await store.search.rebuildDocuments();
+    await store.search.rebuildDocuments();
     const lexical = async (sourceScope: "session_or_outcome") =>
       await store.search.lexicalCandidates({
         query: "scope eligibility sentinel",
@@ -889,30 +875,6 @@ describe("WorkspaceStore", () => {
     expect(sessionOrOutcomeLexical).toHaveLength(2);
     expect(
       sessionOrOutcomeLexical.every(
-        (candidate) =>
-          candidate.source.kind === "database_row" &&
-          ["sessions", "outcomes"].includes(candidate.source.table),
-      ),
-    ).toBe(true);
-    const embeddings = new Map<string, readonly number[]>();
-    for (const document of documents)
-      embeddings.set(
-        document.documentId,
-        document.source.kind === "database_row" && document.source.table === "messages" ? [1, 0] : [0.8, 0.2],
-      );
-    await store.search.putEmbeddings("source-scope-test", embeddings);
-    const semantic = async (sourceScope: "session_or_outcome") =>
-      await store.search.semanticCandidates({
-        modelId: "source-scope-test",
-        vector: [1, 0],
-        limit: 2,
-        sourceScope,
-        includePrivate: false,
-      });
-    const sessionOrOutcomeSemantic = await semantic("session_or_outcome");
-    expect(sessionOrOutcomeSemantic).toHaveLength(2);
-    expect(
-      sessionOrOutcomeSemantic.every(
         (candidate) =>
           candidate.source.kind === "database_row" &&
           ["sessions", "outcomes"].includes(candidate.source.table),
@@ -1902,7 +1864,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 58 });
+    ).toEqual({ version: 59 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -2532,7 +2494,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 58,
+      version: 59,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2637,7 +2599,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 58,
+      version: 59,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2653,6 +2615,57 @@ describe("WorkspaceStore", () => {
     ).toEqual([]);
     expect(upgraded.prepare("SELECT COUNT(*) AS count FROM search_documents").get()).toEqual({ count: 0 });
     expect(upgraded.prepare("SELECT COUNT(*) AS count FROM search_fts").get()).toEqual({ count: 0 });
+    upgraded.close();
+  });
+  test("migration 59 drops embeddings and rebuilds the index with stemming", async () => {
+    const root = await temporary("plain-session-search");
+    const { databasePath, database } = await seedWorkspaceThroughMigration(root, 58);
+    const at = "2026-07-26T00:00:00.000Z";
+    database
+      .prepare(`INSERT INTO search_documents(
+          document_id, source_kind, source_table, source_id, source_field, session_id, sensitivity,
+          occurred_at, body, citation_json
+        ) VALUES ('document-1', 'database_row', 'messages', 'message-1', 'content', NULL, 'normal', ?,
+          'The gateways were deployed.', '{"kind":"database_row","table":"messages","rowId":"message-1","field":"content"}')`)
+      .run(at);
+    database
+      .prepare(
+        "INSERT INTO search_fts(document_id, body) VALUES ('document-1', 'The gateways were deployed.')",
+      )
+      .run();
+    database
+      .prepare(`INSERT INTO search_embeddings(document_id, model_id, dimensions, vector_json)
+         VALUES ('document-1', 'noesis-hash-32-v1', 1, '[1]')`)
+      .run();
+    database.close();
+
+    const store = await createWorkspaceStore(root);
+    await expect(store.operational.searchConfiguration.get()).resolves.toMatchObject({
+      lexicalLimit: 40,
+      maxExcerptChars: 1200,
+      includePrivate: false,
+    });
+    const candidates = await store.search.lexicalCandidates({
+      query: "deploying gateway",
+      limit: 8,
+      includePrivate: false,
+    });
+    expect(candidates.map((candidate) => candidate.documentId)).toEqual(["document-1"]);
+    store.close();
+
+    const upgraded = new DatabaseSync(databasePath, { readOnly: true });
+    expect(upgraded.prepare("SELECT name FROM sqlite_master WHERE name = 'search_embeddings'").all()).toEqual(
+      [],
+    );
+    expect(
+      upgraded.prepare("SELECT name FROM pragma_table_info('search_configuration') ORDER BY name").all(),
+    ).toEqual([
+      { name: "configuration_id" },
+      { name: "include_private" },
+      { name: "lexical_limit" },
+      { name: "max_excerpt_chars" },
+      { name: "updated_at" },
+    ]);
     upgraded.close();
   });
   test("migration 56 resets Capabilities, unfinished learning jobs, and subagent history", async () => {
@@ -2737,7 +2750,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 58,
+      version: 59,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     for (const table of [
@@ -2809,7 +2822,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 58,
+      version: 59,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2978,7 +2991,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(58);
+    expect(versions.at(-1)).toBe(59);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

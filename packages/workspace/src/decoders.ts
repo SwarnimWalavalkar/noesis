@@ -32,8 +32,6 @@ import type {
 export const JsonRecordSchema = z.record(z.string(), JsonValueSchema);
 export const SearchConfigurationSchema = z.strictObject({
   lexicalLimit: z.number().int().min(1).max(1000),
-  semanticLimit: z.number().int().min(0).max(1000),
-  rerankLimit: z.number().int().min(0).max(100),
   maxExcerptChars: z.number().int().min(32).max(8000),
   includePrivate: z.boolean(),
   updatedAt: z.string().min(1),
@@ -642,8 +640,6 @@ export function decodeOutcome(row: DatabaseRow | undefined): OutcomeRecord {
 export function decodeSearchConfiguration(row: DatabaseRow | undefined): SearchConfiguration {
   return SearchConfigurationSchema.parse({
     lexicalLimit: requiredNumber(row, "lexical_limit"),
-    semanticLimit: requiredNumber(row, "semantic_limit"),
-    rerankLimit: requiredNumber(row, "rerank_limit"),
     maxExcerptChars: requiredNumber(row, "max_excerpt_chars"),
     includePrivate: requiredNumber(row, "include_private") === 1,
     updatedAt: requiredString(row, "updated_at"),
@@ -685,7 +681,4 @@ export function decodeOptional<T>(
   decode: (value: DatabaseRow) => T,
 ): T | undefined {
   return row === undefined ? undefined : decode(row);
-}
-export function decodeVector(value: string): readonly number[] {
-  return z.array(z.number().finite()).min(1).parse(JSON.parse(value));
 }

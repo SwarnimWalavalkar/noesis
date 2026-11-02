@@ -54,13 +54,9 @@ import {
   toJsonValue,
 } from "@noesis/domain";
 import {
-  createDeterministicEmbeddingPort,
   createHistoryPort,
   createSessionSearchTools,
   type HistoryPort,
-  type HistoryRerankPort,
-  MAX_HISTORY_RERANK_CANDIDATES,
-  type RerankRequest,
   type SessionToolDefinition,
 } from "@noesis/intelligence";
 import {
@@ -176,9 +172,6 @@ import type {
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
 const SHUTDOWN_GRACE_MS = 250;
-const HISTORY_RERANK_MIN_EXCERPT_CHARACTERS = 32;
-const HISTORY_RERANK_MAX_EXCERPT_CHARACTERS = 480;
-const HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE = 4096;
 const LATE_REFLECTION_REFRESH_MS = 5000;
 const BASE_SYSTEM_PROMPT = [
   "You are Noesis, a thinking-and-creation partner.",
@@ -209,13 +202,7 @@ function isContextCompactionInterrupted(cause: unknown): boolean {
   return cause instanceof Error && cause.name === CONTEXT_COMPACTION_INTERRUPTED;
 }
 // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-const roleNames = [
-  "session_compactor",
-  "session_titler",
-  "history_reranker",
-  "reflector",
-  "session_reviewer",
-] as const;
+const roleNames = ["session_compactor", "session_titler", "reflector", "session_reviewer"] as const;
 type RoleName = (typeof roleNames)[number];
 type ApplicationRoleConfiguration = RoleVariantConfiguration & {
   readonly variant: RoleVariantConfiguration["variant"] & {
@@ -224,10 +211,6 @@ type ApplicationRoleConfiguration = RoleVariantConfiguration & {
 };
 /** The start of a first message is enough to name a session. */
 const SESSION_TITLE_INPUT_CHARACTERS = 4000;
-const HistoryRerankItemSchema = z.strictObject({
-  documentId: z.string().min(1).max(512),
-  reason: z.string().min(1).max(512),
-});
 const ContextCheckpointSummarySchema = z.strictObject({
   notes: z
     .array(
@@ -742,132 +725,6 @@ export async function resolveActiveProject(root: string): Promise<ProjectRef> {
     root: canonicalRoot,
   });
 }
-export function createModelHistoryRerankPort(options: {
-  readonly inference: ReturnType<typeof createStructuredInferencePort>;
-  readonly configuration: ApplicationRoleConfiguration;
-}): HistoryRerankPort {
-  const candidatesPerMessage = 12;
-  return Object.freeze({
-    rerank: async (request: RerankRequest) => {
-      if (request.candidates.length > MAX_HISTORY_RERANK_CANDIDATES)
-        throw new Error(
-          `History reranker accepts at most ${String(MAX_HISTORY_RERANK_CANDIDATES)} candidates`,
-        );
-      if (request.candidates.length === 0) return Object.freeze([]);
-      const buildInput = (excerptCharacters: number) => {
-        const candidates = Object.freeze(
-          request.candidates.map((candidate) =>
-            Object.freeze({
-              ...candidate,
-              excerpt: candidate.excerpt.slice(0, excerptCharacters),
-            }),
-          ),
-        );
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        const messages = Object.freeze(
-          Array.from({ length: Math.ceil(candidates.length / candidatesPerMessage) }, (_, index) =>
-            Object.freeze({
-              role: "user" as const,
-              name: "candidates",
-              content: canonicalJson(
-                toJsonValue(
-                  createConditionalObject({} as const)
-                    .addOptional(
-                      index === 0
-                        ? {
-                            instruction:
-                              "Rank every candidate from most to least useful for answering the query. Prefer meaningfully relevant evidence over literal word overlap. Return every document ID exactly once with a brief reason.",
-                            query: request.query,
-                          }
-                        : undefined,
-                    )
-                    .add({
-                      candidates: candidates.slice(
-                        index * candidatesPerMessage,
-                        (index + 1) * candidatesPerMessage,
-                      ),
-                    } as const)
-                    .finish(),
-                ),
-              ),
-            }),
-          ),
-        );
-        return Object.freeze({ candidates, messages });
-      };
-      const fitsContextPolicy = (input: ReturnType<typeof buildInput>): boolean => {
-        if (input.messages.length > options.configuration.contextPolicy.maxMessages) return false;
-        const lastIndex = input.messages.length - 1;
-        if (
-          input.messages.some(
-            (message, index) =>
-              message.content.length + (index === lastIndex ? HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE : 0) >
-              options.configuration.contextPolicy.maxCharactersPerMessage,
-          )
-        )
-          return false;
-        return (
-          input.messages.reduce((total, message) => total + message.content.length, 0) +
-            HISTORY_RERANK_OUTPUT_CONTRACT_RESERVE <=
-          options.configuration.contextPolicy.maxTotalCharacters
-        );
-      };
-      let selected = buildInput(HISTORY_RERANK_MIN_EXCERPT_CHARACTERS);
-      if (!fitsContextPolicy(selected))
-        throw new Error("History reranker candidate identities exceed the configured role context policy");
-      let lower = HISTORY_RERANK_MIN_EXCERPT_CHARACTERS + 1;
-      let upper = HISTORY_RERANK_MAX_EXCERPT_CHARACTERS;
-      while (lower <= upper) {
-        const midpoint = Math.floor((lower + upper) / 2);
-        const candidate = buildInput(midpoint);
-        if (fitsContextPolicy(candidate)) {
-          selected = candidate;
-          lower = midpoint + 1;
-        } else upper = midpoint - 1;
-      }
-      const { candidates, messages: candidateMessages } = selected;
-      const candidateIds = new Set(candidates.map((candidate) => candidate.documentId));
-      const RankingSchema = z
-        .array(HistoryRerankItemSchema)
-        .length(candidates.length)
-        .superRefine((ranking, context) => {
-          const rankedIds = new Set(ranking.map((item) => item.documentId));
-          if (rankedIds.size !== ranking.length)
-            context.addIssue({ code: "custom", message: "Ranking must not contain duplicate document IDs" });
-          if (
-            rankedIds.size !== candidateIds.size ||
-            [...rankedIds].some((documentId) => !candidateIds.has(documentId))
-          )
-            context.addIssue({
-              code: "custom",
-              message: "Ranking must contain every supplied candidate exactly once",
-            });
-        });
-      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-      const result = await options.inference.run(
-        createConditionalObject({
-          runId: createId("history-rerank"),
-          role: "history_reranker",
-          variant: options.configuration.variant,
-          messages: Object.freeze(candidateMessages),
-          evidenceRefs: Object.freeze([]),
-          availableTools: Object.freeze([]),
-        } as const)
-          .addOptional(request.signal ? { signal: request.signal } : undefined)
-          .finish(),
-        z.strictObject({ ranking: RankingSchema }),
-      );
-      return Object.freeze(
-        result.value.ranking.slice(0, Math.min(request.maxResults, candidates.length)).map((item) =>
-          Object.freeze({
-            documentId: item.documentId,
-            reason: item.reason,
-          }),
-        ),
-      );
-    },
-  });
-}
 function sessionDefinitionsForBroker(
   definitions: readonly SessionToolDefinition[],
   options: {
@@ -894,7 +751,7 @@ function sessionDefinitionsForBroker(
         label: definition.label,
         description: definition.description,
         identityMaterial: Object.freeze({
-          adapterRevision: "history-session-tools-v1",
+          adapterRevision: "history-session-tools-v2",
           toolName: definition.name,
         }),
         inputSchema: definition.inputSchema,
@@ -1181,7 +1038,7 @@ function rolePrompt(name: RoleName): string {
       "Create or revise a Capability only when one of these supports it, and name it in evidence.kind:",
       "- explicit_request: the user asked Noesis to remember something or to behave differently from now on.",
       "- user_correction: the user corrected or redid the turn's work, and the correction would apply again in later work.",
-      "- repeated_across_sessions: the supplied evidence shows the same need or correction in more than one session.",
+      "- repeated_across_sessions: the user says, or the turn's own evidence shows, that the same need or correction came up in an earlier session. A separate session review searches earlier sessions; you see only this exchange.",
       "- verified_method: a method worked in this turn, the user accepted the result, and the user is likely to need it again.",
       "Quote the user's words or the observed result in evidence.quote. State in evidence.wouldOtherwise what the user would have to repeat or correct without this Capability. If you cannot, return no_change.",
       "Do not learn from a one-off request, from ordinary success, or from your own opinion of the turn. Do not learn from failures outside the model's control, e.g., provider, network, or runtime errors. The cause field states how the turn ended.",
@@ -1198,6 +1055,7 @@ function rolePrompt(name: RoleName): string {
       "Noesis protected role: session_reviewer.",
       "Return only the requested structured JSON.",
       "You review a whole session after it has gone quiet. Per-turn reflection already handled single exchanges. Look only for what one exchange cannot show:",
+      "The review has two steps. When a write_search_queries message is present, return only the queries that would find the same needs in earlier sessions. Search is keyword-based with stemming and does not match by meaning, so write the words those sessions would contain, try different wordings of one need, and double-quote exact phrases. Return no queries when the session shows no need worth looking for. Noesis runs the queries and returns the matches as related_history, and then you decide.",
       "- The same need, correction, or procedure appears in this session and in related_history from earlier sessions. Create or revise a Capability for it, with evidence.kind repeated_across_sessions.",
       "- Two or more current Capabilities overlap. Revise one to cover both, and pause the others.",
       "- A Capability's track record shows it hurt more than it helped. Revise it or pause it.",
@@ -1294,7 +1152,6 @@ async function roleConfigurations(
   return Object.freeze({
     session_compactor: requireRole("session_compactor"),
     session_titler: requireRole("session_titler"),
-    history_reranker: requireRole("history_reranker"),
     reflector: requireRole("reflector"),
     session_reviewer: requireRole("session_reviewer"),
   });
@@ -1443,14 +1300,7 @@ export async function createApplicationRuntimeComposition(
   const roles = await roleConfigurations(workspace, options.config);
   const roleRunner = options.createRoleRunner(Object.freeze(Object.values(roles)));
   const inference = createStructuredInferencePort({ runner: roleRunner, maxRepairAttempts: 1 });
-  const history = createHistoryPort({
-    workspace,
-    embeddings: createDeterministicEmbeddingPort(32, "noesis-hash-32-v1"),
-    reranker: createModelHistoryRerankPort({
-      inference,
-      configuration: roles.history_reranker,
-    }),
-  });
+  const history = createHistoryPort({ workspace });
   const capabilityPrograms = createCapabilityProgramLibrary(workspace, project);
   const capabilityPublisher = createCapabilityPublisher({
     workspace,
@@ -4485,7 +4335,6 @@ export async function createApplicationRuntimeComposition(
   const capabilityLearning = createCapabilityLearningModule({
     workspace,
     store: workspace.capabilities,
-    history,
     inference,
     programs: capabilityPrograms,
     publisher: capabilityPublisher,
