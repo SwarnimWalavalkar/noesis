@@ -55,9 +55,12 @@ Search for a citation, open the session, then slice around the row. Citation off
 
 ```js
 const { fragments } = await tools.history.search_sessions({ query: "rollback decision", maxResults: 1 });
+if (fragments.length === 0) return "No match";
 const { citation } = fragments[0];
 const past = await tools.history.open_session({ sessionId: citation.sessionIds[0] });
-const at = (await past.text()).indexOf(citation.identity.messageId ?? citation.identity.toolCallId);
+const rowId = citation.identity.messageId ?? citation.identity.toolCallId;
+const at = rowId ? (await past.text()).indexOf(rowId) : -1;
+if (at < 0) return await tools.history.open_session_evidence({ citation });
 return await past.slice(Math.max(0, at - 2000), at + 4000).text();
 ```
 

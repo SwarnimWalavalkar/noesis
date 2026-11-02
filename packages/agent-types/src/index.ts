@@ -139,6 +139,8 @@ export interface FrozenSubAgentPlan {
     readonly turnId: string;
     readonly executionId: string;
     readonly parentAgentId?: string;
+    /** The workflow run whose session view pins govern this actor's reads. */
+    readonly workflowRunId?: string;
   };
   readonly route: {
     readonly provider: string;
@@ -168,6 +170,7 @@ export const FrozenSubAgentPlanSchema = z.strictObject({
     turnId: z.string().min(1),
     executionId: z.string().min(1),
     parentAgentId: z.string().min(1).optional(),
+    workflowRunId: z.string().min(1).optional(),
   }),
   route: z.strictObject({
     provider: z.string().min(1),
@@ -222,6 +225,7 @@ export function validateFrozenSubAgentPlan(value: unknown): FrozenSubAgentPlan {
     executionId: plan.origin.executionId,
   } as const)
     .addOptional(plan.origin.parentAgentId ? { parentAgentId: plan.origin.parentAgentId } : undefined)
+    .addOptional(plan.origin.workflowRunId ? { workflowRunId: plan.origin.workflowRunId } : undefined)
     .finish();
   const normalized = createConditionalObject({
     schemaVersion: plan.schemaVersion,
@@ -605,6 +609,8 @@ export interface FrozenTurnPlan {
     readonly taskId: string;
     readonly parent: AgentAddress;
     readonly allowedTools: readonly string[];
+    /** The workflow run whose session view pins govern this actor's reads. */
+    readonly workflowRunId?: string | undefined;
   };
   readonly permissionSnapshot: PermissionManifest;
   readonly retrievalCitations: readonly EvidenceRef[];
@@ -751,6 +757,7 @@ export const FrozenTurnPlanSchema = z.strictObject({
         z.strictObject({ kind: z.literal("subagent"), id: z.string().min(1) }),
       ]),
       allowedTools: z.array(z.string().min(1)),
+      workflowRunId: z.string().min(1).optional(),
     })
     .optional(),
   permissionSnapshot: PermissionManifestSchema,

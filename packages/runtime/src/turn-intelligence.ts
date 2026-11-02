@@ -113,6 +113,8 @@ interface ContextDocumentLine {
   readonly kindOrder: number;
   readonly value: import("@noesis/domain").JsonValue;
   readonly record: "message" | "tool_call" | "code_execution" | "model_call" | "workflow_run";
+  /** Set only on message rows. */
+  readonly role?: "user" | "assistant" | undefined;
   readonly turnId?: string | undefined;
   /** The row's own label. Code, model, and workflow rows have none. */
   readonly sensitivity?: Sensitivity | undefined;
@@ -137,9 +139,10 @@ function metadataTurnId(metadata: MessageRecord["metadata"]): string | undefined
 }
 /**
  * Replaces each row the disclosure does not admit with a marker that carries no content, so a reader
- * can see that the view is partial. A row without its own label takes the highest label recorded in
- * its turn, because its results and errors can repeat anything that turn read. Without a turn it takes
- * the session's highest label.
+ * can see that the view is partial. A user message keeps its own label, because the user wrote it.
+ * Every other row can repeat anything the session had shown by then through `context`, so it takes the
+ * highest label recorded up to its time or anywhere in its turn. A session with no labelled row
+ * follows the workspace privacy rule and counts as private.
  */
 function applySessionViewDisclosure(
   lines: readonly ContextDocumentLine[],
@@ -147,17 +150,29 @@ function applySessionViewDisclosure(
   sessionId: string,
   labels: {
     readonly session: Sensitivity;
-    readonly highestInSession: Sensitivity;
+    readonly recorded: readonly { readonly occurredAt: string; readonly sensitivity: Sensitivity }[];
     readonly highestByTurn: ReadonlyMap<string, Sensitivity>;
   },
 ): readonly ContextDocumentLine[] {
+  const recorded = [...labels.recorded].sort((left, right) =>
+    compareCodePoints(left.occurredAt, right.occurredAt),
+  );
+  let next = 0;
+  let highestSoFar: Sensitivity = recorded.length === 0 ? "private" : "normal";
   return lines.map((line) => {
-    const recorded =
-      line.sensitivity ??
-      (line.turnId === undefined
-        ? labels.highestInSession
-        : (labels.highestByTurn.get(line.turnId) ?? labels.highestInSession));
-    const effective = higherSensitivity(labels.session, recorded);
+    for (; (recorded[next]?.occurredAt ?? "\uffff") <= line.occurredAt; next += 1) {
+      const entry = recorded[next];
+      if (entry) highestSoFar = higherSensitivity(highestSoFar, entry.sensitivity);
+    }
+    const own = line.sensitivity ?? "normal";
+    const inherited =
+      line.record === "message" && line.role === "user"
+        ? own
+        : higherSensitivity(
+            higherSensitivity(own, highestSoFar),
+            (line.turnId === undefined ? undefined : labels.highestByTurn.get(line.turnId)) ?? "normal",
+          );
+    const effective = higherSensitivity(labels.session, inherited);
     if (effective === "normal" || (effective === "private" && disclosure.includePrivate)) return line;
     return Object.freeze({
       ...line,
@@ -203,6 +218,7 @@ async function freezeContextDocument(
         stableId: message.messageId,
         kindOrder: 0,
         record: "message",
+        role: message.role,
         turnId: metadataTurnId(message.metadata),
         sensitivity: message.sensitivity,
         value: toJsonValue({
@@ -358,19 +374,20 @@ async function freezeContextDocument(
   if (disclosure) {
     const outcomes = await workspace.operational.outcomes.listForSession(sessionId);
     const highestByTurn = new Map<string, Sensitivity>();
-    let highestInSession: Sensitivity = "normal";
-    const record = (turnId: string | undefined, sensitivity: Sensitivity): void => {
-      highestInSession = higherSensitivity(highestInSession, sensitivity);
+    const recorded: { readonly occurredAt: string; readonly sensitivity: Sensitivity }[] = [];
+    const record = (occurredAt: string, turnId: string | undefined, sensitivity: Sensitivity): void => {
+      recorded.push(Object.freeze({ occurredAt, sensitivity }));
       if (turnId !== undefined)
         highestByTurn.set(turnId, higherSensitivity(highestByTurn.get(turnId) ?? "normal", sensitivity));
     };
     // Messages the document leaves out, such as system and tool roles, still carry their turn's label.
-    for (const message of messages) record(metadataTurnId(message.metadata), message.sensitivity);
-    for (const call of toolCalls) record(call.turnId, call.sensitivity);
-    for (const outcome of outcomes) record(outcome.turnId, outcome.sensitivity);
+    for (const message of messages)
+      record(message.createdAt, metadataTurnId(message.metadata), message.sensitivity);
+    for (const call of toolCalls) record(call.createdAt, call.turnId, call.sensitivity);
+    for (const outcome of outcomes) record(outcome.createdAt, outcome.turnId, outcome.sensitivity);
     disclosed = applySessionViewDisclosure(lines, disclosure, sessionId, {
       session: explicitSessionSensitivity(session.metadata),
-      highestInSession,
+      recorded,
       highestByTurn,
     });
   }

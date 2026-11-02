@@ -61,25 +61,28 @@ All searches in one turn share a total budget of about 31,000 characters. When t
 
 ```js
 const { fragments } = await tools.history.search_sessions({ query: "rollback decision", maxResults: 1 });
+if (fragments.length === 0) return "No match";
 const { citation } = fragments[0];
 const past = await tools.history.open_session({ sessionId: citation.sessionIds[0] });
-const at = (await past.text()).indexOf(citation.identity.messageId ?? citation.identity.toolCallId);
+const rowId = citation.identity.messageId ?? citation.identity.toolCallId;
+const at = rowId ? (await past.text()).indexOf(rowId) : -1;
+if (at < 0) return await tools.history.open_session_evidence({ citation });
 return await past.slice(Math.max(0, at - 2000), at + 4000).text();
 ```
 
-The document contains the same recorded rows as `context`, one JSON value per line. A citation's offsets refer to its source row, not to this document, so find the row by its message or tool call id. A citation for a session title or an outcome has neither id; read the view from the start or its end instead.
+The document contains the same recorded rows as `context`, one JSON value per line. A citation's offsets refer to its source row, not to this document, so find the row by its message or tool call id. A citation for a session title, an outcome, or a file or evidence revision has no row in the view, so open it with `history.open_session_evidence` instead.
 
 The view follows the rules of the session search tools:
 
 - Secret content is never included. Each secret row becomes an `omitted` line that keeps only the record type, time, and sensitivity, so the reader can tell that the view is partial.
 - Private content is also omitted unless the call passes `includePrivate: true`. That flag is accepted only for the current session or an authorized session, and is otherwise rejected.
-- A code, model, or workflow row has no sensitivity label of its own, but its results and errors can repeat anything its turn read. It takes the highest label recorded in its turn. A row with no turn takes the session's highest label.
+- A user message keeps its own label. Every other row can repeat anything the session had shown by then, so it takes the highest label recorded up to its time or anywhere in its turn. One secret row therefore hides every later row except user messages. A session with no labelled row counts as private.
 - A session that does not exist or was deleted is rejected.
 - Only views opened in the same execution can fill an `agents.spawn` prompt.
 
 The view is frozen and verified against its digest in the same way as `context`, and it is a snapshot taken at the call. Opening the session again later can return newer content as a different view.
 
-A workflow run pins the digest it first reads for each session. Any later read in that run, including a resumed phase, must match the pin. If the session changed, the read fails instead of returning different bytes, and the phase pauses. Start a new run to read the current content. A run should read its own session through `context`, because that session keeps changing while the run records its work.
+A workflow run pins the digest it first reads for each session and disclosure mode. Any later read in that run, including a resumed phase or a subagent it spawned, must match the pin. If the session changed, the read fails instead of returning different bytes, and the phase pauses. Start a new run to read the current content. A run should read its own session through `context`, because that session keeps changing while the run records its work.
 
 ## Subagent lifecycle
 
