@@ -71,6 +71,7 @@ const current = async (workspace: NoesisWorkspaceStore, capabilityId: string) =>
 describe("Capability files", () => {
   test("round-trips the editable part and ignores the notes", () => {
     const text = renderCapabilityDocument(
+      "use-pnpm-abc123",
       {
         name: "Use pnpm",
         when: "Package commands.",
@@ -219,7 +220,7 @@ describe("Capability files", () => {
     ).toBe(afterText);
 
     // An edit gets the same limits as any authored Capability.
-    await writeFile(file, afterText.replace("name: Use pnpm", `name: ${"n".repeat(161)}`));
+    await writeFile(file, afterText.replace("title: Use pnpm", `title: ${"n".repeat(161)}`));
     const tooLong = await publisher.recordDocumentEdits(context, new AbortController().signal);
     expect(tooLong.recorded).toEqual([]);
     expect(tooLong.problems).toEqual([expect.objectContaining({ error: expect.stringContaining("name") })]);
@@ -317,7 +318,7 @@ describe("Capability files", () => {
     await writeFile(file, newerSave);
     await publisher.syncWorkingDocument(created.capabilityId, {
       userChoseRevision: true,
-      onlyReplacingDigest: sha256(userEdit),
+      onlyReplacing: new Map([["SKILL.md", sha256(userEdit)]]),
     });
     expect(
       new TextDecoder().decode(

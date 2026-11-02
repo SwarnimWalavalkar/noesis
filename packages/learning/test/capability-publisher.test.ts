@@ -142,7 +142,7 @@ describe("Capability publisher", () => {
     const instruction = initialEffects[0];
     if (instruction?.kind !== "instruction") throw new Error("Expected an instruction effect");
     expect(capabilityWorkingDocumentPath(instruction.material)).toMatch(
-      /^definitions\/capabilities\/evidence-led-review-[a-f0-9]{6}\.md$/u,
+      /^definitions\/capabilities\/evidence-led-review-[a-f0-9]{6}\/SKILL\.md$/u,
     );
     const document = new TextDecoder().decode(await workspace.reads.readRevision(instruction.material));
     const parsed = parseCapabilityDocument(document);

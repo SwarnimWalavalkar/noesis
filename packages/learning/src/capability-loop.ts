@@ -39,7 +39,7 @@ import {
 import type { LearningRoleConfiguration, LearningTurnInput } from "./schemas.ts";
 export const CapabilityReflectionProposalSchema = z.strictObject({
   name: z.string().min(1).max(160),
-  description: z.string().min(1).max(2048),
+  description: z.string().min(1).max(1024),
   applicability: z.string().min(1).max(2048),
   summary: z.string().min(1).max(2048),
   rationale: z.string().min(1).max(4096),

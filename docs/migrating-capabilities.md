@@ -1,12 +1,12 @@
 # Bring back Capabilities from Noesis 0.0.5 and earlier
 
-Noesis stores each learned Capability as one readable Markdown file. The file holds the Capability's guidance, and the Capability can also attach one saved script or workflow. Noesis 0.0.5 and earlier stored Capabilities in a different format. Later versions cannot read that format, so the first time a later version opens your Noesis home, it removes the old Capabilities from its database. Noesis then starts with no learned Capabilities.
+Noesis stores each learned Capability as a folder that is also a standard skill. Its `SKILL.md` holds the Capability's guidance. The folder can hold other files and Programs, and the Capability can also attach one saved script or workflow. Noesis 0.0.5 and earlier stored Capabilities in a different format. Later versions cannot read that format, so the first time a later version opens your Noesis home, it removes the old Capabilities from its database. Noesis then starts with no learned Capabilities.
 
 The reset does not delete any files, so your old Capability text is still on disk. This guide explains what the reset keeps and removes, where to find the old text, and how to have Noesis recreate each Capability in the current format.
 
 ## Who needs this guide
 
-You need this guide if you had learned Capabilities in Noesis 0.0.5 or earlier. You also need it if you ran a development build from the source repository that stored Capabilities as Markdown files before the reset was added.
+You need this guide if you had learned Capabilities in Noesis 0.0.5 or earlier. You also need it if you ran a development build from the source repository that stored Capabilities as Markdown files before the reset was added. Noesis 0.0.6 Capabilities need no action: each `<name>-<id>.md` file moves into its own folder the next time Noesis starts a turn or opens `/learning`, with its revisions and track record unchanged.
 
 If you never had learned Capabilities, or you started with a version later than 0.0.5, you do not need this guide.
 
@@ -21,7 +21,7 @@ The reset removes every learned Capability, along with its revisions, its record
 Old Capabilities are under `~/.noesis/definitions/capabilities/`. If you use `--home` or `NOESIS_HOME`, they are under `definitions/capabilities/` in that Noesis home. You may find two kinds of entries:
 
 - Folders named `capability_<id>`. Noesis 0.0.5 and earlier wrote these. Each folder holds one folder per revision. Each revision folder holds `instruction-*.md` files, and sometimes `skills/*/SKILL.md` files. These files contain only the guidance text. They do not record the Capability's name or when it applies.
-- Files named `<name>-<id>.md`. Development builds wrote these before the reset. Each file starts with `name`, `when`, and `description` fields, then the guidance, then notes that Noesis wrote below a marker line.
+- Files named `<name>-<id>.md`. Development builds wrote these before the reset. A file that is still there after a turn does not belong to a current Capability. Each file starts with `name`, `when`, and `description` fields, then the guidance, then notes that Noesis wrote below a marker line.
 
 ## Recreate your Capabilities
 
@@ -51,4 +51,4 @@ Load the `noesis` skill. I want to bring back my learned Capabilities from the p
 5. Report what you recreated and what you skipped, with the reason for each skip. List the Capabilities that are still left. When I reply `next`, repeat steps 3 to 5 for the next one.
 ```
 
-After you recreate a Capability, you can pause it in `/learning` or by asking Noesis, and you can edit its guidance in its Markdown file.
+After you recreate a Capability, you can pause it in `/learning` or by asking Noesis, and you can edit its guidance in the `SKILL.md` in its folder.

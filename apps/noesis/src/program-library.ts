@@ -1,4 +1,9 @@
+import { lstat, readdir, readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import {
+  FolderProgramManifestSchema,
+  ProgramManifestSchema,
+  type FolderProgramManifest,
   ProgramPromotionSchema,
   ScriptProgramManifestSchema as ScriptManifestSchema,
   type ScriptProgramManifest as ScriptManifest,
@@ -22,10 +27,14 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf8", { fatal: true });
 
 /** Who owns a Program: one project or the global library. It decides where the Program is stored. */
-export type ProgramOwner = Readonly<{ kind: "global" }> | Readonly<{ kind: "project"; project: ProjectRef }>;
-export const GLOBAL_PROGRAM_OWNER: ProgramOwner = Object.freeze({ kind: "global" });
-export function projectProgramOwner(project: ProjectRef): ProgramOwner {
-  return Object.freeze({ kind: "project", project });
+export type ProgramOwner =
+  | Readonly<{ kind: "global" }>
+  | Readonly<{ kind: "project"; project: ProjectRef }>
+  /** A skill or Capability folder. Its Programs are reachable only once that folder is loaded. */
+  | Readonly<{ kind: "folder"; folderId: string; skillName: string }>;
+export const GLOBAL_PROGRAM_OWNER = Object.freeze({ kind: "global" as const });
+export function projectProgramOwner(project: ProjectRef) {
+  return Object.freeze({ kind: "project" as const, project });
 }
 export type ProgramScopeName = ProgramOwner["kind"];
 export interface StoredScriptProgram {
@@ -43,12 +52,18 @@ interface SavedDefinitionScope {
   readonly workingRoot: string;
 }
 export function programDefinitionScope(kind: ProgramMode, owner: ProgramOwner): SavedDefinitionScope {
-  return owner.kind === "global"
-    ? Object.freeze({ namespace: `program:global:${kind}`, workingRoot: `programs/global/${kind}` })
-    : Object.freeze({
-        namespace: `program:${owner.project.projectId}:${kind}`,
-        workingRoot: `programs/projects/${owner.project.projectId}/${kind}`,
-      });
+  if (owner.kind === "global")
+    return Object.freeze({ namespace: `program:global:${kind}`, workingRoot: `programs/global/${kind}` });
+  // A folder's working files stay in the folder. These are the exact definitions compiled from them.
+  if (owner.kind === "folder")
+    return Object.freeze({
+      namespace: `program:folder:${owner.folderId}:${kind}`,
+      workingRoot: `programs/folders/${owner.folderId}/${kind}`,
+    });
+  return Object.freeze({
+    namespace: `program:${owner.project.projectId}:${kind}`,
+    workingRoot: `programs/projects/${owner.project.projectId}/${kind}`,
+  });
 }
 async function currentDefinition(
   workspace: NoesisWorkspaceStore,
@@ -336,7 +351,7 @@ export async function reconcileStoredWorkflows(
   for (const workflow of workflows) await reconcileStoredWorkflow(workspace, owner, workflow.manifest.name);
 }
 /** Both owners a turn in this project can see, nearest first. */
-function ownersNearestFirst(project: ProjectRef): readonly ProgramOwner[] {
+function ownersNearestFirst(project: ProjectRef): readonly Exclude<ProgramOwner, { kind: "folder" }>[] {
   return Object.freeze([projectProgramOwner(project), GLOBAL_PROGRAM_OWNER]);
 }
 async function ownedScripts(
@@ -408,6 +423,32 @@ export async function findWorkflowRevision(
   }
   return undefined;
 }
+/**
+ * Finds a saved or folder workflow revision by its pin. Only a recorded run may use this: a new run
+ * reaches a folder's Programs only once its folder is loaded.
+ */
+export async function findPinnedWorkflowRevision(
+  workspace: NoesisWorkspaceStore,
+  project: ProjectRef,
+  name: string,
+  revisionId: string,
+): Promise<StoredWorkflowProgram | undefined> {
+  const saved = await findWorkflowRevision(workspace, project, name, revisionId);
+  if (saved) return saved;
+  // A paused run from a folder resumes from its pin, whichever folders this turn has loaded.
+  const metadata = await workspace.definitionMetadata.getByRevisionId(revisionId);
+  const folderId = metadata?.namespace.match(/^program:folder:(.+):workflow$/u)?.[1];
+  if (!metadata || !folderId) return undefined;
+  const manifest = WorkflowManifestSchema.parse(
+    JSON.parse(decoder.decode(await workspace.reads.readRevision(metadata.definitionRevision))),
+  );
+  if (manifest.name !== name) return undefined;
+  return Object.freeze({
+    manifest,
+    definitionRevision: metadata.definitionRevision,
+    owner: Object.freeze({ kind: "folder" as const, folderId, skillName: folderId }),
+  });
+}
 export interface ProgramEditProblem {
   readonly mode: ProgramMode;
   readonly name: string;
@@ -455,15 +496,23 @@ function nameOrder<Program extends { readonly manifest: { readonly name: string 
 }
 
 export interface TurnProgramLibrary {
-  /** Every Program the turn can reach, including global ones a project Program shadows. */
+  /** Every Program the turn can reach, including those a nearer Program shadows. */
   readonly scripts: () => readonly StoredScriptProgram[];
   readonly workflows: () => readonly StoredWorkflowProgram[];
-  /** Resolves a name nearest scope first, or within one scope when the caller names it. */
-  readonly script: (name: string, scope?: ProgramScopeName) => StoredScriptProgram | undefined;
-  readonly workflow: (name: string, scope?: ProgramScopeName) => StoredWorkflowProgram | undefined;
+  /**
+   * Resolves a name nearest scope first: a loaded folder, then the project, then global. A caller
+   * may name one scope or one loaded skill. A name in two loaded folders is an error, not a guess.
+   */
+  readonly script: (name: string, lookup?: ProgramLookup) => StoredScriptProgram | undefined;
+  readonly workflow: (name: string, lookup?: ProgramLookup) => StoredWorkflowProgram | undefined;
   readonly isShadowed: (mode: ProgramMode, owner: ProgramOwner, name: string) => boolean;
   readonly recordScript: (stored: StoredScriptProgram) => void;
   readonly recordWorkflow: (stored: StoredWorkflowProgram) => void;
+  /** Makes one folder's Programs reachable. Before this, they are not listed or resolved. */
+  readonly loadFolder: (programs: {
+    readonly scripts: readonly StoredScriptProgram[];
+    readonly workflows: readonly StoredWorkflowProgram[];
+  }) => void;
   /** Pins the whole visible library for workflow resume. Project entries keep their earlier shape. */
   readonly dependenciesDigest: () => string;
 }
@@ -471,6 +520,7 @@ export interface TurnProgramLibrary {
  * The Program library as one turn sees it: frozen when the turn starts, plus what this turn saved.
  * Later saves elsewhere cannot change which revision a name resolves to during the turn.
  */
+export type ProgramLookup = Readonly<{ scope?: ProgramScopeName; skill?: string }>;
 export function createTurnProgramLibrary(frozen: {
   readonly scripts: readonly StoredScriptProgram[];
   readonly workflows: readonly StoredWorkflowProgram[];
@@ -481,21 +531,56 @@ export function createTurnProgramLibrary(frozen: {
   const workflows = new Map(
     frozen.workflows.map((stored) => [scopedKey(stored.owner, stored.manifest.name), stored] as const),
   );
-  const resolve = <Program>(
+  const folderScripts: StoredScriptProgram[] = [];
+  const folderWorkflows: StoredWorkflowProgram[] = [];
+  const resolve = <
+    Program extends { readonly owner: ProgramOwner; readonly manifest: { readonly name: string } },
+  >(
     programs: ReadonlyMap<string, Program>,
+    folders: readonly Program[],
     name: string,
-    scope: ProgramScopeName | undefined,
-  ): Program | undefined =>
-    scope
-      ? programs.get(`${scope}:${name}`)
+    lookup: ProgramLookup | undefined,
+  ): Program | undefined => {
+    const scope = lookup?.scope;
+    const inFolders = folders.filter(
+      ({ owner, manifest }) =>
+        manifest.name === name &&
+        owner.kind === "folder" &&
+        (lookup?.skill === undefined || owner.skillName === lookup.skill),
+    );
+    if (lookup?.skill !== undefined) return inFolders[0];
+    if (scope === "project" || scope === "global") return programs.get(`${scope}:${name}`);
+    if (inFolders.length > 1)
+      throw new Error(
+        `Program ${name} is in more than one loaded skill (${inFolders
+          .map(({ owner }) => (owner.kind === "folder" ? owner.skillName : ""))
+          .join(", ")}). Pass skill to choose one.`,
+      );
+    if (inFolders[0]) return inFolders[0];
+    return scope === "folder"
+      ? undefined
       : (programs.get(`project:${name}`) ?? programs.get(`global:${name}`));
+  };
   const library: TurnProgramLibrary = {
-    scripts: () => nameOrder(scripts.values()),
-    workflows: () => nameOrder(workflows.values()),
-    script: (name, scope) => resolve(scripts, name, scope),
-    workflow: (name, scope) => resolve(workflows, name, scope),
-    isShadowed: (mode, owner, name) =>
-      owner.kind === "global" && (mode === "script" ? scripts : workflows).has(`project:${name}`),
+    scripts: () => nameOrder([...folderScripts, ...scripts.values()]),
+    workflows: () => nameOrder([...folderWorkflows, ...workflows.values()]),
+    script: (name, lookup) => resolve(scripts, folderScripts, name, lookup),
+    workflow: (name, lookup) => resolve(workflows, folderWorkflows, name, lookup),
+    isShadowed: (mode, owner, name) => {
+      if (owner.kind === "folder") return false;
+      const folder = mode === "script" ? folderScripts : folderWorkflows;
+      if (folder.some(({ manifest }) => manifest.name === name)) return true;
+      return owner.kind === "global" && (mode === "script" ? scripts : workflows).has(`project:${name}`);
+    },
+    loadFolder: (programs) => {
+      const known = (
+        stored: { readonly definitionRevision: FileRevisionRef },
+        list: readonly { readonly definitionRevision: FileRevisionRef }[],
+      ) => list.some((item) => item.definitionRevision.revisionId === stored.definitionRevision.revisionId);
+      for (const stored of programs.scripts) if (!known(stored, folderScripts)) folderScripts.push(stored);
+      for (const stored of programs.workflows)
+        if (!known(stored, folderWorkflows)) folderWorkflows.push(stored);
+    },
     recordScript: (stored) => void scripts.set(scopedKey(stored.owner, stored.manifest.name), stored),
     recordWorkflow: (stored) => void workflows.set(scopedKey(stored.owner, stored.manifest.name), stored),
     dependenciesDigest: () =>
@@ -723,7 +808,7 @@ export function createCapabilityProgramLibrary(
         ...library.scripts().map(({ manifest, definitionRevision, owner }) =>
           Object.freeze({
             mode: "script" as const,
-            scope: owner.kind,
+            scope: owner.kind === "global" ? ("global" as const) : ("project" as const),
             shadowed: library.isShadowed("script", owner, manifest.name),
             name: manifest.name,
             description: manifest.description,
@@ -734,7 +819,7 @@ export function createCapabilityProgramLibrary(
         ...library.workflows().map(({ manifest, definitionRevision, owner }) =>
           Object.freeze({
             mode: "workflow" as const,
-            scope: owner.kind,
+            scope: owner.kind === "global" ? ("global" as const) : ("project" as const),
             shadowed: library.isShadowed("workflow", owner, manifest.name),
             name: manifest.name,
             description: manifest.description,
@@ -762,13 +847,277 @@ export function createCapabilityProgramLibrary(
       assertActiveProject(project);
       return await promoteProgram(workspace, project, input);
     },
+    compileFolderPrograms: async (input: {
+      readonly capabilityId: string;
+      readonly sessionId: string;
+      readonly files: readonly {
+        readonly path: string;
+        readonly bytes: Uint8Array;
+        readonly revision: FileRevisionRef;
+      }[];
+    }) => await compileCapabilityFolderPrograms(workspace, input),
   });
+}
+/** The stored form of a folder's Program files. It only reads; `publish` writes the revision. */
+interface FolderProgramFiles {
+  readonly name: string;
+  readonly manifest: FolderProgramManifest;
+  readonly source?: string;
+}
+/** Reads every `programs/<name>/program.json` in a folder. Syntax and shape only. */
+export function readFolderProgramFiles(
+  files: readonly { readonly path: string; readonly bytes: Uint8Array }[],
+): readonly FolderProgramFiles[] {
+  const byPath = new Map(files.map((file) => [file.path, file.bytes] as const));
+  return Object.freeze(
+    files.flatMap((file) => {
+      const match = file.path.match(/^programs\/([^/]+)\/program\.json$/u);
+      const name = match?.[1];
+      if (!name) return [];
+      const parsed = FolderProgramManifestSchema.safeParse(JSON.parse(decoder.decode(file.bytes)));
+      if (!parsed.success)
+        throw new Error(
+          `${file.path}: ${parsed.error.issues.map((issue) => `${issue.path.join(".") || "file"} ${issue.message}`).join("; ")}`,
+        );
+      if (parsed.data.name !== name) throw new Error(`${file.path} names Program ${parsed.data.name}`);
+      if (parsed.data.mode === "workflow") {
+        const program: FolderProgramFiles = Object.freeze({ name, manifest: parsed.data });
+        return [program];
+      }
+      const source = byPath.get(`programs/${name}/index.mjs`);
+      if (!source) throw new Error(`Script-mode Program ${name} needs programs/${name}/index.mjs`);
+      if (source.length > 128 * 1024) throw new Error(`Program ${name} source is too long`);
+      const program: FolderProgramFiles = Object.freeze({
+        name,
+        manifest: parsed.data,
+        source: decoder.decode(source),
+      });
+      return [program];
+    }),
+  );
+}
+/**
+ * Publishes one folder Program as an exact revision, reusing the current one when nothing changed.
+ * The folder's own files stay the editable source; this is what a turn pins and runs.
+ */
+async function compileFolderProgram(
+  workspace: NoesisWorkspaceStore,
+  owner: Extract<ProgramOwner, { kind: "folder" }>,
+  program: FolderProgramFiles,
+  sessionId: string,
+  sourceRevision: FileRevisionRef | undefined,
+): Promise<FileRevisionRef> {
+  const { manifest: file, name } = program;
+  const { namespace, workingRoot } = programDefinitionScope(file.mode, owner);
+  const current = await workspace.definitionMetadata.getCurrent(namespace, name);
+  const revision = (current?.revision ?? 0) + 1;
+  const createdFrom = { sessionId, turnId: `folder:${owner.folderId}`, planId: `folder:${owner.folderId}` };
+  const provenance = sourceRevision ? [sourceRevision] : [];
+  const manifest =
+    file.mode === "script"
+      ? ScriptManifestSchema.parse({
+          kind: "noesis_program",
+          ...file,
+          revision,
+          sourceRevision,
+          createdFrom,
+        })
+      : WorkflowManifestSchema.parse({ kind: "noesis_program", ...file, revision, createdFrom });
+  if (current) {
+    const stored = ProgramManifestSchema.parse(
+      JSON.parse(decoder.decode(await workspace.reads.readRevision(current.definitionRevision))),
+    );
+    const comparable = (value: ScriptManifest | WorkflowManifest) => {
+      const { revision: _revision, createdFrom: _from, ...rest } = value;
+      return rest;
+    };
+    if (canonicalJson(comparable(stored)) === canonicalJson(comparable(manifest)))
+      return current.definitionRevision;
+  }
+  const publication = await workspace.definitionPublications.publish(
+    createConditionalObject({
+      namespace,
+      definitionId: name,
+      revision,
+      workingPath: `${workingRoot}/${name}/program.json`,
+      bytes: encoder.encode(`${canonicalJson(manifest)}\n`),
+    } as const)
+      .addOptional(current ? { expectedCurrentRevisionId: current.definitionRevision.revisionId } : undefined)
+      .add({
+        provenanceRefs: Object.freeze(provenance),
+        activity: Object.freeze({
+          kind: "program.folder_compiled",
+          actor: Object.freeze({ actorId: "noesis-program-library", kind: "noesis" as const }),
+          reason: `Program ${name} from folder ${owner.folderId}`,
+        }),
+      } as const)
+      .finish(),
+  );
+  if (!publication.ok) throw new Error(publication.error.message);
+  return publication.value.definitionRevision;
+}
+/** Compiles a Capability folder's Programs from files the Capability revision also pins. */
+export async function compileCapabilityFolderPrograms(
+  workspace: NoesisWorkspaceStore,
+  input: {
+    readonly capabilityId: string;
+    readonly sessionId: string;
+    readonly files: readonly {
+      readonly path: string;
+      readonly bytes: Uint8Array;
+      readonly revision: FileRevisionRef;
+    }[];
+  },
+) {
+  const owner = Object.freeze({
+    kind: "folder" as const,
+    folderId: input.capabilityId,
+    skillName: input.capabilityId,
+  });
+  const programs = readFolderProgramFiles(input.files);
+  return Object.freeze(
+    await Promise.all(
+      programs.map(async (program) => {
+        const source = input.files.find((file) => file.path === `programs/${program.name}/index.mjs`);
+        return Object.freeze({
+          mode: program.manifest.mode,
+          name: program.name,
+          definitionRevision: await compileFolderProgram(
+            workspace,
+            owner,
+            program,
+            input.sessionId,
+            program.manifest.mode === "script" ? source?.revision : undefined,
+          ),
+        });
+      }),
+    ),
+  );
+}
+/**
+ * Compiles the Programs of a standard skill's folder when the skill is loaded. The skill's files live
+ * outside the workspace, so their bytes are recorded here and this is the exact revision that runs.
+ */
+export async function compileSkillFolderPrograms(
+  workspace: NoesisWorkspaceStore,
+  input: {
+    readonly skillName: string;
+    readonly skillFilePath: string;
+    readonly sessionId: string;
+  },
+): Promise<{
+  readonly scripts: readonly StoredScriptProgram[];
+  readonly workflows: readonly StoredWorkflowProgram[];
+}> {
+  const root = dirname(input.skillFilePath);
+  const programsRoot = join(root, "programs");
+  const entries = await readdir(programsRoot, { withFileTypes: true }).catch(() => []);
+  const files: { path: string; bytes: Uint8Array }[] = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    for (const fileName of ["program.json", "index.mjs"]) {
+      const path = join(programsRoot, entry.name, fileName);
+      const details = await lstat(path).catch(() => undefined);
+      if (!details?.isFile()) continue;
+      files.push({ path: `programs/${entry.name}/${fileName}`, bytes: await readFile(path) });
+    }
+  }
+  if (files.length === 0) return Object.freeze({ scripts: Object.freeze([]), workflows: Object.freeze([]) });
+  const owner = Object.freeze({
+    kind: "folder" as const,
+    folderId: `skill_${sha256(root).slice(0, 32)}`,
+    skillName: input.skillName,
+  });
+  const scripts: StoredScriptProgram[] = [];
+  const workflows: StoredWorkflowProgram[] = [];
+  for (const program of readFolderProgramFiles(files)) {
+    const { workingRoot } = programDefinitionScope(program.manifest.mode, owner);
+    const sourceRevision =
+      program.source === undefined
+        ? undefined
+        : await workspace.definitions.recordCandidateDefinition({
+            workingPath: `${workingRoot}/${program.name}/index.mjs`,
+            bytes: encoder.encode(program.source),
+            actor: Object.freeze({ actorId: "noesis-program-library", kind: "noesis" as const }),
+            reason: `Program ${program.name} from skill ${input.skillName}`,
+          });
+    const definitionRevision = await compileFolderProgram(
+      workspace,
+      owner,
+      program,
+      input.sessionId,
+      sourceRevision,
+    );
+    const manifest = JSON.parse(decoder.decode(await workspace.reads.readRevision(definitionRevision)));
+    if (program.manifest.mode === "script")
+      scripts.push(
+        Object.freeze({ manifest: ScriptManifestSchema.parse(manifest), definitionRevision, owner }),
+      );
+    else
+      workflows.push(
+        Object.freeze({ manifest: WorkflowManifestSchema.parse(manifest), definitionRevision, owner }),
+      );
+  }
+  return Object.freeze({ scripts: Object.freeze(scripts), workflows: Object.freeze(workflows) });
+}
+/** A pinned Program as files a folder can hold, so an export needs nothing outside itself. */
+export async function folderProgramFilesForExport(
+  workspace: NoesisWorkspaceStore,
+  definitionRevision: FileRevisionRef,
+): Promise<readonly { readonly path: string; readonly bytes: Uint8Array }[]> {
+  const stored = JSON.parse(decoder.decode(await workspace.reads.readRevision(definitionRevision)));
+  if (stored.mode === "script") {
+    const manifest = ScriptManifestSchema.parse(stored);
+    return Object.freeze([
+      {
+        path: `programs/${manifest.name}/program.json`,
+        bytes: encoder.encode(
+          `${JSON.stringify(
+            FolderProgramManifestSchema.parse({
+              mode: "script",
+              name: manifest.name,
+              description: manifest.description,
+              inputSchema: manifest.inputSchema,
+              outputSchema: manifest.outputSchema,
+              requiredTools: manifest.requiredTools,
+            }),
+            null,
+            2,
+          )}\n`,
+        ),
+      },
+      {
+        path: `programs/${manifest.name}/index.mjs`,
+        bytes: await workspace.reads.readRevision(manifest.sourceRevision),
+      },
+    ]);
+  }
+  const manifest = WorkflowManifestSchema.parse(stored);
+  return Object.freeze([
+    {
+      path: `programs/${manifest.name}/program.json`,
+      bytes: encoder.encode(
+        `${JSON.stringify(
+          FolderProgramManifestSchema.parse({
+            mode: "workflow",
+            name: manifest.name,
+            description: manifest.description,
+            inputSchema: manifest.inputSchema,
+            outputSchema: manifest.outputSchema,
+            phases: manifest.phases,
+          }),
+          null,
+          2,
+        )}\n`,
+      ),
+    },
+  ]);
 }
 /** A Capability's pin on one exact Program revision. A global Program names no project. */
 export function programEffect(
   mode: ProgramMode,
   name: string,
-  owner: ProgramOwner,
+  owner: Exclude<ProgramOwner, { kind: "folder" }>,
   definitionRevision: FileRevisionRef,
 ) {
   return Object.freeze({

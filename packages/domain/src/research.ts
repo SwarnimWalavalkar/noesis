@@ -102,12 +102,14 @@ export interface PermissionManifest {
 }
 
 /**
- * One exact Capability revision. Its first effect is always the instruction file revision; it may
- * also attach one exact saved Program revision.
+ * One exact Capability revision. Its first effect is always the SKILL.md revision; it may also
+ * attach one exact saved Program revision. A revision pins its whole folder by digest. A revision
+ * written before folders has no `folder` and is a folder of that one file.
  */
 export interface CapabilityRevision {
   readonly capabilityRevisionId: string;
   readonly capabilityId: string;
+  readonly folder?: CapabilityFolder;
   readonly predecessorRevisionId?: string;
   readonly effects: readonly CapabilityEffect[];
   readonly evidenceRefs: readonly EvidenceRef[];
@@ -120,6 +122,28 @@ export interface CapabilityInstructionEffect {
 }
 
 export type ProgramMode = "script" | "workflow";
+
+export interface CapabilityFolder {
+  /** Identifies the whole folder: every file's path and content. */
+  readonly digest: string;
+  readonly files: readonly { readonly path: string; readonly revision: FileRevisionRef }[];
+  /** Programs under `programs/`, pinned to the exact revision compiled from those files. */
+  readonly programs: readonly {
+    readonly mode: ProgramMode;
+    readonly name: string;
+    readonly definitionRevision: FileRevisionRef;
+  }[];
+}
+
+/**
+ * Checks one path inside a Capability folder. It must be relative, stay inside the folder, and name
+ * only plain segments, so a recorded path can never reach outside it when restored or exported.
+ */
+export function isCapabilityFolderPath(path: string): boolean {
+  return path
+    .split("/")
+    .every((segment) => /^[A-Za-z0-9_][A-Za-z0-9._ -]{0,127}$/u.test(segment) && !segment.includes(".."));
+}
 
 /** One immutable revision of an ordinary Program. No `project` means it is in the global library. */
 export interface ProgramRevisionRef {

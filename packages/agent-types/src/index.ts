@@ -402,6 +402,29 @@ export const WorkflowProgramManifestSchema = z.strictObject({
   promotedFrom: ProgramPromotionSchema.exactOptional(),
 });
 export type WorkflowProgramManifest = Readonly<z.infer<typeof WorkflowProgramManifestSchema>>;
+/**
+ * A Program as a file in a skill or Capability folder: `programs/<name>/program.json`, plus
+ * `index.mjs` for a script. It holds only what the Program does, so a folder can be copied anywhere.
+ */
+export const FolderProgramManifestSchema = z.discriminatedUnion("mode", [
+  z.strictObject({
+    mode: z.literal("script"),
+    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+    description: z.string().min(1).max(2048),
+    inputSchema: z.record(z.string(), JsonValueSchema),
+    outputSchema: z.record(z.string(), JsonValueSchema),
+    requiredTools: z.array(z.string().min(1)),
+  }),
+  z.strictObject({
+    mode: z.literal("workflow"),
+    name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+    description: z.string().min(1).max(2048),
+    inputSchema: z.record(z.string(), JsonValueSchema),
+    outputSchema: z.record(z.string(), JsonValueSchema),
+    phases: z.array(ProgramWorkflowPhaseSchema).min(1),
+  }),
+]);
+export type FolderProgramManifest = Readonly<z.infer<typeof FolderProgramManifestSchema>>;
 export const ProgramManifestSchema = z.discriminatedUnion("mode", [
   ScriptProgramManifestSchema,
   WorkflowProgramManifestSchema,
@@ -451,7 +474,18 @@ export type FrozenCapabilityEffect =
       readonly project?: ProjectRef;
       readonly definition: FrozenRevisionMaterial;
     };
+/** A Capability's pinned folder, as one turn sees it. Programs run only after it is loaded. */
+export interface FrozenCapabilityFolder {
+  readonly digest: string;
+  readonly files: readonly { readonly path: string; readonly revision: FileRevisionRef }[];
+  readonly programs: readonly {
+    readonly mode: "script" | "workflow";
+    readonly name: string;
+    readonly definition: FrozenRevisionMaterial;
+  }[];
+}
 export interface FrozenCapabilitySelection {
+  readonly folder?: FrozenCapabilityFolder;
   readonly capabilityId: string;
   readonly name: string;
   readonly description: string;
@@ -648,6 +682,17 @@ const FrozenCapabilityEffectSchema = z.discriminatedUnion("kind", [
     definition: FrozenRevisionMaterialSchema,
   }),
 ]);
+const FrozenCapabilityFolderSchema = z.strictObject({
+  digest: z.string().min(1),
+  files: z.array(z.strictObject({ path: z.string().min(1), revision: FileRevisionRefSchema })),
+  programs: z.array(
+    z.strictObject({
+      mode: z.enum(["script", "workflow"]),
+      name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+      definition: FrozenRevisionMaterialSchema,
+    }),
+  ),
+});
 const FrozenCapabilitySelectionSchema = z.strictObject({
   capabilityId: z.string().min(1),
   name: z.string().min(1),
@@ -662,6 +707,7 @@ const FrozenCapabilitySelectionSchema = z.strictObject({
       isCapabilityRevisionEffects,
       "A frozen Capability starts with its instruction and may attach one Program",
     ),
+  folder: FrozenCapabilityFolderSchema.exactOptional(),
 });
 const FrozenConversationHistoryEntrySchema = z
   .strictObject({
@@ -1160,4 +1206,35 @@ export interface AgentToolDescriptor {
   readonly inputSchemaId: string;
   readonly outputSchemaId: string;
   readonly permissionManifestRef: string;
+}
+
+const CAPABILITY_FOLDER_INDEX_ENTRIES = 40;
+/**
+ * What else is in a Capability's folder, for a model that has it loaded. Everything it names is
+ * pinned by the frozen revision, so a turn reads what was recorded even if the working folder changed.
+ */
+export function capabilityFolderIndex(selection: {
+  readonly capabilityId: string;
+  readonly revision: { readonly capabilityRevisionId: string };
+  readonly folder?: FrozenCapabilityFolder;
+}): readonly string[] {
+  const { folder } = selection;
+  if (!folder) return Object.freeze([]);
+  const files = folder.files.filter((file) => file.path !== "SKILL.md");
+  const fileLines = files.slice(0, CAPABILITY_FOLDER_INDEX_ENTRIES).map((file) => `- ${file.path}`);
+  if (files.length > CAPABILITY_FOLDER_INDEX_ENTRIES)
+    fileLines.push(`- and ${String(files.length - CAPABILITY_FOLDER_INDEX_ENTRIES)} more files`);
+  const programLines = folder.programs
+    .slice(0, CAPABILITY_FOLDER_INDEX_ENTRIES)
+    .map((program) => `- ${program.mode} \`${program.name}\``);
+  const sections: string[] = [];
+  if (fileLines.length > 0)
+    sections.push(
+      `Files in this Capability's folder. Read one inside execute with tools.capabilities.inspect({ view: "file", capabilityId: ${JSON.stringify(selection.capabilityId)}, capabilityRevisionId: ${JSON.stringify(selection.revision.capabilityRevisionId)}, path }):\n${fileLines.join("\n")}`,
+    );
+  if (programLines.length > 0)
+    sections.push(
+      `Programs in this Capability's folder. Run one inside execute with tools.programs.run({ mode, name, input }):\n${programLines.join("\n")}`,
+    );
+  return Object.freeze(sections);
 }

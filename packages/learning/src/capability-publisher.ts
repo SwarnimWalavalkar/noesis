@@ -1,4 +1,8 @@
 import {
+  capabilityDocumentInFolderFormat,
+  capabilityFolderDigest,
+  type CapabilityFolder,
+  isCapabilityFolderPath,
   type ActorRef,
   type CapabilityActivationMode,
   type CapabilityBinding,
@@ -54,7 +58,8 @@ export const CapabilityEffectDraftSchema = z.discriminatedUnion("kind", [
 export const CapabilityProposalSchema = z
   .strictObject({
     name: z.string().trim().min(1).max(160),
-    description: z.string().trim().min(1).max(2_048),
+    // The standard skill format allows 1,024 characters here, and a Capability folder is a skill.
+    description: z.string().trim().min(1).max(1_024),
     applicability: z.string().trim().min(1).max(2_048),
     summary: z.string().trim().min(1).max(2_048),
     rationale: z.string().trim().min(1).max(4_096),
@@ -181,6 +186,16 @@ export interface CapabilityProgramLibrary {
     project: ProjectRef,
     scope?: "project" | "global",
   ) => Promise<Extract<CapabilityEffect, { readonly kind: "program" }> | undefined>;
+  /** Compiles the Programs in a folder's files to exact revisions a turn can run. */
+  readonly compileFolderPrograms?: (input: {
+    readonly capabilityId: string;
+    readonly sessionId: string;
+    readonly files: readonly {
+      readonly path: string;
+      readonly bytes: Uint8Array;
+      readonly revision: FileRevisionRef;
+    }[];
+  }) => Promise<CapabilityFolder["programs"]>;
   /** Copies a project Program into the global library, leaving the original intact. */
   readonly promote?: (
     project: ProjectRef,
@@ -221,18 +236,18 @@ export interface CapabilityPublisher {
   readonly assertCurrentGuidanceFitsAlways: (capabilityId: string) => Promise<void>;
   /** Rejects approving a pending always-active revision whose guidance is too long. */
   readonly assertGateFitsAlways: (gateRequestId: string) => Promise<void>;
-  /** Rewrites a Capability's working file to match its current revision after a restore or approval. */
+  /** Rewrites a Capability's working folder to match its current revision after a restore or approval. */
   readonly syncWorkingDocument: (
     capabilityId: string,
     options?: {
       /** The user restored or approved this revision, so it replaces unapplied file edits. */
       readonly userChoseRevision?: boolean;
-      /** Replace an unapplied edit only while the file still holds these exact bytes. */
-      readonly onlyReplacingDigest?: string;
+      /** Replace an unapplied edit only while each file, by folder path, holds these exact bytes. */
+      readonly onlyReplacing?: ReadonlyMap<string, string>;
     },
   ) => Promise<void>;
   /**
-   * Records direct edits to Capability files as new revisions. An edit that cannot be read is left
+   * Records direct edits to Capability folders as new revisions. An edit that cannot be read is left
    * in place and reported, and the Capability keeps its current revision.
    */
   readonly recordDocumentEdits: (
@@ -328,14 +343,61 @@ function assertAlwaysGuidanceFits(guidance: string): void {
       `An always-active Capability's guidance must be at most ${String(ALWAYS_GUIDANCE_MAX_CHARACTERS)} characters; it has ${String(guidance.length)}. Keep it relevant, or shorten the guidance.`,
     );
 }
-/** The readable file for a new Capability. It keeps this path for every later revision. */
+export const CAPABILITY_DOCUMENT_FILE = "SKILL.md";
+const MAX_FOLDER_FILES = 200;
+const MAX_FOLDER_FILE_BYTES = 1024 * 1024;
+const MAX_FOLDER_BYTES = 8 * 1024 * 1024;
+/** The readable folder for a new Capability. It keeps this path for every later revision. */
 function capabilityDocumentPath(capabilityId: string, name: string): string {
-  return `capabilities/${learnedCapabilitySkillName(capabilityId, name).slice("learned-".length)}.md`;
+  return `capabilities/${learnedCapabilitySkillName(capabilityId, name).slice("learned-".length)}/${CAPABILITY_DOCUMENT_FILE}`;
 }
 
-/** The editable working file for a Capability file revision, outside the candidate area. */
+/**
+ * The editable SKILL.md for a Capability file revision, outside the candidate area. A revision from
+ * before folders recorded `<name>-<id>.md`; its folder is `<name>-<id>/`.
+ */
 export function capabilityWorkingDocumentPath(document: FileRevisionRef): string {
-  return document.workingPath.replace(/^definitions\/candidates\//u, "definitions/");
+  const working = document.workingPath.replace(/^definitions\/candidates\//u, "definitions/");
+  return working.endsWith(`/${CAPABILITY_DOCUMENT_FILE}`)
+    ? working
+    : working.replace(/\.md$/u, `/${CAPABILITY_DOCUMENT_FILE}`);
+}
+
+/** The editable folder that holds a Capability file revision. */
+export function capabilityWorkingFolderPath(document: FileRevisionRef): string {
+  return capabilityWorkingDocumentPath(document).slice(0, -`/${CAPABILITY_DOCUMENT_FILE}`.length);
+}
+
+/** Why a folder cannot become a revision, or undefined when it can. */
+function folderContentProblem(
+  files: readonly { readonly path: string; readonly bytes: Uint8Array }[],
+  unsupported: readonly string[],
+): string | undefined {
+  const link = unsupported[0];
+  if (link) return `${link} is a link or special file. A Capability folder holds plain files only.`;
+  if (files.length > MAX_FOLDER_FILES)
+    return `The folder has ${String(files.length)} files. The limit is ${String(MAX_FOLDER_FILES)}.`;
+  const badPath = files.find((file) => !isCapabilityFolderPath(file.path));
+  if (badPath) return `${badPath.path} is not a usable file name in a Capability folder.`;
+  const large = files.find((file) => file.bytes.length > MAX_FOLDER_FILE_BYTES);
+  if (large) return `${large.path} is larger than ${String(MAX_FOLDER_FILE_BYTES)} bytes.`;
+  const total = files.reduce((sum, file) => sum + file.bytes.length, 0);
+  if (total > MAX_FOLDER_BYTES) return `The folder is larger than ${String(MAX_FOLDER_BYTES)} bytes.`;
+  return undefined;
+}
+
+function folderNameOf(folderPath: string): string {
+  return folderPath.split("/").at(-1) ?? folderPath;
+}
+
+/** What a revision pins, by folder path. A revision from before folders pins its one file. */
+export function capabilityFolderFiles(lifecycle: CapabilityLifecycleRevision): CapabilityFolder["files"] {
+  return (
+    lifecycle.revision.folder?.files ??
+    Object.freeze([
+      Object.freeze({ path: CAPABILITY_DOCUMENT_FILE, revision: capabilityDocumentRevision(lifecycle) }),
+    ])
+  );
 }
 
 /** The Capability file a revision pins: its first effect is always the instruction file. */
@@ -370,6 +432,8 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     readonly project?: ProjectRef;
     readonly actor: ActorRef;
     readonly programResolver?: Pick<CapabilityProgramLibrary, "resolve">;
+    /** The folder's other files and Programs. Without it, a revision keeps its predecessor's. */
+    readonly folderExtras?: Pick<CapabilityFolder, "files" | "programs">;
   }): Promise<{
     readonly definition: CapabilityDefinition;
     readonly revision: CapabilityLifecycleRevision;
@@ -404,8 +468,13 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
           summary: revision.summary,
         }))
       : [];
+    const documentPath = predecessorDocument
+      ? capabilityWorkingDocumentPath(predecessorDocument)
+      : capabilityDocumentPath(input.capabilityId, input.proposal.name);
+    const folderName = folderNameOf(documentPath.slice(0, -`/${CAPABILITY_DOCUMENT_FILE}`.length));
     const bytes = new TextEncoder().encode(
       renderCapabilityDocument(
+        folderName,
         {
           name: input.proposal.name,
           when: input.proposal.applicability,
@@ -434,9 +503,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       ),
     );
     const documentRequest = createConditionalObject({
-      workingPath: predecessorDocument
-        ? capabilityWorkingDocumentPath(predecessorDocument)
-        : capabilityDocumentPath(input.capabilityId, input.proposal.name),
+      workingPath: documentPath,
       bytes,
       actor: input.actor,
       reason: input.proposal.rationale,
@@ -469,6 +536,16 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       Object.freeze({ kind: "instruction" as const, material: document }),
       ...programEffects,
     ]);
+    const extras: Pick<CapabilityFolder, "files" | "programs"> = input.folderExtras ?? {
+      files: input.predecessor
+        ? capabilityFolderFiles(input.predecessor).filter((file) => file.path !== CAPABILITY_DOCUMENT_FILE)
+        : [],
+      programs: input.predecessor?.revision.folder?.programs ?? [],
+    };
+    const folderFiles = Object.freeze([
+      Object.freeze({ path: CAPABILITY_DOCUMENT_FILE, revision: document }),
+      ...extras.files,
+    ]);
     const revision: CapabilityRevision = Object.freeze(
       createConditionalObject({
         capabilityRevisionId,
@@ -479,7 +556,15 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
             ? { predecessorRevisionId: input.predecessor.revision.capabilityRevisionId }
             : undefined,
         )
-        .add({ effects, evidenceRefs: Object.freeze([...input.evidenceRefs]) } as const)
+        .add({
+          effects,
+          folder: Object.freeze({
+            digest: capabilityFolderDigest(folderFiles),
+            files: folderFiles,
+            programs: Object.freeze([...extras.programs]),
+          }),
+          evidenceRefs: Object.freeze([...input.evidenceRefs]),
+        } as const)
         .finish(),
     );
     const reference = capabilityRevisionRef(revision);
@@ -500,7 +585,14 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     });
   };
 
-  const publish: CapabilityPublisher["publish"] = async (decision, context, signal) => {
+  const publish: CapabilityPublisher["publish"] = async (decision, context, signal) =>
+    await publishWithFolder(decision, context, signal, undefined);
+  const publishWithFolder = async (
+    decision: CapabilityDecision,
+    context: CapabilityPublicationContext,
+    signal: AbortSignal,
+    folderExtras: Pick<CapabilityFolder, "files" | "programs"> | undefined,
+  ): Promise<CapabilityPublicationResult> => {
     signal.throwIfAborted();
     if (decision.decision === "no_change")
       return Object.freeze({ status: "no_change" as const, reason: decision.reason });
@@ -632,6 +724,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       } as const)
         .addOptional(context.programResolver ? { programResolver: context.programResolver } : undefined)
         .addOptional(predecessor ? { predecessor } : undefined)
+        .addOptional(folderExtras ? { folderExtras } : undefined)
         .finish(),
     );
     // Ordinary revisions only mount guidance or an already-saved Program, and any later
@@ -892,6 +985,67 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       .finish();
   };
 
+  /** The exact files a revision pins, with their bytes, as they should sit in the working folder. */
+  const pinnedFolderFiles = async (
+    lifecycle: CapabilityLifecycleRevision,
+    folderPath: string,
+  ): Promise<
+    readonly {
+      readonly path: string;
+      readonly bytes: Uint8Array;
+      readonly digest: string;
+      readonly revision: FileRevisionRef;
+    }[]
+  > =>
+    await Promise.all(
+      capabilityFolderFiles(lifecycle).map(async ({ path, revision }) => {
+        const stored = await options.workspace.reads.readRevision(revision);
+        // A revision from before folders keeps its bytes. Its working copy has folder frontmatter.
+        const bytes =
+          lifecycle.revision.folder || path !== CAPABILITY_DOCUMENT_FILE
+            ? stored
+            : new TextEncoder().encode(
+                capabilityDocumentInFolderFormat(folderNameOf(folderPath), new TextDecoder().decode(stored)),
+              );
+        return Object.freeze({ path, bytes, digest: sha256(bytes), revision });
+      }),
+    );
+  /**
+   * Moves a working file from before folders into its folder. It is safe to repeat: the old file
+   * goes away only after its bytes are in the folder or in a recorded revision. An edit Noesis has
+   * not recorded goes into SKILL.md as it is, so the next scan imports it as the user's edit.
+   */
+  const moveSingleFileIntoFolder = async (folderPath: string, pinnedDocument: Uint8Array): Promise<void> => {
+    const legacyPath = `${folderPath}.md`;
+    const legacy = await options.workspace.reads.readWorkingFile(legacyPath);
+    if (!legacy) return;
+    const documentPath = `${folderPath}/${CAPABILITY_DOCUMENT_FILE}`;
+    const legacyDigest = sha256(legacy);
+    const recorded = await options.workspace.reads.latestWorkingRevision(legacyPath);
+    const isUnrecordedEdit = recorded?.revision.contentDigest !== legacyDigest;
+    if (isUnrecordedEdit)
+      await options.workspace.recordDirectEdit(
+        legacyPath,
+        userActor,
+        "Edit carried into a Capability folder",
+      );
+    const current = await options.workspace.reads.readWorkingFile(documentPath);
+    const replaceable = !current || (await isUnchangedNoesisWrite(documentPath, current));
+    if (replaceable) {
+      const carried = isUnrecordedEdit ? legacy : pinnedDocument;
+      await options.workspace.definitions.recordWorkingDefinition({
+        workingPath: documentPath,
+        bytes: carried,
+        actor: isUnrecordedEdit ? userActor : systemActor,
+        reason: "Moved a Capability file into its folder",
+      });
+      const written = await options.workspace.reads.readWorkingFile(documentPath);
+      if (!written || sha256(written) !== sha256(carried))
+        throw new Error(`Capability folder ${folderPath} did not receive its file`);
+    }
+    await options.workspace.definitions.removeWorkingFile(legacyPath, "definitions/capabilities");
+  };
+
   // Syncs for one Capability run one at a time. Each reads the binding when it starts, so the last
   // sync always writes the current revision even when publications race.
   const syncQueues = new Map<string, Promise<void>>();
@@ -901,7 +1055,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       .catch(() => undefined)
       .then(
         async () =>
-          await syncNow(capabilityId, options_?.userChoseRevision === true, options_?.onlyReplacingDigest),
+          await syncNow(capabilityId, options_?.userChoseRevision === true, options_?.onlyReplacing),
       );
     syncQueues.set(capabilityId, next);
     try {
@@ -913,7 +1067,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
   const syncNow = async (
     capabilityId: string,
     userChoseRevision: boolean,
-    onlyReplacingDigest: string | undefined,
+    onlyReplacing: ReadonlyMap<string, string> | undefined,
   ): Promise<void> => {
     const binding = await options.store.getBinding(capabilityId);
     if (!binding) return;
@@ -921,8 +1075,9 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     if (!lifecycle) return;
     const document = capabilityDocumentRevision(lifecycle);
     // A restore or approval may select a revision with an older name or "when" text.
-    const bytes = await options.workspace.reads.readRevision(document);
-    const parsed = parseCapabilityDocument(new TextDecoder().decode(bytes));
+    const parsed = parseCapabilityDocument(
+      new TextDecoder().decode(await options.workspace.reads.readRevision(document)),
+    );
     const definition = await options.store.getDefinition(capabilityId);
     if (
       parsed.ok &&
@@ -939,28 +1094,54 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       });
       await options.store.updateDefinition(updated);
     }
-    const path = capabilityWorkingDocumentPath(document);
-    const working = await options.workspace.reads.readWorkingFile(path);
-    if (working && sha256(working) === document.contentDigest) return;
-    if (working && !(await isUnchangedNoesisWrite(path, working))) {
-      // The file holds an edit Noesis has not recorded yet. A publication leaves it, so the next edit
-      // scan applies the user's edit on top of this revision. The user's own restore or approval
-      // replaces it, after keeping its bytes as a revision so nothing is lost.
-      if (!userChoseRevision) return;
-      if (onlyReplacingDigest !== undefined && sha256(working) !== onlyReplacingDigest) return;
-      await options.workspace.recordDirectEdit(
-        path,
-        userActor,
-        "Unapplied edit replaced by the user's restore",
-      );
+    const folderPath = capabilityWorkingFolderPath(document);
+    const pinned = await pinnedFolderFiles(lifecycle, folderPath);
+    const pinnedDocument = pinned.find((file) => file.path === CAPABILITY_DOCUMENT_FILE);
+    if (pinnedDocument) await moveSingleFileIntoFolder(folderPath, pinnedDocument.bytes);
+    for (const file of pinned) {
+      const path = `${folderPath}/${file.path}`;
+      const working = await options.workspace.reads.readWorkingFile(path);
+      if (working && sha256(working) === file.digest) continue;
+      if (working && !(await isUnchangedNoesisWrite(path, working))) {
+        // The file holds an edit Noesis has not recorded yet. A publication leaves it, so the next
+        // scan applies the user's edit on top of this revision. The user's own restore or approval
+        // replaces it, after keeping its bytes as a revision so nothing is lost.
+        if (!userChoseRevision) continue;
+        if (onlyReplacing && onlyReplacing.get(file.path) !== sha256(working)) continue;
+        await options.workspace.recordDirectEdit(
+          path,
+          userActor,
+          "Unapplied edit replaced by the user's restore",
+        );
+      }
+      await options.workspace.definitions.recordWorkingDefinition({
+        workingPath: path,
+        bytes: file.bytes,
+        actor: systemActor,
+        reason: "Match the Capability folder to its current revision",
+        provenanceRefs: [file.revision],
+      });
     }
-    await options.workspace.definitions.recordWorkingDefinition({
-      workingPath: path,
-      bytes,
-      actor: systemActor,
-      reason: "Match the Capability file to its current revision",
-      provenanceRefs: [document],
-    });
+    // Scanned files are handled above, so anything else appeared after that scan began.
+    if (onlyReplacing) return;
+    const expected = new Set(pinned.map((file) => file.path));
+    const { files } = await options.workspace.reads.listWorkingFiles(folderPath);
+    for (const extra of files) {
+      if (expected.has(extra)) continue;
+      const path = `${folderPath}/${extra}`;
+      const working = await options.workspace.reads.readWorkingFile(path);
+      if (!working) continue;
+      const recorded = await options.workspace.reads.latestWorkingRevision(path);
+      if (recorded?.revision.contentDigest !== sha256(working)) {
+        if (!userChoseRevision) continue;
+        await options.workspace.recordDirectEdit(
+          path,
+          userActor,
+          "Unapplied file removed by the user's restore",
+        );
+      }
+      await options.workspace.definitions.removeWorkingFile(path, folderPath);
+    }
   };
 
   const recordDocumentEdits: CapabilityPublisher["recordDocumentEdits"] = async (context, signal) => {
@@ -975,14 +1156,51 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       const lifecycle = await options.store.getRevision(binding.revision);
       if (!lifecycle) continue;
       const document = capabilityDocumentRevision(lifecycle);
+      const folderPath = capabilityWorkingFolderPath(document);
       const path = capabilityWorkingDocumentPath(document);
+      const pinned = await pinnedFolderFiles(lifecycle, folderPath);
+      const pinnedDocument = pinned.find((file) => file.path === CAPABILITY_DOCUMENT_FILE);
+      if (!pinnedDocument) continue;
+      const moved = await moveSingleFileIntoFolder(folderPath, pinnedDocument.bytes).then(
+        () => undefined,
+        (cause: Error) => cause.message,
+      );
+      if (moved !== undefined) {
+        problems.push({ capabilityId: binding.capabilityId, path: folderPath, error: moved });
+        continue;
+      }
       const working = await options.workspace.reads.readWorkingFile(path);
-      if (!working || sha256(working) === document.contentDigest) continue;
+      if (!working) continue;
+      const listing = await options.workspace.reads.listWorkingFiles(folderPath);
+      const workingFiles = await Promise.all(
+        listing.files.map(async (file) => {
+          const bytes = await options.workspace.reads.readWorkingFile(`${folderPath}/${file}`);
+          return bytes ? [Object.freeze({ path: file, bytes, digest: sha256(bytes) })] : [];
+        }),
+      ).then((groups) => groups.flat());
+      const pinnedByPath = new Map(pinned.map((file) => [file.path, file] as const));
+      const changed = workingFiles.filter((file) => pinnedByPath.get(file.path)?.digest !== file.digest);
+      const removed = pinned.filter((file) => !workingFiles.some((item) => item.path === file.path));
+      if (changed.length === 0 && removed.length === 0 && listing.unsupported.length === 0) continue;
       // A file Noesis wrote that was never brought up to date, e.g. Noesis stopped right after
       // publishing, is synced instead of imported as the user's edit.
-      const writtenByNoesis = await isUnchangedNoesisWrite(path, working);
+      const writtenByNoesis =
+        removed.length === 0 &&
+        listing.unsupported.length === 0 &&
+        (
+          await Promise.all(
+            changed.map(
+              async (file) => await isUnchangedNoesisWrite(`${folderPath}/${file.path}`, file.bytes),
+            ),
+          )
+        ).every(Boolean);
       if (writtenByNoesis) {
         await syncWorkingDocument(binding.capabilityId);
+        continue;
+      }
+      const folderProblem = folderContentProblem(workingFiles, listing.unsupported);
+      if (folderProblem) {
+        problems.push({ capabilityId: binding.capabilityId, path: folderPath, error: folderProblem });
         continue;
       }
       const parsed = parseCapabilityDocument(new TextDecoder().decode(working));
@@ -997,19 +1215,19 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         name: parsed.content.name,
         description: parsed.content.description,
         applicability: parsed.content.when,
-        summary: "Edited directly in its Capability file.",
-        rationale: "The user edited the Capability file.",
-        anticipatedEffect: "Noesis follows the edited guidance from the next turn.",
+        summary: "Edited directly in its Capability folder.",
+        rationale: "The user edited the Capability folder.",
+        anticipatedEffect: "Noesis follows the edited folder from the next turn.",
         effects: [
           { kind: "instruction", content: parsed.content.guidance },
           ...current.drafts.filter((draft) => draft.kind === "program"),
         ],
         consequence: "ordinary",
-        consequenceDescription: "The user changed the guidance directly.",
+        consequenceDescription: "The user changed the folder directly.",
         evidence: {
           kind: "explicit_request",
-          quote: `Edited ${path}`,
-          wouldOtherwise: "Noesis would keep following the guidance the user replaced.",
+          quote: `Edited ${folderPath}`,
+          wouldOtherwise: "Noesis would keep following the folder the user replaced.",
         },
       });
       if (!proposal.success) {
@@ -1023,12 +1241,39 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         continue;
       }
       const outcome = await (async () => {
-        const edit = await options.workspace.recordDirectEdit(
-          path,
-          userActor,
-          "Direct edit to a Capability file",
-        );
-        return await publish(
+        const edits: FileRevisionRef[] = [];
+        const extras: { path: string; bytes: Uint8Array; revision: FileRevisionRef }[] = [];
+        for (const file of workingFiles) {
+          if (file.path === CAPABILITY_DOCUMENT_FILE) continue;
+          const unchanged = pinnedByPath.get(file.path);
+          if (unchanged?.digest === file.digest) {
+            extras.push({ path: file.path, bytes: file.bytes, revision: unchanged.revision });
+            continue;
+          }
+          const revision = await options.workspace.recordDirectEdit(
+            `${folderPath}/${file.path}`,
+            userActor,
+            "Direct edit to a Capability folder",
+          );
+          edits.push(revision);
+          extras.push({ path: file.path, bytes: file.bytes, revision });
+        }
+        if (sha256(working) !== pinnedDocument.digest || edits.length === 0)
+          edits.push(
+            await options.workspace.recordDirectEdit(path, userActor, "Direct edit to a Capability file"),
+          );
+        const hasPrograms = extras.some((file) => file.path.startsWith("programs/"));
+        if (hasPrograms && !programs.compileFolderPrograms)
+          throw new Error("This workspace cannot read Programs in a Capability folder");
+        const folderPrograms =
+          hasPrograms && programs.compileFolderPrograms
+            ? await programs.compileFolderPrograms({
+                capabilityId: binding.capabilityId,
+                sessionId: context.sessionId,
+                files: extras,
+              })
+            : [];
+        return await publishWithFolder(
           {
             decision: "revise",
             capabilityId: binding.capabilityId,
@@ -1038,19 +1283,25 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
           {
             project: current.project ?? context.project,
             sessionId: context.sessionId,
-            evidenceRefs: [edit],
+            evidenceRefs: edits,
             actor: userActor,
-            interpretation: "The user edited the Capability file directly",
+            interpretation: "The user edited the Capability folder directly",
             programResolver: current.resolver,
           },
           signal,
+          Object.freeze({
+            files: Object.freeze(
+              extras.map(({ path: file, revision }) => Object.freeze({ path: file, revision })),
+            ),
+            programs: folderPrograms,
+          }),
         );
       })().then(
         (result) => ({ ok: true as const, result }),
         (cause: Error) => ({ ok: false as const, message: cause.message }),
       );
       if (!outcome.ok) {
-        // The edit stays in the file. Noesis reports it and keeps the current revision.
+        // The edit stays in the folder. Noesis reports it and keeps the current revision.
         problems.push({ capabilityId: binding.capabilityId, path, error: outcome.message });
         continue;
       }
@@ -1060,7 +1311,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       if (result.status === "revised") {
         const synced = await syncWorkingDocument(binding.capabilityId, {
           userChoseRevision: true,
-          onlyReplacingDigest: sha256(working),
+          onlyReplacing: new Map(workingFiles.map((file) => [file.path, file.digest] as const)),
         }).then(
           () => undefined,
           (cause: Error) => cause.message,

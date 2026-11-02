@@ -61,9 +61,9 @@ test("a name resolves project first, keeps both visible, and stays frozen for th
     workflows: [],
   });
   expect(library.script("shared")?.definitionRevision.revisionId).toBe("project-1");
-  expect(library.script("shared", "global")?.definitionRevision.revisionId).toBe("global-1");
+  expect(library.script("shared", { scope: "global" })?.definitionRevision.revisionId).toBe("global-1");
   expect(library.script("only-global")?.definitionRevision.revisionId).toBe("only-global-1");
-  expect(library.script("only-global", "project")).toBeUndefined();
+  expect(library.script("only-global", { scope: "project" })).toBeUndefined();
   expect(library.isShadowed("script", GLOBAL_PROGRAM_OWNER, "shared")).toBe(true);
   expect(library.isShadowed("script", GLOBAL_PROGRAM_OWNER, "only-global")).toBe(false);
   expect(library.isShadowed("script", projectOwner, "shared")).toBe(false);

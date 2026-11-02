@@ -18,6 +18,7 @@ import {
   type AgentRuntimeRequest,
   type AgentRuntimeResult,
   type AgentSteerResult,
+  capabilityFolderIndex,
   type FrozenTurnPlan,
   type NoesisAgentRuntime,
   renderFrozenConversationHistoryContent,
@@ -176,6 +177,7 @@ function onDemandCapabilitySkill(
     `# ${selection.name}`,
     `Use when: ${selection.applicability}`,
     ...instructions.map((material) => capabilityGuidance(material.content).trim()),
+    ...capabilityFolderIndex(selection),
   ].join("\n\n");
   return Object.freeze({
     name: learnedCapabilitySkillName(selection.capabilityId, selection.name),

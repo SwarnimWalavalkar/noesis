@@ -131,6 +131,11 @@ export interface WorkspaceReadPort {
     ref: DatabaseRowRef<Table>,
   ) => Promise<Readonly<Record<string, string | number | bigint | Uint8Array | null>> | undefined>;
   readonly readWorkingFile: (workingPath: string) => Promise<Uint8Array | undefined>;
+  /** The files under one definition directory, relative to it. Links and devices are `unsupported`. */
+  readonly listWorkingFiles: (workingDirectory: string) => Promise<{
+    readonly files: readonly string[];
+    readonly unsupported: readonly string[];
+  }>;
   /** The newest recorded revision of a working path and who recorded it. */
   readonly latestWorkingRevision: (
     workingPath: string,
@@ -146,6 +151,8 @@ export interface WorkspaceReadPort {
 export interface DefinitionFilePort {
   readonly recordWorkingDefinition: (request: DefinitionWriteRequest) => Promise<FileRevisionRef>;
   readonly recordCandidateDefinition: (request: DefinitionWriteRequest) => Promise<FileRevisionRef>;
+  /** Removes one working file and any subfolders it leaves empty, up to `keepDirectory`. */
+  readonly removeWorkingFile: (workingPath: string, keepDirectory: string) => Promise<void>;
 }
 
 export interface DefinitionMetadataRecord {
@@ -182,6 +189,7 @@ export interface DefinitionMetadataPort {
     definitionId: string,
   ) => Promise<DefinitionMetadataRecord | undefined>;
   readonly listCurrent: (namespace: string) => Promise<readonly DefinitionMetadataRecord[]>;
+  readonly getByRevisionId: (definitionRevisionId: string) => Promise<DefinitionMetadataRecord | undefined>;
   readonly listRevisions: (
     namespace: string,
     definitionId: string,
