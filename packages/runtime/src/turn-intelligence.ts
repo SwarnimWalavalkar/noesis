@@ -30,7 +30,13 @@ import {
   toJsonValue,
   validateCapabilityEffects,
 } from "@noesis/domain";
-import { isCapabilityBindingAdmissionConflictError, type NoesisWorkspaceStore } from "@noesis/workspace";
+import {
+  isCapabilityBindingAdmissionConflictError,
+  type MessageRecord,
+  type NoesisWorkspaceStore,
+  type Sensitivity,
+  type SessionRecord,
+} from "@noesis/workspace";
 import type { ProtectedWorkspaceRuntime } from "../../workspace/src/protected-runtime.ts";
 import { contextNotebookTokenBudget, resolveContextNotebook } from "./session-compaction.ts";
 const decoder = new TextDecoder("utf8", { fatal: true });
@@ -106,6 +112,64 @@ interface ContextDocumentLine {
   readonly stableId: string;
   readonly kindOrder: number;
   readonly value: import("@noesis/domain").JsonValue;
+  readonly record: "message" | "tool_call" | "code_execution" | "model_call" | "workflow_run";
+  readonly turnId?: string | undefined;
+  /** The row's own label. Code, model, and workflow rows have none. */
+  readonly sensitivity?: Sensitivity | undefined;
+}
+/** Which recorded rows a session view may contain. Secret rows are never included. */
+export interface SessionViewDisclosure {
+  readonly includePrivate: boolean;
+}
+function sensitivityRank(sensitivity: Sensitivity): number {
+  return sensitivity === "secret" ? 2 : sensitivity === "private" ? 1 : 0;
+}
+function higherSensitivity(left: Sensitivity, right: Sensitivity): Sensitivity {
+  return sensitivityRank(left) >= sensitivityRank(right) ? left : right;
+}
+function explicitSessionSensitivity(metadata: SessionRecord["metadata"]): Sensitivity {
+  const explicit = metadata["sensitivity"];
+  return explicit === "secret" || explicit === "private" ? explicit : "normal";
+}
+function metadataTurnId(metadata: MessageRecord["metadata"]): string | undefined {
+  const turnId = metadata["turnId"];
+  return typeof turnId === "string" && turnId.length > 0 ? turnId : undefined;
+}
+/**
+ * Replaces each row the disclosure does not admit with a marker that carries no content, so a reader
+ * can see that the view is partial. A row without its own label takes the highest label recorded in
+ * its turn, because its results and errors can repeat anything that turn read. Without a turn it takes
+ * the session's highest label.
+ */
+function applySessionViewDisclosure(
+  lines: readonly ContextDocumentLine[],
+  disclosure: SessionViewDisclosure,
+  sessionId: string,
+  labels: {
+    readonly session: Sensitivity;
+    readonly highestInSession: Sensitivity;
+    readonly highestByTurn: ReadonlyMap<string, Sensitivity>;
+  },
+): readonly ContextDocumentLine[] {
+  return lines.map((line) => {
+    const recorded =
+      line.sensitivity ??
+      (line.turnId === undefined
+        ? labels.highestInSession
+        : (labels.highestByTurn.get(line.turnId) ?? labels.highestInSession));
+    const effective = higherSensitivity(labels.session, recorded);
+    if (effective === "normal" || (effective === "private" && disclosure.includePrivate)) return line;
+    return Object.freeze({
+      ...line,
+      value: toJsonValue({
+        type: "omitted",
+        record: line.record,
+        sessionId,
+        sensitivity: effective,
+        occurredAt: line.occurredAt,
+      }),
+    });
+  });
 }
 function optionalJsonFields(
   value: Readonly<Record<string, import("@noesis/domain").JsonValue | undefined>>,
@@ -120,6 +184,7 @@ function compareCodePoints(left: string, right: string): number {
 async function freezeContextDocument(
   workspace: NoesisWorkspaceStore,
   sessionId: string,
+  disclosure?: SessionViewDisclosure,
 ): Promise<FrozenContextDocument> {
   const [session, messages, toolCalls, codeExecutions, modelCalls, workflowRuns] = await Promise.all([
     workspace.operational.sessions.get(sessionId),
@@ -137,6 +202,9 @@ async function freezeContextDocument(
         occurredAt: message.createdAt,
         stableId: message.messageId,
         kindOrder: 0,
+        record: "message",
+        turnId: metadataTurnId(message.metadata),
+        sensitivity: message.sensitivity,
         value: toJsonValue({
           type: "message",
           messageId: message.messageId,
@@ -159,6 +227,9 @@ async function freezeContextDocument(
         occurredAt: call.createdAt,
         stableId: call.toolCallId,
         kindOrder: 1,
+        record: "tool_call",
+        turnId: call.turnId,
+        sensitivity: call.sensitivity,
         value: toJsonValue({
           type: "tool_call",
           toolCallId: call.toolCallId,
@@ -188,6 +259,8 @@ async function freezeContextDocument(
         occurredAt: execution.startedAt,
         stableId: execution.executionId,
         kindOrder: 2,
+        record: "code_execution",
+        turnId: execution.turnId,
         value: toJsonValue({
           type: "code_execution",
           executionId: execution.executionId,
@@ -218,6 +291,8 @@ async function freezeContextDocument(
         occurredAt: call.startedAt,
         stableId: call.modelCallId,
         kindOrder: 3,
+        record: "model_call",
+        turnId: call.turnId,
         value: toJsonValue({
           type: "model_call",
           modelCallId: call.modelCallId,
@@ -248,6 +323,8 @@ async function freezeContextDocument(
         occurredAt: run.createdAt,
         stableId: run.runId,
         kindOrder: 4,
+        record: "workflow_run",
+        turnId: run.turnId,
         value: toJsonValue({
           type: "workflow_run",
           runId: run.runId,
@@ -276,10 +353,31 @@ async function freezeContextDocument(
       left.kindOrder - right.kindOrder ||
       compareCodePoints(left.stableId, right.stableId),
   );
-  const content = lines.length === 0 ? "" : `${lines.map((line) => canonicalJson(line.value)).join("\n")}\n`;
+  if (!session) throw new Error(`Context document requires session ${sessionId}`);
+  let disclosed: readonly ContextDocumentLine[] = lines;
+  if (disclosure) {
+    const outcomes = await workspace.operational.outcomes.listForSession(sessionId);
+    const highestByTurn = new Map<string, Sensitivity>();
+    let highestInSession: Sensitivity = "normal";
+    const record = (turnId: string | undefined, sensitivity: Sensitivity): void => {
+      highestInSession = higherSensitivity(highestInSession, sensitivity);
+      if (turnId !== undefined)
+        highestByTurn.set(turnId, higherSensitivity(highestByTurn.get(turnId) ?? "normal", sensitivity));
+    };
+    // Messages the document leaves out, such as system and tool roles, still carry their turn's label.
+    for (const message of messages) record(metadataTurnId(message.metadata), message.sensitivity);
+    for (const call of toolCalls) record(call.turnId, call.sensitivity);
+    for (const outcome of outcomes) record(outcome.turnId, outcome.sensitivity);
+    disclosed = applySessionViewDisclosure(lines, disclosure, sessionId, {
+      session: explicitSessionSensitivity(session.metadata),
+      highestInSession,
+      highestByTurn,
+    });
+  }
+  const content =
+    disclosed.length === 0 ? "" : `${disclosed.map((line) => canonicalJson(line.value)).join("\n")}\n`;
   const bytes = new TextEncoder().encode(content);
   const contentDigest = sha256(bytes);
-  if (!session) throw new Error(`Context document requires session ${sessionId}`);
   const artifact = await workspace.artifacts.writeArtifact({
     path: `context-documents/${sha256(sessionId).slice(0, 32)}/${contentDigest}.jsonl`,
     mediaType: "application/x-ndjson",
@@ -301,6 +399,17 @@ async function freezeContextDocument(
     byteLength: bytes.length,
     contentDigest,
   });
+}
+/**
+ * Freezes a snapshot of a session for reading through the same document format as `context`. The
+ * caller authorizes the session and disclosure first.
+ */
+export async function freezeSessionViewDocument(
+  workspace: NoesisWorkspaceStore,
+  sessionId: string,
+  disclosure: SessionViewDisclosure,
+): Promise<FrozenContextDocument> {
+  return await freezeContextDocument(workspace, sessionId, disclosure);
 }
 export interface TurnIntelligencePlanner {
   readonly planAndAdmit: (request: TurnPlanningRequest) => Promise<FrozenTurnPlan>;
