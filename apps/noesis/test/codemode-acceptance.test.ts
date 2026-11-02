@@ -217,6 +217,437 @@ describe("production codemode journey", () => {
     await runtime.shutdown();
   });
 
+  test("codemode reads a past session as a context view without its secret content", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-session-view-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    const nestedRequests: PiSubAgentTaskRequest[] = [];
+    let currentSource = "";
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText }) => {
+        if (context.systemPrompt?.includes("subagent inside Noesis")) return "vermilion-otter";
+        if (context.messages.at(-1)?.role === "toolResult") return "Done.";
+        if (lastUserText.includes("Seed"))
+          return controlledToolCallResponse(
+            "execute",
+            { source: 'return "lynx-execution-result";' },
+            "call-seed-execution",
+          );
+        return controlledToolCallResponse("execute", { source: currentSource }, "call-read-session");
+      },
+    });
+    const taskRunner = createPiSubAgentTaskRunner(process.cwd(), controlled.models);
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgentTaskRunner: Object.freeze({
+        ...taskRunner,
+        run: async (request: PiSubAgentTaskRequest) => {
+          nestedRequests.push(request);
+          return await taskRunner.run(request);
+        },
+      }),
+      createAgent: (codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const { operational } = runtime.debug.workspace;
+    const past = await runtime.startTrail({ title: "Past session" });
+    const seed = await runtime.debug.runTurn(past.trailId, "Seed the launch phrase vermilion-otter.");
+    const seedTurnId = seed.frozenTurnPlan?.turnId;
+    if (!seedTurnId) throw new Error("Expected the seed turn's identity");
+    const label = async (messageId: string, content: string, sensitivity: "private" | "secret") =>
+      await operational.messages.put({
+        messageId,
+        sessionId: past.trailId,
+        role: "user",
+        content,
+        sensitivity,
+        createdAt: "2030-01-01T00:00:00.000Z",
+        metadata: sensitivity === "secret" ? { turnId: seedTurnId } : {},
+      });
+    await label("message-private-row", "private-marmot-content", "private");
+    await label("message-secret-row", "secret-falcon-content", "secret");
+    const removed = await runtime.startTrail({ title: "Deleted session" });
+    await runtime.debug.runTurn(removed.trailId, "Seed something to delete.");
+    await operational.sessions.delete(removed.trailId, "2030-01-02T00:00:00.000Z");
+
+    const current = await runtime.startTrail({ title: "Current session" });
+    const rejection = (call: string) =>
+      `await (async () => { try { await ${call}; return "allowed"; } catch (error) { return error.message; } })()`;
+    currentSource = `
+      const view = await tools.history.open_session({ sessionId: ${JSON.stringify(past.trailId)} });
+      const byName = await noesis.invoke("history.open_session", { sessionId: ${JSON.stringify(past.trailId)} });
+      const text = await view.text();
+      const start = text.indexOf("vermilion-otter");
+      const slice = view.slice(start, start + "vermilion-otter".length);
+      const child = await agents.spawn({ prompt: ["Return the launch phrase.", slice] });
+      const answer = await agents.wait({ taskId: child.taskId });
+      return {
+        text,
+        length: view.length,
+        sliceText: await slice.text(),
+        reopenedHandle: byName.slice(0, 8),
+        answer: answer.result,
+        privateDenied: ${rejection(`tools.history.open_session({ sessionId: ${JSON.stringify(past.trailId)}, includePrivate: true })`)},
+        deleted: ${rejection(`tools.history.open_session({ sessionId: ${JSON.stringify(removed.trailId)} })`)},
+        missing: ${rejection('tools.history.open_session({ sessionId: "no-such-session" })')},
+      };
+    `;
+    await runtime.debug.runTurn(current.trailId, "Read the past session.");
+    const value = z
+      .object({
+        text: z.string(),
+        length: z.number(),
+        sliceText: z.string(),
+        reopenedHandle: z.object({
+          __noesisContext: z.object({ documentId: z.string(), start: z.number(), end: z.number() }),
+        }),
+        answer: z.string(),
+        privateDenied: z.string(),
+        deleted: z.string(),
+        missing: z.string(),
+      })
+      .parse((await operational.codeExecutions.listForSession(current.trailId)).at(-1)?.result);
+
+    expect(value.sliceText).toBe("vermilion-otter");
+    expect(value.length).toBe(value.text.length);
+    expect(value.answer).toBe("vermilion-otter");
+    expect(nestedRequests).toHaveLength(1);
+    expect(nestedRequests[0]?.prompt).toContain("vermilion-otter");
+    expect(nestedRequests[0]?.prompt).toContain("(untrusted)");
+    expect(value.privateDenied).toContain("[unauthorized]");
+    expect(value.deleted).toContain("[not_found]");
+    expect(value.missing).toContain("[not_found]");
+
+    const rows = value.text
+      .trimEnd()
+      .split("\n")
+      .map((line) =>
+        z.looseObject({ type: z.string(), record: z.string().optional() }).parse(JSON.parse(line)),
+      );
+    expect(value.text).not.toContain("secret-falcon-content");
+    expect(value.text).not.toContain("private-marmot-content");
+    expect(rows.filter((row) => row.type === "omitted").map((row) => row.record)).toEqual(
+      expect.arrayContaining(["message", "code_execution", "tool_call"]),
+    );
+    // A secret row taints every row of its turn except the user's own messages.
+    expect(rows.some((row) => row.type === "code_execution" || row.type === "tool_call")).toBe(false);
+    expect(rows.some((row) => row.type === "message")).toBe(true);
+
+    // The recorded tool call holds the document's location, not its content.
+    const recorded = (await operational.toolCalls.listForSession(current.trailId)).filter(
+      (call) => call.toolName === "history.open_session",
+    );
+    expect(recorded.filter((call) => call.status === "completed")).toHaveLength(2);
+    expect(JSON.stringify(recorded)).not.toContain("vermilion-otter");
+    const documentId = value.reopenedHandle.__noesisContext.documentId;
+
+    // A handle opened by an earlier execution cannot fill a prompt in a later one.
+    currentSource = `
+      return await (async () => {
+        try {
+          await noesis.invoke("agents.spawn", {
+            prompt: { __noesisContext: { documentId: ${JSON.stringify(documentId)}, start: 0, end: 8 } },
+          });
+          return "allowed";
+        } catch (error) {
+          return error.message;
+        }
+      })();
+    `;
+    await runtime.debug.runTurn(current.trailId, "Reuse the earlier handle.");
+    expect((await operational.codeExecutions.listForSession(current.trailId)).at(-1)?.result).toContain(
+      "does not belong to this Code Mode execution",
+    );
+    expect(nestedRequests).toHaveLength(1);
+    await runtime.shutdown();
+  });
+
+  test("a workflow run fails closed when a session it read has changed", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-session-view-workflow-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    let source = "";
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText }) => {
+        if (context.messages.at(-1)?.role === "toolResult") return "Done.";
+        if (lastUserText.includes("Seed")) return "Seeded.";
+        return controlledToolCallResponse("execute", { source }, "call-workflow-step");
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"disabled in acceptance"}',
+          }),
+        }),
+    });
+    const { operational } = runtime.debug.workspace;
+    const past = await runtime.startTrail({ title: "Past session" });
+    await runtime.debug.runTurn(past.trailId, "Seed the pinned fact.");
+    const current = await runtime.startTrail({ title: "Workflow session" });
+    const open = `tools.history.open_session({ sessionId: ${JSON.stringify(past.trailId)} })`;
+    const openSchema = '{ type: "object" }';
+    source = `
+      await tools.programs.save({ mode: "workflow", name: "read-past",
+        description: "Read a past session in two phases.",
+        inputSchema: ${openSchema}, outputSchema: ${openSchema},
+        phases: [
+          { name: "first-read", description: "Read the session.",
+            source: ${JSON.stringify(`const view = await ${open}; return { length: view.length };`)},
+            inputSchema: ${openSchema}, outputSchema: ${openSchema}, requiredTools: ["history.open_session"] },
+          { name: "second-read", description: "Read it again, pausing until told to continue.",
+            source: ${JSON.stringify(`const view = await ${open}; if (!input.allow) throw new Error("pause"); return { same: view.length === input.length };`)},
+            inputSchema: ${openSchema}, outputSchema: ${openSchema}, requiredTools: ["history.open_session"] },
+        ],
+      });
+      const saved = await tools.programs.describe({ mode: "workflow", name: "read-past" });
+      return await (async () => {
+        try {
+          return await tools.programs.run({ mode: "workflow", name: "read-past",
+            definitionRevisionId: saved.definitionRevision.revisionId, input: {} });
+        } catch (error) {
+          return { failed: error.message };
+        }
+      })();
+    `;
+    await runtime.debug.runTurn(current.trailId, "Start the first run.");
+    const [unchanged] = await operational.workflows.listRunsForSession(current.trailId);
+    if (!unchanged) throw new Error("Expected a paused workflow run");
+    const [firstPhase] = await operational.workflows.listPhases(unchanged.runId);
+    if (!firstPhase?.output) throw new Error("Expected the first phase's output");
+
+    const resume = (runId: string) => `
+      return await (async () => {
+        try {
+          return await tools.programs.resume({ runId: ${JSON.stringify(runId)},
+            correction: { ...${JSON.stringify(firstPhase.output)}, allow: true } });
+        } catch (error) {
+          return { failed: error.message };
+        }
+      })();
+    `;
+    source = resume(unchanged.runId);
+    await runtime.debug.runTurn(current.trailId, "Resume while the session is unchanged.");
+    expect((await operational.workflows.getRun(unchanged.runId))?.status).toBe("completed");
+
+    source = `
+      const saved = await tools.programs.describe({ mode: "workflow", name: "read-past" });
+      return await (async () => {
+        try {
+          return await tools.programs.run({ mode: "workflow", name: "read-past",
+            definitionRevisionId: saved.definitionRevision.revisionId, input: {} });
+        } catch (error) {
+          return { failed: error.message };
+        }
+      })();
+    `;
+    await runtime.debug.runTurn(current.trailId, "Start the second run.");
+    const changed = (await operational.workflows.listRunsForSession(current.trailId)).at(-1);
+    if (!changed || changed.runId === unchanged.runId) throw new Error("Expected a second workflow run");
+    expect(changed.status).toBe("paused");
+
+    await operational.messages.put({
+      messageId: "message-after-pin",
+      sessionId: past.trailId,
+      role: "user",
+      content: "This arrived after the run pinned the session.",
+      sensitivity: "normal",
+      createdAt: "2030-01-01T00:00:00.000Z",
+      metadata: {},
+    });
+    source = resume(changed.runId);
+    await runtime.debug.runTurn(current.trailId, "Resume after the session changed.");
+    const phases = await operational.workflows.listPhases(changed.runId);
+    expect(phases).toMatchObject([
+      { phaseName: "first-read", status: "completed" },
+      { phaseName: "second-read", status: "failed" },
+    ]);
+    expect(phases[1]?.error).toContain("pinned to different content");
+    expect((await operational.workflows.getRun(changed.runId))?.status).toBe("paused");
+    await runtime.shutdown();
+  });
+
+  test("a later row cannot carry earlier sensitive content out of a session view", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-session-view-taint-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    let source = "return 'unset';";
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText }) => {
+        if (context.messages.at(-1)?.role === "toolResult") return "Echoed it back.";
+        if (lastUserText.includes("Seed")) return "Seeded.";
+        return controlledToolCallResponse("execute", { source }, "call-taint");
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      createAgent: (codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"Controlled acceptance fixture."}',
+          }),
+        }),
+    });
+    const { operational } = runtime.debug.workspace;
+    const past = await runtime.startTrail({ title: "Past session" });
+    await operational.messages.put({
+      messageId: "message-early-secret",
+      sessionId: past.trailId,
+      role: "user",
+      content: "secret-falcon-content",
+      sensitivity: "secret",
+      createdAt: "2001-01-01T00:00:00.000Z",
+      metadata: {},
+    });
+    await runtime.debug.runTurn(past.trailId, "Seed a normal request.");
+    source = "return 'echo of secret-falcon-content';";
+    await runtime.debug.runTurn(past.trailId, "Repeat what you saw.");
+    const recorded = await operational.codeExecutions.listForSession(past.trailId);
+    expect(JSON.stringify(recorded.at(-1)?.result)).toContain("secret-falcon-content");
+
+    const current = await runtime.startTrail({ title: "Current session" });
+    source = `const view = await tools.history.open_session({ sessionId: ${JSON.stringify(past.trailId)} });
+      return await view.text();`;
+    await runtime.debug.runTurn(current.trailId, "Read the past session.");
+    const text = z
+      .string()
+      .parse((await operational.codeExecutions.listForSession(current.trailId)).at(-1)?.result);
+    expect(text).toContain("Repeat what you saw.");
+    expect(text).not.toContain("secret-falcon-content");
+    await runtime.shutdown();
+  });
+
+  test("a subagent spawned by a workflow phase reads under the run's session view pins", async () => {
+    const home = await mkdtemp(join(tmpdir(), "noesis-session-view-child-pin-"));
+    roots.push(home);
+    const config = await resolveNoesisConfig({
+      home,
+      env: Object.freeze({}),
+      cli: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
+    });
+    let source = "return 'unset';";
+    let pastId = "";
+    const controlled = createControlledPiModels({
+      respond: ({ context, lastUserText }) => {
+        if (lastUserText.includes("Child read")) {
+          if (context.messages.at(-1)?.role === "toolResult") return "Child finished.";
+          return controlledToolCallResponse(
+            "execute",
+            {
+              source: `return await (async () => {
+                try { return (await tools.history.open_session({ sessionId: ${JSON.stringify(pastId)} })).length; }
+                catch (error) { return error.message; } })();`,
+            },
+            "call-child-read",
+          );
+        }
+        if (context.messages.at(-1)?.role === "toolResult") return "Done.";
+        if (lastUserText.includes("Seed")) return "Seeded.";
+        return controlledToolCallResponse("execute", { source }, "call-parent");
+      },
+    });
+    const runtime = await createApplicationRuntimeComposition({
+      config,
+      subAgentTaskRunner: createPiSubAgentTaskRunner(process.cwd(), controlled.models),
+      createAgent: (codeExecution) =>
+        createPiAgentRuntime(process.cwd(), controlled.models, { codeExecution }),
+      createRoleRunner: (configurations) =>
+        createScriptedAgentRoleRunner({
+          variants: configurations,
+          respond: () => ({
+            text: '{"observation":{"kind":"other","reason":"Controlled acceptance fixture."},"decision":"no_change","reason":"Controlled acceptance fixture."}',
+          }),
+        }),
+    });
+    const { operational } = runtime.debug.workspace;
+    const past = await runtime.startTrail({ title: "Past session" });
+    pastId = past.trailId;
+    await runtime.debug.runTurn(past.trailId, "Seed the pinned fact.");
+    const current = await runtime.startTrail({ title: "Workflow session" });
+    const schema = '{ type: "object" }';
+    source = `
+      await tools.programs.save({ mode: "workflow", name: "child-pin",
+        description: "Pin a session, then read it from a child.",
+        inputSchema: ${schema}, outputSchema: ${schema},
+        phases: [
+          { name: "pin", description: "Pin the session.",
+            source: ${JSON.stringify(`const view = await tools.history.open_session({ sessionId: ${JSON.stringify(past.trailId)} }); return { length: view.length };`)},
+            inputSchema: ${schema}, outputSchema: ${schema}, requiredTools: ["history.open_session"] },
+          { name: "child", description: "Read from a child.",
+            source: ${JSON.stringify(`if (!input.allow) throw new Error("pause");
+              const child = await agents.spawn({ prompt: "Child read", tools: ["history.open_session"] });
+              const settled = await agents.wait({ taskId: child.taskId });
+              return { status: settled.status };`)},
+            inputSchema: ${schema}, outputSchema: ${schema}, requiredTools: ["agents.spawn", "agents.wait", "history.open_session"] },
+        ],
+      });
+      const saved = await tools.programs.describe({ mode: "workflow", name: "child-pin" });
+      return await (async () => {
+        try {
+          return await tools.programs.run({ mode: "workflow", name: "child-pin",
+            definitionRevisionId: saved.definitionRevision.revisionId, input: {} });
+        } catch (error) {
+          return { failed: error.message };
+        }
+      })();
+    `;
+    await runtime.debug.runTurn(current.trailId, "Start the run.");
+    const [run] = await operational.workflows.listRunsForSession(current.trailId);
+    if (!run) throw new Error("Expected a paused workflow run");
+    const [firstPhase] = await operational.workflows.listPhases(run.runId);
+    if (!firstPhase?.output) throw new Error("Expected the first phase's output");
+    await operational.messages.put({
+      messageId: "message-after-child-pin",
+      sessionId: past.trailId,
+      role: "user",
+      content: "This arrived after the run pinned the session.",
+      sensitivity: "normal",
+      createdAt: "2030-01-01T00:00:00.000Z",
+      metadata: {},
+    });
+    source = `return await tools.programs.resume({ runId: ${JSON.stringify(run.runId)},
+      correction: { ...${JSON.stringify(firstPhase.output)}, allow: true } });`;
+    await runtime.debug.runTurn(current.trailId, "Resume.");
+    const children = await operational.subAgents.listForProject(run.projectId ?? "");
+    expect(children).toHaveLength(1);
+    const childOutputs = (
+      await Promise.all(
+        children.map(async (agent) => await operational.codeExecutions.listForSession(agent.childSessionId)),
+      )
+    ).flat();
+    expect(JSON.stringify(childOutputs.map((execution) => execution.result))).toContain(
+      "pinned to different content",
+    );
+    await runtime.shutdown();
+  });
+
   test("a tool-using subagent stays out of the main transcript and remains fully inspectable", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-subagent-tools-acceptance-"));
     roots.push(home);

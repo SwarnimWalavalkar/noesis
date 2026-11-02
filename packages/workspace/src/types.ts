@@ -645,6 +645,17 @@ export interface OperationalRepositories {
     readonly listRunsForSession: (sessionId: string) => Promise<readonly WorkflowRunRecord[]>;
     readonly putPhase: (record: WorkflowPhaseRunRecord) => Promise<void>;
     readonly listPhases: (runId: string) => Promise<readonly WorkflowPhaseRunRecord[]>;
+    /**
+     * Pins the first digest a run reads for a session view and returns the pinned digest. A later
+     * read that returns a different digest has seen changed content.
+     */
+    readonly pinSessionView: (pin: {
+      readonly runId: string;
+      readonly sessionId: string;
+      readonly includePrivate: boolean;
+      readonly digest: string;
+      readonly pinnedAt: string;
+    }) => Promise<string>;
     readonly interruptRunning: (interruptedAt: string) => Promise<{
       readonly runs: number;
       readonly phases: number;

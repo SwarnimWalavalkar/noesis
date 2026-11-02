@@ -375,6 +375,35 @@ describe("AC-07 session search tools", () => {
     expect(JSON.stringify(result.value).split(JSON.stringify(evidence.content))).toHaveLength(2);
   });
 
+  test("authorizes opening a whole session under the search rules", async () => {
+    const sessionTools = tools({ currentSessionId: "session-b" });
+    await expect(
+      sessionTools.authorizeOpenSession({ sessionId: "session-b", includePrivate: true }),
+    ).resolves.toEqual({
+      ok: true,
+      value: { sessionId: "session-b", includePrivate: true },
+    });
+    await expect(sessionTools.authorizeOpenSession({ sessionId: "session-a" })).resolves.toEqual({
+      ok: true,
+      value: { sessionId: "session-a", includePrivate: false },
+    });
+    await expect(
+      sessionTools.authorizeOpenSession({ sessionId: "session-a", includePrivate: true }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "unauthorized" } });
+    await expect(sessionTools.authorizeOpenSession({ sessionId: "missing" })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "not_found" },
+    });
+    await expect(sessionTools.authorizeOpenSession({ sessionId: "" })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "invalid_input" },
+    });
+    await workspace.operational.sessions.delete("session-a", "2026-11-02T00:00:00.000Z");
+    await expect(sessionTools.authorizeOpenSession({ sessionId: "session-a" })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "not_found" },
+    });
+  });
   test("requires explicit session authorization for private search and never returns secret evidence", async () => {
     const denied = await tools().searchSessions({
       query: "acquisition zephyr",
