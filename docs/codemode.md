@@ -2,7 +2,7 @@
 
 Codemode lets the model compose tool calls in JavaScript through `execute`. The direct tools are file read, file write with exact replacement, shell, and `execute`. Other tools are progressively discoverable through codemode.
 
-Tool calls through codemode use the same frozen Tool Catalog, Broker, and authority as direct calls. Generated code can save project Programs in script or workflow mode. Reflection or the foreground agent can attach an exact saved Program revision to a Capability.
+Tool calls through codemode use the same frozen Tool Catalog, Broker, and authority as direct calls. Generated code can save project or global Programs in script or workflow mode, and run them by name or by exact revision. Reflection or the foreground agent can attach an exact saved Program revision to a Capability.
 
 ## Session context
 

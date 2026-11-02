@@ -17,11 +17,11 @@ Never claim an action or system state without runtime evidence.
 
 Active Capabilities and skills may add relevant instructions. The stable core stays short.
 
-Active Capability revisions contribute exact effects frozen at turn start. Each revision has exactly one instruction effect, the Capability file revision, and may attach one exact saved project Program revision in script or workflow mode.
+Active Capability revisions contribute exact effects frozen at turn start. Each revision has exactly one instruction effect, the Capability file revision, and may attach one exact saved Program revision in script or workflow mode.
 
 The built-in `noesis` skill holds the operational guidance for inspecting and deliberately refining these systems. Its compact name and description appear with other skill metadata; its body loads only when relevant or when the user invokes `/noesis` or its `/refine` alias. The stable core prompt does not duplicate the publication contract.
 
-A Program effect pins the same immutable definition revision used by the ordinary runner and records its script or workflow mode. Capability storage never copies the Program into a second format. The model creates and revises project Programs through the foreground `execute` path. Ambient reflection may attach an existing saved Program to a Capability.
+A Program effect pins the same immutable definition revision used by the ordinary runner and records its script or workflow mode. Capability storage never copies the Program into a second format. A Capability that binds a global Program keeps whatever scope it has, and one that binds a project Program stays in that project. The model creates and revises Programs through the foreground `execute` path. Ambient reflection may attach an existing saved Program to a Capability.
 
 An `always` Capability puts its instructions in the system prompt of every eligible turn. Every eligible `relevant` Capability is listed with the other skills by name and "when" text. Its instructions form one learned skill that the foreground model loads with `skills.load` when the Capability applies. Planning makes no separate routing model call, and the turn trace records which Capabilities the model loaded.
 
@@ -162,7 +162,7 @@ The parent may choose the child system prompt, prompt, thinking level, and canon
 
 A retained agent outlives the foreground turn and session that created it, but not the primary Noesis process. It has no independent provider-round, tool-call, or wall-clock ceiling; explicit cancel, close, or process shutdown are its lifecycle boundaries. Every provider round and child tool effect reserves and settles under the child principal using its frozen authority. SQLite records actors, tasks, mailbox delivery, exact timeline positions, model calls, artifacts, usage, errors, and nested Code Mode lineage. The main transcript contains only foreground activity. The fixed TUI strip shows running process actors across sessions, and `Ctrl+O` opens any retained actor as a read-only transcript of its prompt, reasoning, assistant stream, nested tools, messages, route, usage, and errors.
 
-New project Programs are created through `execute` with `programs.save`. The selected `mode` is `script` for one bounded computation or `workflow` for a durable phased procedure. Saving returns an immutable definition revision; `programs.run` requires that exact revision, so same-turn verification cannot silently drift. Programs do not enter a proposal queue. Reflection may later use their results as evidence for a broader change.
+New Programs are created through `execute` with `programs.save`. The selected `mode` is `script` for one bounded computation or `workflow` for a durable phased procedure, and `scope` is `project` by default or `global` when other projects should reach it. Saving returns an immutable definition revision. `programs.run` takes that exact revision, or a name that resolves when the turn is frozen, project before global, and the run records the exact revision it used. `programs.promote` moves a project Program to global as a new revision that cites its source. The session reviewer may make the same decision with evidence, through the same publisher. Programs do not enter a proposal queue. Reflection may later use their results as evidence for a broader change.
 
 The foreground agent may also attach a newly saved and verified Program to a Capability in the same coherent execution. The Capability publisher resolves the ordinary immutable project definition; it does not accept model-authored revision IDs or executable bytes for a Program effect.
 
@@ -180,7 +180,7 @@ The MCP host supports prompts, resources, resource templates, completion, resour
 
 ## Project programs
 
-When the current turn produces reusable executable mechanics, Noesis may save a project Program without waiting for reflection or evaluation. Script mode runs reusable JavaScript; workflow mode owns durable phases and resume behavior. The Program is available at once through `programs.run`, which uses the same frozen Tool Catalog, Broker, and permissions as other tool calls.
+When the current turn produces reusable executable mechanics, Noesis may save a Program without waiting for reflection or evaluation. Script mode runs reusable JavaScript; workflow mode owns durable phases and resume behavior. The Program is available at once through `programs.run`, which uses the same frozen Tool Catalog, Broker, and permissions as other tool calls.
 
 Saving a Program does not itself create a new semantic tool. A Capability supplies the missing meaning: name, description, applicability, scope, activation, evidence, feedback, and restoration. When selected on a later turn, that Capability contributes a typed adapter for its exact Program revision. Tool discovery marks the implementation as a Program and identifies the Capability exposure, so the model knows it may inspect, repair, or extend the editable Program rather than treating it as an opaque built-in.
 

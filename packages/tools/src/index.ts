@@ -37,7 +37,8 @@ export type ToolImplementation =
   | Readonly<{
       kind: "program";
       mode: ProgramMode;
-      projectId: string;
+      /** Absent when the Program is in the global library. */
+      projectId?: string;
       name: string;
       definitionRevisionId: string;
     }>;

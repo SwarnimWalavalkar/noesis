@@ -1622,6 +1622,95 @@ describe("WorkspaceStore", () => {
     lineageDatabase.close();
     store.close();
   });
+  test("records a global Program's run under the running project and rejects a foreign identity", async () => {
+    const store = await createWorkspaceStore(await temporary("codemode-global-program"));
+    await store.operational.sessions.put(session("session-global-program"));
+    const sourceBytes = text('return "global";');
+    const sourceRevision = await store.definitions.recordWorkingDefinition({
+      workingPath: "programs/global/script/shared/index.mjs",
+      bytes: sourceBytes,
+      actor,
+    });
+    const createdFrom = {
+      sessionId: "session-global-program",
+      turnId: "turn-global-program",
+      planId: "plan-global-program",
+    };
+    const publication = await store.definitionPublications.publish({
+      namespace: "program:global:script",
+      definitionId: "shared",
+      revision: 1,
+      workingPath: "programs/global/script/shared/program.json",
+      bytes: text(
+        canonicalJson({
+          kind: "noesis_program",
+          mode: "script",
+          name: "shared",
+          description: "Return one global value.",
+          revision: 1,
+          sourceRevision,
+          inputSchema: { type: "object" },
+          outputSchema: { type: "string" },
+          requiredTools: [],
+          createdFrom,
+        }),
+      ),
+      provenanceRefs: Object.freeze([sourceRevision]),
+      activity: Object.freeze({ kind: "program.saved", actor }),
+    });
+    if (!publication.ok) throw new Error(publication.error.message);
+    const definitionRevisionId = publication.value.definitionRevision.revisionId;
+    const writeSource = async (executionId: string) =>
+      await store.artifacts.writeArtifact({
+        path: `codemode/${executionId}/source.mjs`,
+        mediaType: "text/javascript",
+        bytes: sourceBytes,
+        actor,
+        relationshipRefs: Object.freeze([]),
+      });
+    const execution = {
+      logicalExecutionId: "logical-global",
+      sessionId: "session-global-program",
+      projectId: "project-running",
+      catalogId: "catalog-test",
+      catalogDigest: digest("a"),
+      sourceDigest: sourceRevision.contentDigest,
+      status: "running",
+      callCount: 0,
+      startedAt: "2026-07-26T00:00:00.000Z",
+    } as const;
+    const source = await writeSource("execution-global");
+    await store.operational.codeExecutions.put({
+      ...execution,
+      executionId: "execution-global",
+      sourceArtifactId: source.artifactId,
+      program: Object.freeze({ mode: "script", name: "shared", revision: 1, definitionRevisionId }),
+    });
+    expect((await store.operational.codeExecutions.get("execution-global"))?.program).toEqual({
+      mode: "script",
+      name: "shared",
+      revision: 1,
+      definitionRevisionId,
+    });
+    // A project cannot claim the global revision as its own.
+    const foreign = await writeSource("execution-foreign");
+    await expect(
+      store.operational.codeExecutions.put({
+        ...execution,
+        executionId: "execution-foreign",
+        logicalExecutionId: "logical-foreign",
+        sourceArtifactId: foreign.artifactId,
+        program: Object.freeze({
+          mode: "script",
+          projectId: "project-running",
+          name: "shared",
+          revision: 1,
+          definitionRevisionId,
+        }),
+      }),
+    ).rejects.toThrow(/exact Program revision/u);
+    store.close();
+  });
   test("binds script Program execution identity to the exact referenced source revision", async () => {
     const store = await createWorkspaceStore(await temporary("codemode-program-identity"));
     await store.operational.sessions.put(session("session-program-identity"));
@@ -1864,7 +1953,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 60 });
+    ).toEqual({ version: 61 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -2494,7 +2583,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 60,
+      version: 61,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2599,7 +2688,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 60,
+      version: 61,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2750,7 +2839,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 60,
+      version: 61,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     for (const table of [
@@ -2822,7 +2911,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 60,
+      version: 61,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2991,7 +3080,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(60);
+    expect(versions.at(-1)).toBe(61);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

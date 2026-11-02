@@ -2967,13 +2967,16 @@ function createOperationalRepositories(
   };
   const readProgramDefinition = async (program: {
     readonly mode: "script" | "workflow";
-    readonly projectId: string;
+    /** Namespaces to look in: the owning project's, the global library's, or both for a workflow run. */
+    readonly owners: readonly string[];
     readonly name: string;
     readonly revision: number;
     readonly definitionRevisionId: string;
   }): Promise<JsonValue> => {
-    const definition = db
-      .prepare(`SELECT revision.snapshot_path, revision.content_digest
+    const definition = program.owners
+      .map((owner) =>
+        db
+          .prepare(`SELECT revision.snapshot_path, revision.content_digest
            FROM definition_revision_metadata AS metadata
            JOIN file_revisions AS revision
              ON revision.revision_id = metadata.definition_revision_id
@@ -2981,12 +2984,14 @@ function createOperationalRepositories(
              AND metadata.definition_id = ?
              AND metadata.revision = ?
              AND metadata.definition_revision_id = ?`)
-      .get(
-        `program:${program.projectId}:${program.mode}`,
-        program.name,
-        program.revision,
-        program.definitionRevisionId,
-      );
+          .get(
+            `program:${owner}:${program.mode}`,
+            program.name,
+            program.revision,
+            program.definitionRevisionId,
+          ),
+      )
+      .find((row) => row !== undefined);
     if (definition === undefined)
       throw new Error("Operational record must reference one exact Program revision");
     return JsonValueSchema.parse(
@@ -3002,9 +3007,14 @@ function createOperationalRepositories(
   };
   const putCodeExecution = async (record: CodeExecutionRecord): Promise<void> => {
     if (record.program) {
-      if (record.projectId !== record.program.projectId)
+      if (record.program.projectId !== undefined && record.projectId !== record.program.projectId)
         throw new Error(`Codemode execution ${record.executionId} Program project does not match its owner`);
-      const manifest = ScriptProgramManifestSchema.parse(await readProgramDefinition(record.program));
+      const manifest = ScriptProgramManifestSchema.parse(
+        await readProgramDefinition({
+          ...record.program,
+          owners: [record.program.projectId ?? "global"],
+        }),
+      );
       if (
         manifest.name !== record.program.name ||
         manifest.revision !== record.program.revision ||
@@ -3566,7 +3576,7 @@ function createOperationalRepositories(
       const manifest = WorkflowProgramManifestSchema.parse(
         await readProgramDefinition({
           mode: "workflow",
-          projectId: record.projectId,
+          owners: [record.projectId, "global"],
           name: record.workflowName,
           revision: record.workflowRevision,
           definitionRevisionId: record.definitionRevisionId,

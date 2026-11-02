@@ -121,6 +121,15 @@ export const CapabilityDecisionSchema = z.discriminatedUnion("decision", [
 
 export type CapabilityDecision = Readonly<z.infer<typeof CapabilityDecisionSchema>>;
 
+/** Promotes one project Program to the global library. The decision is the model's or the user's. */
+export const ProgramPromotionDecisionSchema = z.strictObject({
+  mode: z.enum(["script", "workflow"]),
+  name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+  reason: z.string().trim().min(1).max(2_048),
+  expectedGlobalRevisionId: z.string().min(1).exactOptional(),
+});
+export type ProgramPromotionDecision = Readonly<z.infer<typeof ProgramPromotionDecisionSchema>>;
+
 export const CapabilityPublicationResultSchema = z.discriminatedUnion("status", [
   z.strictObject({
     status: z.literal("no_change"),
@@ -140,10 +149,22 @@ export const CapabilityPublicationResultSchema = z.discriminatedUnion("status", 
 
 export type CapabilityPublicationResult = Readonly<z.infer<typeof CapabilityPublicationResultSchema>>;
 
+export const ProgramPromotionResultSchema = z.strictObject({
+  status: z.literal("program_promoted"),
+  mode: z.enum(["script", "workflow"]),
+  name: z.string(),
+  definitionRevisionId: z.string(),
+  programRevision: z.number().int().positive(),
+  unchanged: z.boolean(),
+  message: z.string(),
+});
+export type ProgramPromotionResult = Readonly<z.infer<typeof ProgramPromotionResultSchema>>;
+
 export interface CapabilityProgramLibrary {
   readonly list: (project: ProjectRef) => Promise<
     readonly {
       readonly mode: "script" | "workflow";
+      readonly scope: "project" | "global";
       readonly name: string;
       readonly description: string;
       readonly revision: number;
@@ -155,6 +176,18 @@ export interface CapabilityProgramLibrary {
     name: string,
     project: ProjectRef,
   ) => Promise<Extract<CapabilityEffect, { readonly kind: "program" }> | undefined>;
+  /** Copies a project Program into the global library, leaving the original intact. */
+  readonly promote?: (
+    project: ProjectRef,
+    input: ProgramPromotionDecision & {
+      readonly evidenceRefs: readonly EvidenceRef[];
+      readonly actor: ActorRef;
+    },
+  ) => Promise<{
+    readonly definitionRevision: FileRevisionRef;
+    readonly revision: number;
+    readonly unchanged: boolean;
+  }>;
 }
 
 export interface CapabilityPublicationContext {
@@ -173,6 +206,12 @@ export interface CapabilityPublisher {
     context: CapabilityPublicationContext,
     signal: AbortSignal,
   ) => Promise<CapabilityPublicationResult>;
+  /** Moves a project Program to the global library as a new revision that cites its source. */
+  readonly promoteProgram: (
+    decision: ProgramPromotionDecision,
+    context: Pick<CapabilityPublicationContext, "project" | "evidenceRefs" | "actor">,
+    signal: AbortSignal,
+  ) => Promise<ProgramPromotionResult>;
   /** Rejects an always-active mode when the current guidance is too long for every prompt. */
   readonly assertCurrentGuidanceFitsAlways: (capabilityId: string) => Promise<void>;
   /** Rejects approving a pending always-active revision whose guidance is too long. */
@@ -248,12 +287,16 @@ export function capabilityScopeDecision(
 function proposedScope(
   proposal: CapabilityProposal,
   context: Pick<CapabilityPublicationContext, "project" | "sessionId">,
+  effects: readonly CapabilityEffect[],
   current?: CapabilityScope,
 ): CapabilityScope {
-  const hasProjectProgram = proposal.effects.some((effect) => effect.kind === "program");
-  if (hasProjectProgram) {
+  // A project Program only exists in its project. A global Program leaves the scope free.
+  const projectProgram = effects.find((effect) => effect.kind === "program" && effect.program.project);
+  if (projectProgram?.kind === "program") {
     if (proposal.scope !== undefined && proposal.scope !== "current_project")
-      throw new Error("Program Capability effects require current-project scope");
+      throw new Error(
+        `Project Program ${projectProgram.program.name} requires current-project scope. Promote it to global to use it more widely.`,
+      );
     return Object.freeze({ kind: "project", project: Object.freeze({ ...context.project }) });
   }
   return proposal.scope === undefined
@@ -582,10 +625,10 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         .addOptional(predecessor ? { predecessor } : undefined)
         .finish(),
     );
-    // Ordinary revisions only mount guidance or an already-saved project Program, and any later
+    // Ordinary revisions only mount guidance or an already-saved Program, and any later
     // execution still passes through that Program's frozen Broker and AuthorityBoundary.
     const requiresGate = proposal.consequence !== "ordinary";
-    const nextScope = proposedScope(proposal, context, binding?.scope);
+    const nextScope = proposedScope(proposal, context, authored.revision.revision.effects, binding?.scope);
     const nextActivationMode = proposedActivationMode(proposal, binding?.activationMode);
     if (nextActivationMode === "always") await assertRevisionGuidanceFitsAlways(authored.revision);
 
@@ -681,6 +724,27 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       status: updated.status === "stale" ? ("stale" as const) : ("revised" as const),
       capabilityId,
       message: authored.revision.summary,
+    });
+  };
+
+  const promoteProgram: CapabilityPublisher["promoteProgram"] = async (decision, context, signal) => {
+    signal.throwIfAborted();
+    if (!programs.promote) throw new Error("This workspace has no Program library to promote into");
+    const promoted = await programs.promote(context.project, {
+      ...decision,
+      evidenceRefs: normalizedEvidence(context.evidenceRefs),
+      actor: context.actor,
+    });
+    return Object.freeze({
+      status: "program_promoted" as const,
+      mode: decision.mode,
+      name: decision.name,
+      definitionRevisionId: promoted.definitionRevision.revisionId,
+      programRevision: promoted.revision,
+      unchanged: promoted.unchanged,
+      message: promoted.unchanged
+        ? `Program ${decision.name} is already global`
+        : `Promoted Program ${decision.name} to global: ${decision.reason}`,
     });
   };
 
@@ -991,6 +1055,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
 
   return Object.freeze({
     publish,
+    promoteProgram,
     replacePendingGate,
     assertCurrentGuidanceFitsAlways,
     assertGateFitsAlways,

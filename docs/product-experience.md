@@ -16,7 +16,7 @@ Noesis follows one broad loop, but it does not force every session through every
 
 The current interaction must be useful on its own. Development over time is an added benefit, not a cost charged to every conversation.
 
-An explicit project change does not wait for this loop. Noesis may publish and use a project Program in script or workflow mode at once through `execute`. Reflection may later consolidate its lessons into a Capability.
+An explicit project change does not wait for this loop. Noesis may publish and use a project or global Program in script or workflow mode at once through `execute`. Reflection may later consolidate its lessons into a Capability.
 
 Deliberate self-improvement does not wait for the ambient loop either. While working with the user, the foreground agent can inspect current Capabilities, gather evidence, and author one complete create, revise, pause, restore, or binding-change decision. Protected code supplies the admitted turn and evidence, records exact immutable materials, checks the expected binding, and applies the same gate used by ambient reflection. It does not make a second model call to reinterpret the foreground decision. The resulting revision is eligible from a later frozen turn.
 
@@ -140,7 +140,7 @@ Ambient reflection or the foreground agent may activate an ordinary exact Capabi
 
 Subagents may investigate or critique a possible refinement, but they cannot publish it. The foreground agent retains the richer user collaboration context and makes the final semantic decision.
 
-The model creates project Programs in script or workflow mode through `execute`. A Capability that uses a Program points to the same immutable definition revision. It never creates a parallel executable definition.
+The model creates project or global Programs in script or workflow mode through `execute`. A Capability that uses a Program points to the same immutable definition revision. It never creates a parallel executable definition.
 
 Credential export, recovery or audit control, and irreversible external actions without foreground intent pause for an explicit approve, deny, or natural-language change decision. Protected code retains ownership of workspace integrity and exact restoration.
 
@@ -174,7 +174,7 @@ The user can ask why the Capability changed, inspect the evidence and reasoning,
 
 The user asks Noesis to preserve a method they just developed, or uses `/refine` with a concrete request. Noesis loads its built-in self-knowledge, inspects overlapping Capabilities and exact predecessor material, and gathers relevant evidence during the same foreground execution.
 
-If a lasting ability is justified, the foreground agent authors the complete Capability and exact effects itself. The runtime validates and publishes that decision without a separate reflector pass. If a reusable Program is part of the ability, Noesis first saves and verifies the ordinary project Program in the appropriate mode, then attaches its immutable revision. The final response reports the authoritative publication result. Ambient reflection later observes that recorded action and should normally avoid duplicating it.
+If a lasting ability is justified, the foreground agent authors the complete Capability and exact effects itself. The runtime validates and publishes that decision without a separate reflector pass. If a reusable Program is part of the ability, Noesis first saves and verifies the ordinary Program in the appropriate mode, then attaches its immutable revision. The final response reports the authoritative publication result. Ambient reflection later observes that recorded action and should normally avoid duplicating it.
 
 ### Clear execution remains simple
 

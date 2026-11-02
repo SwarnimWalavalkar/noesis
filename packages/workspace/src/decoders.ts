@@ -53,7 +53,7 @@ const ToolCallStatusSchema = z.enum(["requested", "running", "completed", "faile
 const CodeExecutionStatusSchema = z.enum(["running", "completed", "failed", "cancelled", "interrupted"]);
 const ScriptProgramExecutionIdentitySchema = z.strictObject({
   mode: z.literal("script"),
-  projectId: z.string().min(1),
+  projectId: z.string().min(1).exactOptional(),
   name: z.string().min(1),
   revision: z.number().int().positive(),
   definitionRevisionId: z.string().min(1),
@@ -256,13 +256,16 @@ export function decodeCodeExecution(row: DatabaseRow | undefined): CodeExecution
     .addOptional(
       hasProgramIdentity
         ? {
-            program: ScriptProgramExecutionIdentitySchema.parse({
-              mode: programMode,
-              projectId: programProjectId,
-              name: programName,
-              revision: programRevision,
-              definitionRevisionId: programDefinitionRevisionId,
-            }),
+            program: ScriptProgramExecutionIdentitySchema.parse(
+              createConditionalObject({ mode: programMode } as const)
+                .addOptional(programProjectId === undefined ? undefined : { projectId: programProjectId })
+                .add({
+                  name: programName,
+                  revision: programRevision,
+                  definitionRevisionId: programDefinitionRevisionId,
+                } as const)
+                .finish(),
+            ),
           }
         : undefined,
     )

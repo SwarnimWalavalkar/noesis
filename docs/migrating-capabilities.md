@@ -44,7 +44,7 @@ Load the `noesis` skill. I want to bring back my learned Capabilities from the p
    - `effects`: one `instruction` effect whose `content` is the guidance, unchanged.
    - `summary`: "Migrated from the previous Capability format."
    - `rationale` and `anticipatedEffect`: one short sentence each.
-   - `scope`: `global`, unless the guidance names a saved script or workflow of this project. In that case use `current_project` and also attach that saved Program as a `program` effect if `programs` lists it.
+   - `scope`: `global`, unless the guidance names a saved script or workflow of this project. In that case use `current_project` and also attach that saved Program as a `program` effect if `programs` lists it. A global Program can be attached with `global` scope.
    - `activationMode`: `relevant`, unless the guidance clearly must apply to every turn. Then use `always`, but only if the guidance is at most 2,000 characters.
    - `consequence`: `ordinary`, with a `consequenceDescription` that says only model guidance changes.
    - `evidence`: kind `explicit_request`, quote my exact words "I want to bring back my learned Capabilities from the previous format.", and a `wouldOtherwise` that says I would have to repeat this guidance.

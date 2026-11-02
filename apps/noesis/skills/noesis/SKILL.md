@@ -91,7 +91,7 @@ return { previous: result.previous.agents, now: result.effective.agents, signedI
 ## Choose the smallest lasting form
 
 - Answer normally when nothing should persist.
-- Save a Program in `script` mode for one reusable computation or `workflow` mode for a durable multi-phase procedure. Verify a newly saved Program by running its exact revision before depending on it.
+- Save a Program in `script` mode for one reusable computation or `workflow` mode for a durable multi-phase procedure. Save it in the project by default, or with `scope: "global"` when other projects need it. Verify a newly saved Program by running its exact revision before depending on it. Use `programs.promote` to move a project Program to global when the evidence shows another project needs it. Promotion creates a new revision that cites the project revision and changes nothing in the project.
 - Create or revise a Capability when a lasting fact, preference, criterion, or ability should change Noesis's behavior in future situations. Its instruction drafts become the guidance of one readable Markdown file, and it may attach an exact already-saved Program revision.
 
 Each Capability lives in one file under `<home>/definitions/capabilities/`, and `capabilities.inspect` detail returns its path as `file`. The file has `name`, `when`, and `description` frontmatter, then the guidance, then notes Noesis writes. When the user wants to change a Capability's wording, you may edit the file directly with file write. Before the next turn, Noesis records a valid edit as a new revision. An edit it cannot read or apply stays in the file, keeps the current revision, and is reported in `/learning`. Status, scope, and mode are not in the file; change them through `capabilities.refine`.
@@ -116,11 +116,11 @@ Use `noesis.search("capability inspect refine")` to rediscover the relevant tool
 
 - State the future situation in `applicability`, not keywords or a regex.
 - Make every effect complete enough to cause the intended behavior. Preserve useful predecessor behavior when revising.
-- New portable Capabilities normally remain globally eligible and semantically `relevant`. Narrow to the current project or session only when the behavior truly belongs there. Program effects require current-project scope.
+- New portable Capabilities normally remain globally eligible and semantically `relevant`. Narrow to the current project or session only when the behavior truly belongs there. A project Program effect requires current-project scope; promote the Program to attach it to a global Capability. A global Program effect works under any scope.
 - Use `always` only when the behavior should apply to every eligible turn.
 - Inspect the binding revision immediately before revising, pausing, restoring, or retargeting. Treat a stale result as a request to re-inspect, not permission to overwrite newer state.
 - Describe consequences truthfully. Credential export, recovery or audit control, and irreversible external action without foreground user intent remain protected.
-- A published revision affects formally frozen behavior from a later turn; it does not mutate the current turn plan. You may still use a project program saved during the current turn through its ordinary runner.
+- A published revision affects formally frozen behavior from a later turn; it does not mutate the current turn plan. You may still use a Program saved during the current turn through its ordinary runner.
 - Ambient reflection will still observe the settled foreground turn. A deliberate refinement already recorded in the trace should normally make duplicate learning unnecessary.
 
 Use subagents to investigate, critique, or draft a proposed decision. The foreground agent inspects their evidence and publishes the final decision.

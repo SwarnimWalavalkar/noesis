@@ -1,12 +1,12 @@
 import { createConditionalObject, type DurableJobRecord } from "@noesis/domain";
 import type { TuiLearningActivitySummary } from "@noesis/tui";
-import { CapabilityPublicationResultSchema } from "@noesis/learning";
+import { CapabilityPublicationResultSchema, ProgramPromotionResultSchema } from "@noesis/learning";
 import { z } from "zod";
 
 const SessionReviewResultSchema = z.looseObject({
   status: z.literal("reviewed"),
   summary: z.string(),
-  results: z.array(CapabilityPublicationResultSchema),
+  results: z.array(z.union([CapabilityPublicationResultSchema, ProgramPromotionResultSchema])),
 });
 
 /**
@@ -23,7 +23,10 @@ export function sessionReviewNotices(
       const result = SessionReviewResultSchema.safeParse(job.result);
       if (!result.success) return [];
       const published = result.data.results.filter(
-        (item) => item.status !== "no_change" && item.status !== "stale",
+        (item) =>
+          item.status !== "no_change" &&
+          item.status !== "stale" &&
+          !(item.status === "program_promoted" && item.unchanged),
       );
       const completedAt = job.completedAt ?? job.updatedAt;
       const reactionTurn = userTurns.find((turn) => turn.createdAt > completedAt);
@@ -34,7 +37,8 @@ export function sessionReviewNotices(
           createConditionalObject({
             jobId: job.jobId,
             stage: "reflection" as const,
-            status: first.status,
+            // A promotion changes no Capability, so it reads as a completed review.
+            status: first.status === "program_promoted" ? ("completed" as const) : first.status,
             // One notice names every change the review made.
             // The review usually covers a session the user has already left.
             summary: `Review of an earlier session · ${published

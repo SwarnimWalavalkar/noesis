@@ -62,7 +62,7 @@ const child = await agents.spawn({
 return await agents.wait({ taskId: child.taskId });
 ```
 
-Useful procedures can become saved project Programs: scripts to run again, or workflows that can resume from recorded progress. Their exact revisions can also become part of a learned Capability.
+Useful procedures can become saved Programs: scripts to run again, or workflows that can resume from recorded progress. A Program belongs to one project or to the global library, so it can follow you between projects. Its exact revisions can also become part of a learned Capability.
 
 See [codemode, context, and subagents](docs/codemode.md) for the APIs and inspection controls.
 
@@ -83,7 +83,7 @@ You get a result from the current turn before ambient learning runs. Noesis then
 A Capability is an ability Noesis can reuse. It has two parts:
 
 - **Instruction** is the guidance in the Capability's Markdown file, under `definitions/capabilities/` in your Noesis home. You can edit this file directly, and Noesis records your edit as a new version before the next turn.
-- **Program** is optional. It attaches one exact saved project Program revision in script or workflow mode. Program effects use the same saved Programs you create during a turn, and they stay in the project that owns that definition.
+- **Program** is optional. It attaches one exact saved Program revision in script or workflow mode. Program effects use the same saved Programs you create during a turn. A Capability that attaches a project Program stays in that project. One that attaches a global Program can apply anywhere.
 
 New Capabilities apply anywhere they are relevant. The model sees each one's name and when it applies, and loads the guidance only when it needs it. You can narrow a Capability to a project or session, or make it always active.
 

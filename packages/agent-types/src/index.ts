@@ -360,6 +360,13 @@ export const ProgramWorkflowPhaseSchema = z.strictObject({
   outputSchema: z.record(z.string(), JsonValueSchema),
   requiredTools: z.array(z.string().min(1)),
 });
+/** The exact project revision a global Program was promoted from. */
+export const ProgramPromotionSchema = z.strictObject({
+  projectId: z.string().min(1),
+  revision: z.number().int().positive(),
+  definitionRevisionId: z.string().min(1),
+  definitionDigest: z.string().min(1),
+});
 export const ScriptProgramManifestSchema = z.strictObject({
   kind: z.literal("noesis_program"),
   mode: z.literal("script"),
@@ -375,6 +382,7 @@ export const ScriptProgramManifestSchema = z.strictObject({
     turnId: z.string().min(1),
     planId: z.string().min(1),
   }),
+  promotedFrom: ProgramPromotionSchema.exactOptional(),
 });
 export type ScriptProgramManifest = Readonly<z.infer<typeof ScriptProgramManifestSchema>>;
 export const WorkflowProgramManifestSchema = z.strictObject({
@@ -391,6 +399,7 @@ export const WorkflowProgramManifestSchema = z.strictObject({
     turnId: z.string().min(1),
     planId: z.string().min(1),
   }),
+  promotedFrom: ProgramPromotionSchema.exactOptional(),
 });
 export type WorkflowProgramManifest = Readonly<z.infer<typeof WorkflowProgramManifestSchema>>;
 export const ProgramManifestSchema = z.discriminatedUnion("mode", [
@@ -439,7 +448,7 @@ export type FrozenCapabilityEffect =
       readonly kind: "program";
       readonly mode: "script" | "workflow";
       readonly name: string;
-      readonly project: ProjectRef;
+      readonly project?: ProjectRef;
       readonly definition: FrozenRevisionMaterial;
     };
 export interface FrozenCapabilitySelection {
@@ -635,7 +644,7 @@ const FrozenCapabilityEffectSchema = z.discriminatedUnion("kind", [
     kind: z.literal("program"),
     mode: z.enum(["script", "workflow"]),
     name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
-    project: ProjectRefSchema,
+    project: ProjectRefSchema.exactOptional(),
     definition: FrozenRevisionMaterialSchema,
   }),
 ]);

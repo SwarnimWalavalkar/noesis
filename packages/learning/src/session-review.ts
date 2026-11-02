@@ -16,8 +16,11 @@ import { CapabilityReflectionProposalSchema, citedEvidence, publicationProposal 
 import {
   CapabilityScopeDecisionSchema,
   type CapabilityDecision,
+  type CapabilityProgramLibrary,
   type CapabilityPublicationResult,
   type CapabilityPublisher,
+  ProgramPromotionDecisionSchema,
+  type ProgramPromotionResult,
 } from "./capability-publisher.ts";
 import type { LearningRoleConfiguration } from "./schemas.ts";
 
@@ -48,6 +51,10 @@ const SessionReviewDecisionSchema = z.discriminatedUnion("decision", [
     scope: CapabilityScopeDecisionSchema,
     activationMode: z.enum(["relevant", "always"]),
     reason: z.string().min(1).max(2048),
+  }),
+  ProgramPromotionDecisionSchema.extend({
+    decision: z.literal("promote_program"),
+    evidenceCitationIndexes: z.array(z.number().int().nonnegative()).min(1).max(16),
   }),
 ]);
 export const SessionReviewQueriesSchema = z.strictObject({
@@ -81,7 +88,7 @@ export type SessionReviewResult =
       readonly queries: readonly string[];
       /** The review model's token usage across both steps. */
       readonly usage: AgentUsage;
-      readonly results: readonly CapabilityPublicationResult[];
+      readonly results: readonly (CapabilityPublicationResult | ProgramPromotionResult)[];
     };
 
 export interface CreateSessionReviewOptions {
@@ -91,6 +98,7 @@ export interface CreateSessionReviewOptions {
   readonly inference: StructuredInferencePort;
   readonly reviewer: LearningRoleConfiguration;
   readonly publisher: CapabilityPublisher;
+  readonly programs?: Pick<CapabilityProgramLibrary, "list">;
   readonly nextId?: (prefix: string) => string;
 }
 
@@ -214,6 +222,7 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
       }),
     );
 
+    const savedPrograms = (await options.programs?.list(request.project)) ?? [];
     const reviewPacket: readonly AgentMessage[] = Object.freeze([
       Object.freeze({
         role: "user" as const,
@@ -290,6 +299,24 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
             name: "related_history",
             content: fitted(related, (items) => canonicalJson({ earlierSessions: items })),
           }),
+          ...(savedPrograms.length === 0
+            ? []
+            : [
+                Object.freeze({
+                  role: "user" as const,
+                  name: "saved_programs",
+                  content: fitted(
+                    savedPrograms.map(({ mode, scope, name, description, revision }) => ({
+                      mode,
+                      scope,
+                      name,
+                      description: bounded(description, 200),
+                      revision,
+                    })),
+                    (items) => canonicalJson({ programs: items }),
+                  ),
+                }),
+              ]),
         ]),
         evidenceRefs: Object.freeze([]),
         availableTools: Object.freeze([]),
@@ -301,7 +328,7 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
     const bindingById = new Map<string, CapabilityBinding>(
       bindings.map((binding) => [binding.capabilityId, binding] as const),
     );
-    const results: CapabilityPublicationResult[] = [];
+    const results: (CapabilityPublicationResult | ProgramPromotionResult)[] = [];
     for (const decision of inferred.value.decisions) {
       const published = await publishDecision(
         decision,
@@ -331,7 +358,19 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
     latestRequestIndex: number,
     request: SessionReviewRequest,
     signal: AbortSignal,
-  ): Promise<CapabilityPublicationResult> {
+  ): Promise<CapabilityPublicationResult | ProgramPromotionResult> {
+    if (decision.decision === "promote_program") {
+      const { decision: _kind, evidenceCitationIndexes, ...promotion } = decision;
+      return await options.publisher.promoteProgram(
+        promotion,
+        {
+          project: request.project,
+          evidenceRefs: citedEvidence(evidenceCitationIndexes, citations),
+          actor: Object.freeze({ actorId: "session-reviewer", kind: "noesis" as const }),
+        },
+        signal,
+      );
+    }
     const expected = (capabilityId: string) => {
       const binding = bindingById.get(capabilityId);
       if (!binding) throw new Error(`Session review named unknown capability ${capabilityId}`);

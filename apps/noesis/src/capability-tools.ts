@@ -64,7 +64,9 @@ const CapabilityEffectInspectionSchema = z.strictObject({
   effectIndex: z.number().int().nonnegative(),
   kind: z.enum(["instruction", "program"]),
   name: z.string().nullable(),
+  /** Null for an instruction and for a global Program. */
   project: ProjectRefSchema.nullable(),
+  programScope: z.enum(["project", "global"]).nullable(),
   mode: z.enum(["script", "workflow"]).nullable(),
   revision: FileRevisionRefSchema,
 });
@@ -263,7 +265,8 @@ function effectInspection(effect: CapabilityEffect, effectIndex: number) {
     effectIndex,
     kind: effect.kind,
     name: effect.kind === "program" ? effect.program.name : null,
-    project: effect.kind === "program" ? effect.program.project : null,
+    project: effect.kind === "program" ? (effect.program.project ?? null) : null,
+    programScope: effect.kind === "program" ? (effect.program.project ? "project" : "global") : null,
     mode: effect.kind === "program" ? effect.program.mode : null,
     revision: effect.kind === "instruction" ? effect.material : effect.program.definitionRevision,
   });

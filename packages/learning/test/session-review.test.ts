@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sha256, type FileRevisionRef } from "@noesis/domain";
+import { sha256, type FileRevisionRef, type ProjectRef } from "@noesis/domain";
 import type { HistoryPort } from "@noesis/intelligence";
 import { createWorkspaceStore } from "@noesis/workspace";
 import { expect, test } from "vitest";
@@ -285,6 +285,133 @@ test("a session review with no queries skips the search and still decides", asyn
       ),
     ).resolves.toMatchObject({ status: "reviewed", summary: "Nothing repeats.", results: [] });
     expect(inference.remaining()).toBe(0);
+  } finally {
+    workspace.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("promotes a Program when the reviewer decides to, and offers the library only when it has one", async () => {
+  const root = await mkdtemp(join(tmpdir(), "noesis-session-review-promotion-"));
+  const workspace = await createWorkspaceStore(root);
+  try {
+    await workspace.operational.sessions.put({
+      sessionId: "session-current",
+      title: "current",
+      status: "idle",
+      provider: "fake",
+      model: "fake",
+      runtime: "fake",
+      createdAt: "2026-10-20T10:00:00.000Z",
+      updatedAt: "2026-10-20T10:00:00.000Z",
+      metadata: Object.freeze({}),
+    });
+    await workspace.operational.messages.put({
+      messageId: "turn-current:user",
+      sessionId: "session-current",
+      role: "user",
+      content: "I need the release notes script here too.",
+      sensitivity: "normal",
+      createdAt: "2026-10-29T10:00:00.000Z",
+      metadata: Object.freeze({ turnId: "turn-current" }),
+    });
+    const project = Object.freeze({ projectId: "project-review", root });
+    const definitionRevision = await workspace.definitions.recordWorkingDefinition({
+      workingPath: "programs/global/script/release-notes/program.json",
+      bytes: new TextEncoder().encode("{}\n"),
+      actor: Object.freeze({ actorId: "test", kind: "system" as const }),
+      reason: "Fixture",
+    });
+    const promotions: unknown[] = [];
+    const publisher = createCapabilityPublisher({
+      workspace,
+      store: workspace.capabilities,
+      programs: Object.freeze({
+        list: async () => Object.freeze([]),
+        resolve: async () => undefined,
+        promote: async (_project: ProjectRef, input: Readonly<{ name: string }>) => {
+          promotions.push(input);
+          return Object.freeze({ definitionRevision, revision: 1, unchanged: false });
+        },
+      }),
+    });
+    const inference = createScriptedLearningInferencePort({
+      steps: [
+        Object.freeze({ role: "session_reviewer", value: Object.freeze({ queries: [] }) }),
+        Object.freeze({
+          role: "session_reviewer",
+          value: Object.freeze({
+            summary: "The same script is needed in another project.",
+            decisions: [
+              {
+                decision: "promote_program",
+                mode: "script",
+                name: "release-notes",
+                reason: "The user needs it in a second project.",
+                evidenceCitationIndexes: [0],
+              },
+            ],
+          }),
+        }),
+      ],
+    });
+    const review = createSessionReview({
+      workspace,
+      store: workspace.capabilities,
+      history: Object.freeze({
+        rebuild: async () => undefined,
+        search: async () => {
+          throw new Error("The model wrote no queries, so nothing may be searched");
+        },
+      }),
+      inference,
+      reviewer: Object.freeze({
+        variant: Object.freeze({
+          variantId: "session-reviewer-v1",
+          axis: "role" as const,
+          configurationRefs: Object.freeze([promptRevision]),
+        }),
+        promptRevision,
+        model: "fake",
+        reasoning: "low" as const,
+      }),
+      publisher,
+      programs: Object.freeze({
+        list: async () =>
+          Object.freeze([
+            Object.freeze({
+              mode: "script" as const,
+              scope: "project" as const,
+              name: "release-notes",
+              description: "Write release notes.",
+              revision: 2,
+              definitionRevision,
+            }),
+          ]),
+      }),
+    });
+    const result = await review(
+      {
+        sessionId: "session-current",
+        project,
+        turnId: "turn-current",
+        occurredAt: "2026-10-29T10:00:01.000Z",
+      },
+      new AbortController().signal,
+    );
+    expect(result).toMatchObject({
+      status: "reviewed",
+      results: [{ status: "program_promoted", name: "release-notes", unchanged: false }],
+    });
+    expect(inference.requests()[1]?.messages.map((message) => message.name)).toContain("saved_programs");
+    expect(promotions).toMatchObject([
+      {
+        mode: "script",
+        name: "release-notes",
+        actor: { actorId: "session-reviewer" },
+        evidenceRefs: [{ kind: "database_row", table: "messages", rowId: "turn-current:user" }],
+      },
+    ]);
   } finally {
     workspace.close();
     await rm(root, { recursive: true, force: true });

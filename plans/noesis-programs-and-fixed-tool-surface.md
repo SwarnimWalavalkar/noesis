@@ -26,19 +26,19 @@ Program is the one public reusable-execution primitive. Its `mode` selects one o
 - `script` is cancellable rerunnable JavaScript with typed JSON input and output.
 - `workflow` is a durable phased procedure with pause, correction, resume, and per-phase state.
 
-The public codemode API is `programs.list`, `programs.describe`, `programs.save`, `programs.run`, `programs.runs`, and `programs.resume`. Saving returns an immutable definition revision. Running requires that exact revision ID. Program definitions live under `programs/projects/<project-id>/<mode>/<name>/`; ordinary editable files remain declarative authority, recorded revisions are execution authority, and SQLite remains operational run authority.
+The public codemode API is `programs.list`, `programs.describe`, `programs.save`, `programs.promote`, `programs.run`, `programs.runs`, and `programs.resume`. Saving returns an immutable definition revision. Running takes that exact revision ID or a name. A name resolves when the turn is frozen, project before global, and the run records the exact revision it used. Program definitions live under `programs/projects/<project-id>/<mode>/<name>/` or, for the global library, `programs/global/<mode>/<name>/`; ordinary editable files remain declarative authority, recorded revisions are execution authority, and SQLite remains operational run authority. Promotion copies a project Program to the global library as a new revision whose provenance names the source revision, and leaves the source intact. Replacing a different global Program with the same name requires its current revision ID.
 
-Workflow manifests do not yet declare exact saved-Program dependencies. Until they do, a paused workflow conservatively pins the complete visible Program library and fails closed after any library edit, as specified by the retained workflow plan. This is an explicit safety limitation rather than silent dependency drift.
+Workflow manifests do not yet declare exact saved-Program dependencies. Until they do, a paused workflow conservatively pins the complete visible Program library, including the global library, and fails closed after any library edit, as specified by the retained workflow plan. This is an explicit safety limitation rather than silent dependency drift.
 
 A Program owns only executable mechanics: mode, schemas, required tools or phases, implementation source, immutable revisions, and run records. It does not independently own semantic applicability, scope, or activation.
 
 ## Capability exposure
 
-A Capability may attach one exact Program revision with a single `program` effect containing its mode, name, project, and definition revision. The Capability owns the semantic contract: name, description, applicability, scope, activation, evidence, feedback, and restoration.
+A Capability may attach one exact Program revision with a single `program` effect containing its mode, name, owning project if it has one, and definition revision. A global Program names no project, and the Capability keeps its scope. A project Program keeps the Capability in that project. The Capability owns the semantic contract: name, description, applicability, scope, activation, evidence, feedback, and restoration.
 
 Selecting that Capability contributes a typed adapter for the pinned Program revision to the same frozen Tool Catalog and Broker used by codemode. The descriptor carries two orthogonal provenance fields:
 
-- implementation: built-in, MCP, or Program, including the Program's mode, project, name, and exact revision;
+- implementation: built-in, MCP, or Program, including the Program's mode, owning project if any, name, and exact revision;
 - exposure: catalog or Capability, including the exact Capability revision when applicable.
 
 This lets the model recognize that a discovered tool is editable Program behavior without confusing implementation with applicability. Saving a Program alone does not mutate the provider tool list or implicitly activate a new semantic tool.
@@ -51,7 +51,7 @@ The built-in `noesis` skill, with `/refine` as an alias, progressively teaches d
 
 - Every ordinary turn exposes exactly the fixed four provider tools.
 - Catalog creation and Program saving cannot change that provider-facing set.
-- Both Program modes save, inspect, and run by exact immutable revision.
+- Both Program modes save, inspect, and run by exact immutable revision or by a name that resolves project before global.
 - Workflow-mode runs pause and resume durably.
 - A Capability-backed Program tool exposes semantic applicability and structured implementation/exposure provenance.
 - `noesis.search` and `noesis.describe` return that provenance without expanding the base prompt.

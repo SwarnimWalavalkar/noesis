@@ -8,6 +8,7 @@ import {
   CapabilityProposalSchema,
   capabilityWorkingDocumentPath,
   createCapabilityPublisher,
+  type CapabilityDecision,
 } from "../src/capability-publisher.ts";
 
 const opened: { readonly root: string; readonly workspace: NoesisWorkspaceStore }[] = [];
@@ -246,6 +247,109 @@ describe("Capability publisher", () => {
       message: "Capability changed concurrently",
     });
     expect(await workspace.capabilities.listRevisions("capability-foreground")).toHaveLength(3);
+  });
+
+  test("a global Program leaves the Capability's scope free, and a project Program pins it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-capability-global-program-"));
+    const workspace = await createWorkspaceStore(root);
+    opened.push({ root, workspace });
+    const actor = Object.freeze({ actorId: "foreground-capability-author", kind: "noesis" as const });
+    const definitionRevision = await workspace.definitions.recordWorkingDefinition({
+      workingPath: "programs/global/script/shared/program.json",
+      bytes: new TextEncoder().encode('{"revision":1}\n'),
+      actor,
+      reason: "Global fixture",
+    });
+    const project = Object.freeze({ projectId: "project-global-program", root });
+    const effect = (name: string) =>
+      Object.freeze({
+        kind: "program" as const,
+        program:
+          name === "shared"
+            ? Object.freeze({ mode: "script" as const, name, definitionRevision })
+            : Object.freeze({ mode: "script" as const, name, project, definitionRevision }),
+      });
+    let identity = 0;
+    const publisher = createCapabilityPublisher({
+      workspace,
+      store: workspace.capabilities,
+      programs: Object.freeze({
+        list: async () => Object.freeze([]),
+        resolve: async (_mode: "script" | "workflow", name: string) => effect(name),
+      }),
+      nextId: (prefix) => `${prefix}-${String((identity += 1))}`,
+    });
+    const decision = (
+      name: string,
+      scope?: "global" | "current_project" | "current_session",
+    ): CapabilityDecision => ({
+      decision: "create",
+      proposal: {
+        name: `Uses ${name} ${scope ?? "default"}`,
+        description: "Run the saved script.",
+        applicability: "Saved script work.",
+        summary: "Attach a saved script.",
+        rationale: "The turn showed it helps.",
+        anticipatedEffect: "The script is available.",
+        effects: [{ kind: "program", mode: "script", name }],
+        scope,
+        consequence: "ordinary",
+        consequenceDescription: "This references a reversible saved program.",
+      },
+    });
+    const context = Object.freeze({
+      project,
+      sessionId: "session-global-program",
+      evidenceRefs: Object.freeze([definitionRevision]),
+      actor,
+    });
+    const signal = new AbortController().signal;
+    const scopeOf = async (result: Awaited<ReturnType<typeof publisher.publish>>) => {
+      if (result.status !== "activated") throw new Error(`Expected activation, got ${result.status}`);
+      return (await workspace.capabilities.getBinding(result.capabilityId))?.scope;
+    };
+
+    expect(await scopeOf(await publisher.publish(decision("shared"), context, signal))).toEqual({
+      kind: "global",
+    });
+    expect(await scopeOf(await publisher.publish(decision("shared", "global"), context, signal))).toEqual({
+      kind: "global",
+    });
+    expect(
+      await scopeOf(await publisher.publish(decision("shared", "current_session"), context, signal)),
+    ).toEqual({ kind: "session", sessionId: "session-global-program" });
+    expect(await scopeOf(await publisher.publish(decision("local"), context, signal))).toEqual({
+      kind: "project",
+      project,
+    });
+    await expect(publisher.publish(decision("local", "global"), context, signal)).rejects.toThrow(
+      /requires current-project scope/u,
+    );
+
+    // A later binding change obeys the same rule.
+    const local = await publisher.publish(decision("local", "current_project"), context, signal);
+    if (local.status !== "activated") throw new Error("Expected activation");
+    await expect(
+      publisher.publish(
+        {
+          decision: "change_binding",
+          capabilityId: local.capabilityId,
+          expectedBindingRevision: 1,
+          scope: "global",
+          activationMode: "relevant",
+          reason: "Try it everywhere.",
+        },
+        context,
+        signal,
+      ),
+    ).rejects.toThrow(/must remain bound to project/u);
+    await expect(
+      publisher.promoteProgram(
+        { mode: "script", name: "local", reason: "No library in this fixture." },
+        context,
+        signal,
+      ),
+    ).rejects.toThrow(/no Program library/u);
   });
 
   test("uses the foreground turn's exact saved-program resolver instead of the live library", async () => {

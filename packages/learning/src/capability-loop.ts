@@ -769,7 +769,7 @@ function foregroundCapabilitySurfaceMessage(
         kind: effect.kind,
         name: effect.program.name,
         mode: effect.program.mode,
-        initialForegroundExposure: "exact_project_program_adapter",
+        initialForegroundExposure: "exact_program_adapter",
       });
     });
     const item = Object.freeze({
@@ -784,12 +784,13 @@ function foregroundCapabilitySurfaceMessage(
 }
 function availableProgramsMessage(programs: Awaited<ReturnType<CapabilityProgramLibrary["list"]>>): string {
   const projected = programs
-    .map(({ mode, name, description, revision }) => ({ mode, name, description, revision }))
+    .map(({ mode, scope, name, description, revision }) => ({ mode, scope, name, description, revision }))
     .sort((left, right) => left.mode.localeCompare(right.mode) || left.name.localeCompare(right.name))
     .slice(0, AVAILABLE_PROGRAMS_MAX_ITEMS);
   while (projected.length > 0) {
     const encoded = canonicalJson({
-      instruction: "Program effects must reference one exact saved project Program from this list.",
+      instruction:
+        "Program effects must reference one exact saved Program from this list. A project Program keeps the Capability in this project. A global Program works under any scope.",
       programs: projected,
       omittedCount: Math.max(0, programs.length - projected.length),
     });
@@ -797,7 +798,7 @@ function availableProgramsMessage(programs: Awaited<ReturnType<CapabilityProgram
     projected.pop();
   }
   return canonicalJson({
-    instruction: "No saved project programs fit the bounded reflection context.",
+    instruction: "No saved Programs fit the bounded reflection context.",
     programs: [],
     omittedCount: programs.length,
   });
@@ -1191,12 +1192,14 @@ export function createCapabilityLearningModule(
         if (!program) return undefined;
         return Object.freeze({
           kind: "program" as const,
-          program: Object.freeze({
-            mode,
-            name,
-            project: Object.freeze({ ...input.project }),
-            definitionRevision: program.definitionRevision,
-          }),
+          program: Object.freeze(
+            createConditionalObject({ mode, name } as const)
+              .addOptional(
+                program.scope === "project" ? { project: Object.freeze({ ...input.project }) } : undefined,
+              )
+              .add({ definitionRevision: program.definitionRevision } as const)
+              .finish(),
+          ),
         });
       },
     });
