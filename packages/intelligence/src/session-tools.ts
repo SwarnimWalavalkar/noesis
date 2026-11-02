@@ -182,6 +182,14 @@ export const OpenSessionEvidenceInputSchema = z.strictObject({
   afterChars: z.number().int().min(0).max(2048).optional(),
   maxChars: z.number().int().min(32).max(4096).optional(),
 });
+export const OpenSessionInputSchema = z.strictObject({
+  sessionId: identifierSchema,
+  includePrivate: z.boolean().optional(),
+});
+export interface AuthorizedSessionView {
+  readonly sessionId: string;
+  readonly includePrivate: boolean;
+}
 const focusedSearchInputFields = {
   sessionId: identifierSchema.optional(),
   maxResults: z.number().int().min(1).max(20).optional(),
@@ -285,6 +293,8 @@ export interface SessionSearchTools {
     input: unknown,
     options?: SessionToolExecutionOptions,
   ) => Promise<SessionToolResult<SessionSearchOutput>>;
+  /** Applies search's session and private-content rules to reading one whole session. */
+  readonly authorizeOpenSession: (input: unknown) => Promise<SessionToolResult<AuthorizedSessionView>>;
 }
 export interface CreateSessionSearchToolsOptions {
   readonly workspace: NoesisWorkspaceStore;
@@ -1082,6 +1092,17 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       return fail("backend_failure", `Opening session evidence failed: ${message}`, true);
     }
   };
+  const authorizeOpenSession = async (input: unknown): Promise<SessionToolResult<AuthorizedSessionView>> => {
+    const parsed = OpenSessionInputSchema.safeParse(input);
+    if (!parsed.success) return invalidInput(parsed.error);
+    const { sessionId } = parsed.data;
+    const session = await options.workspace.operational.sessions.get(sessionId);
+    if (!session || session.metadata["deletedAt"] !== undefined)
+      return fail("not_found", `Session ${sessionId} does not exist or was deleted.`);
+    const privateResult = authorizePrivateSearch(parsed.data.includePrivate ?? false, sessionId);
+    if (!privateResult.ok) return privateResult;
+    return { ok: true, value: Object.freeze({ sessionId, includePrivate: privateResult.value }) };
+  };
   const definitions: readonly SessionToolDefinition[] = Object.freeze([
     Object.freeze({
       name: "search_sessions",
@@ -1112,6 +1133,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     searchSessions,
     openSessionEvidence,
     findSimilarTasks,
+    authorizeOpenSession,
   });
 }
 function normalizeLimits(overrides: Partial<SessionToolLimits> | undefined): SessionToolLimits {

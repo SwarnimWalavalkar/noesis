@@ -196,6 +196,69 @@ describe("codemode runtime", () => {
       },
     ]);
   });
+  it("returns history.open_session output as the same view as context, and only that tool's", async () => {
+    const root = await mkdtemp(join(tmpdir(), "noesis-codemode-session-view-"));
+    roots.add(root);
+    const content = '{"type":"message","content":"past"}\n';
+    const path = join(root, "session.jsonl");
+    await writeFile(path, content);
+    const contentDigest = sha256(content);
+    const document = Object.freeze({
+      documentId: `context_document_${contentDigest}`,
+      path,
+      characterLength: content.length,
+      byteLength: Buffer.byteLength(content, "utf8"),
+      contentDigest,
+    });
+    const documentTool = (name: string, output: JsonValue) =>
+      defineTool({
+        name,
+        label: name,
+        description: name,
+        inputSchema: z.strictObject({ sessionId: z.string() }),
+        outputSchema: z.json(),
+        effect: () => ({ effect: "read", resource: "math:session", estimatedCost: 0 }),
+        execute: async () => output,
+      });
+    const code = createCodeModeRuntime({
+      cwd: process.cwd(),
+      broker: createToolBroker({
+        authority: authority(),
+        permission: Object.freeze({
+          effects: Object.freeze(["read"]),
+          resourcePatterns: Object.freeze(["math:"]),
+          credentialRefs: Object.freeze([]),
+        }),
+        definitions: [
+          documentTool("history.open_session", document),
+          documentTool("other.lookup", { ...document, contentDigest: "forged" }),
+        ],
+      }),
+    });
+    runtimes.add(code);
+    const result = await code.execute({
+      source: `
+        const direct = await tools.history.open_session({ sessionId: "past" });
+        const byName = await noesis.invoke("history.open_session", { sessionId: "past" });
+        const other = await tools.other.lookup({ sessionId: "past" });
+        return {
+          length: direct.length,
+          slice: await direct.slice(1, 7).text(),
+          byNameText: await byName.text(),
+          handle: direct.slice(1, 7),
+          otherIsPlain: typeof other.slice === "undefined" && other.path === ${JSON.stringify(path)},
+        };
+      `,
+      sessionId: "session-current",
+    });
+    expect(result.value).toEqual({
+      length: content.length,
+      slice: content.slice(1, 7),
+      byNameText: content,
+      handle: { __noesisContext: { documentId: document.documentId, start: 1, end: 7 } },
+      otherIsPlain: true,
+    });
+  });
   it("runs ordinary JavaScript and composes sequential and parallel SDK calls", async () => {
     const events: CodeExecutionEvent[] = [];
     const result = await runtime().execute(

@@ -28,6 +28,7 @@ return { readme, status };
 - `noesis.describe(name)` returns one tool's exact input and output schemas.
 - `noesis.invoke(name, input?)` invokes a tool by its exact string name.
 - `context` is a lazy immutable view of the complete pre-turn session. Use `context.length`, `context.slice(start, end)`, and `await view.text()`.
+- `await tools.history.open_session({ sessionId, includePrivate? })` returns another session as the same kind of view as `context`, frozen at the call. Secret rows, and private rows without an authorized `includePrivate`, appear as `omitted` lines. Rejects a deleted session.
 - `agents.spawn({ name?, systemPrompt?, prompt, tools?, thinkingLevel? })` admits a retained agent and returns `{ agentId, taskId }` immediately. Its prompt accepts text, a context view, or an array of both. Canonical names grant frozen Code Mode tools; the provider-facing tools remain `file_read`, `file_write`, `shell`, and `execute`.
 - `agents.send({ to, message })` messages a foreground session or retained agent. A busy recipient receives it at its next step; an idle agent starts a new task. `agents.list()` gives compact process-wide status; `agents.inspect({ agentId, taskId? })` retrieves bounded details.
 - `agents.wait({ taskId, timeoutMs? })` joins an exact task to use its result value in later code, without owning the task's lifetime. Code that discards the value is rejected. Use `agents.cancel({ taskId, reason? })` or `agents.close({ agentId, reason? })` only when the task or actor should actually stop. Inside a child, `agents.self` and `agents.parent` identify collaborators.
@@ -47,6 +48,20 @@ return { readme, status };
 - An empty result means only that these words did not match. Try different words before concluding that the evidence does not exist.
 
 Code Mode, subagents, and shell commands have no implicit duration or call-count ceiling. Pass an optional `timeoutMs` only when the task itself needs a deadline; the user can cancel active work at any time.
+
+## Read a past session
+
+Search for a citation, open the session, then slice around the row. Citation offsets refer to the source row, so find it in the view by its message or tool call id.
+
+```js
+const { fragments } = await tools.history.search_sessions({ query: "rollback decision", maxResults: 1 });
+const { citation } = fragments[0];
+const past = await tools.history.open_session({ sessionId: citation.sessionIds[0] });
+const at = (await past.text()).indexOf(citation.identity.messageId ?? citation.identity.toolCallId);
+return await past.slice(Math.max(0, at - 2000), at + 4000).text();
+```
+
+Pass a slice directly in an `agents.spawn` prompt when a child should analyze it. In a workflow run, a session that changed after the run first read it fails the read; start a new run for current content.
 
 ## Background subagents
 

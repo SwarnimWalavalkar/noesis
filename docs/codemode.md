@@ -55,11 +55,37 @@ The optional `after` and `before` filters take an ISO-8601 date or datetime. `af
 
 All searches in one turn share a total budget of about 31,000 characters. When the budget withholds results, `telemetry.status` is `budget_exhausted` and `telemetry.omittedResults` counts them. That does not mean the words failed to match. A smaller `maxResults` cannot recover withheld results later in the same turn, so the agent should choose a smaller `maxResults`, about 8 per query, before fanning out.
 
+## Read another session
+
+`tools.history.open_session({ sessionId })` returns another session as the same kind of view as `context`, with `.length`, `.slice(start, end)`, and `await view.text()`. An `agents.spawn` prompt accepts its slices. Use it after search has identified a session, when the bounded evidence window is too small:
+
+```js
+const { fragments } = await tools.history.search_sessions({ query: "rollback decision", maxResults: 1 });
+const { citation } = fragments[0];
+const past = await tools.history.open_session({ sessionId: citation.sessionIds[0] });
+const at = (await past.text()).indexOf(citation.identity.messageId ?? citation.identity.toolCallId);
+return await past.slice(Math.max(0, at - 2000), at + 4000).text();
+```
+
+The document contains the same recorded rows as `context`, one JSON value per line. A citation's offsets refer to its source row, not to this document, so find the row by its message or tool call id. A citation for a session title or an outcome has neither id; read the view from the start or its end instead.
+
+The view follows the rules of the session search tools:
+
+- Secret content is never included. Each secret row becomes an `omitted` line that keeps only the record type, time, and sensitivity, so the reader can tell that the view is partial.
+- Private content is also omitted unless the call passes `includePrivate: true`. That flag is accepted only for the current session or an authorized session, and is otherwise rejected.
+- A code, model, or workflow row has no sensitivity label of its own, but its results and errors can repeat anything its turn read. It takes the highest label recorded in its turn. A row with no turn takes the session's highest label.
+- A session that does not exist or was deleted is rejected.
+- Only views opened in the same execution can fill an `agents.spawn` prompt.
+
+The view is frozen and verified against its digest in the same way as `context`, and it is a snapshot taken at the call. Opening the session again later can return newer content as a different view.
+
+A workflow run pins the digest it first reads for each session. Any later read in that run, including a resumed phase, must match the pin. If the session changed, the read fails instead of returning different bytes, and the phase pauses. Start a new run to read the current content. A run should read its own session through `context`, because that session keeps changing while the run records its work.
+
 ## Subagent lifecycle
 
 `agents.spawn({ name?, systemPrompt?, prompt, tools?, thinkingLevel? })` records a subagent task and immediately returns stable `agentId` and `taskId` handles. Agents live within the Noesis process rather than one foreground turn or session.
 
-`prompt` accepts text, a context slice, or an array of either. `tools` accepts canonical names from the frozen Tool Catalog.
+`prompt` accepts text, a slice of `context` or of a session view, or an array of those. `tools` accepts canonical names from the frozen Tool Catalog.
 
 `agents.send`, `agents.list`, `agents.inspect`, `agents.wait`, `agents.cancel`, and `agents.close` manage collaboration. Productive tasks have no independent provider-round, tool-call, or wall-clock ceiling.
 
