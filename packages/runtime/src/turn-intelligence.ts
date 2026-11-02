@@ -160,9 +160,9 @@ function applySessionViewDisclosure(
   let next = 0;
   let highestSoFar: Sensitivity = recorded.length === 0 ? "private" : "normal";
   return lines.map((line) => {
-    for (; (recorded[next]?.occurredAt ?? "\uffff") <= line.occurredAt; next += 1) {
-      const entry = recorded[next];
-      if (entry) highestSoFar = higherSensitivity(highestSoFar, entry.sensitivity);
+    for (let entry = recorded[next]; entry && entry.occurredAt <= line.occurredAt; entry = recorded[next]) {
+      highestSoFar = higherSensitivity(highestSoFar, entry.sensitivity);
+      next += 1;
     }
     const own = line.sensitivity ?? "normal";
     const inherited =
