@@ -35,6 +35,17 @@ return { readme, status };
 - `store(key, value)` and `load(key)` manage JSON scratch state for the Code Mode session: at most 65,536 UTF-8 JSON bytes per value, 262,144 bytes for the serialized array of key/value entries, and 256 keys. JSON quoting and escaping count toward these limits. For larger data, write JSON with `tools.files.write` and store only its path. Read and parse it inside `execute`, returning only needed fields. Reuse existing keys when the entry limit is reached.
 - `input` is the validated input inside saved Program source. A foreground `execute` receives `null`.
 
+## Searching session history
+
+`tools.history.search_sessions` is a stemmed keyword search ranked by BM25. It does not match by meaning, and no model reranks its results. You are the semantic layer:
+
+- Write the words the evidence would contain, not a description of it. Any term may match, and documents matching more terms rank higher.
+- Double-quote exact phrases: `'"rollback decision" migration'`.
+- Reformulate and fan out several queries with `Promise.all`, using synonyms and the likely wording of the original, rather than expecting one query to find everything. Set `maxResults` to about 8 when fanning out, because all searches in a turn share one context budget.
+- Narrow with `scope`, `sessionId`, `after`, `before`, and `source` (`"message"` or `"tool_output"`) rather than guessing dates or sources from excerpts.
+- `telemetry.status: "budget_exhausted"` means results were withheld, not that nothing matched. Search again with a smaller `maxResults`.
+- An empty result means only that these words did not match. Try different words before concluding that the evidence does not exist.
+
 Code Mode, subagents, and shell commands have no implicit duration or call-count ceiling. Pass an optional `timeoutMs` only when the task itself needs a deadline; the user can cancel active work at any time.
 
 ## Background subagents

@@ -369,8 +369,6 @@ export interface ProtectedTurnPlanStore {
 
 export interface SearchConfiguration {
   readonly lexicalLimit: number;
-  readonly semanticLimit: number;
-  readonly rerankLimit: number;
   readonly maxExcerptChars: number;
   readonly includePrivate: boolean;
   readonly updatedAt: string;
@@ -684,15 +682,17 @@ export interface SearchDocument {
 }
 
 export interface SearchCandidate extends SearchDocument {
-  readonly lexicalScore?: number;
-  readonly semanticScore?: number;
+  /** BM25 relevance for this query. Higher is better; it is not comparable across queries. */
+  readonly score: number;
+  /** Where the first match starts in body. */
+  readonly matchOffset: number;
 }
 
 export type SearchSessionScope =
   | { readonly kind: "exact"; readonly sessionId: string }
   | { readonly kind: "previous"; readonly currentSessionId: string };
 
-export type SearchSourceScope = "session_or_outcome";
+export type SearchSourceScope = "session_or_outcome" | "message" | "tool_output";
 
 export interface SearchIndexPort {
   readonly clear: () => Promise<void>;
@@ -706,18 +706,10 @@ export interface SearchIndexPort {
     readonly limit: number;
     readonly sessionScope?: SearchSessionScope;
     readonly sourceScope?: SearchSourceScope;
-    readonly includePrivate: boolean;
-  }) => Promise<readonly SearchCandidate[]>;
-  readonly putEmbeddings: (
-    modelId: string,
-    embeddings: ReadonlyMap<string, readonly number[]>,
-  ) => Promise<void>;
-  readonly semanticCandidates: (request: {
-    readonly modelId: string;
-    readonly vector: readonly number[];
-    readonly limit: number;
-    readonly sessionScope?: SearchSessionScope;
-    readonly sourceScope?: SearchSourceScope;
+    /** Inclusive lower bound on occurredAt, as an ISO-8601 UTC timestamp. */
+    readonly occurredAfter?: string;
+    /** Exclusive upper bound on occurredAt, as an ISO-8601 UTC timestamp. */
+    readonly occurredBefore?: string;
     readonly includePrivate: boolean;
   }) => Promise<readonly SearchCandidate[]>;
   readonly openCanonicalSource: (source: CanonicalSearchSource) => Promise<string | undefined>;

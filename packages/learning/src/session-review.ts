@@ -24,9 +24,9 @@ import type { LearningRoleConfiguration } from "./schemas.ts";
 const MESSAGE_MAX_CHARACTERS = 10_000;
 const SESSION_REQUESTS = 40;
 const REQUEST_EXCERPT_CHARACTERS = 600;
-const SEARCHED_REQUESTS = 6;
-const HITS_PER_REQUEST = 3;
-const HISTORY_EXCERPT_CHARACTERS = 400;
+const SEARCH_QUERIES = 5;
+const HITS_PER_QUERY = 5;
+const HISTORY_EXCERPT_CHARACTERS = 300;
 const MATERIAL_EXCERPT_CHARACTERS = 600;
 const MAX_DECISIONS = 3;
 
@@ -50,6 +50,12 @@ const SessionReviewDecisionSchema = z.discriminatedUnion("decision", [
     reason: z.string().min(1).max(2048),
   }),
 ]);
+export const SessionReviewQueriesSchema = z.strictObject({
+  queries: z
+    .array(z.string().trim().min(2).max(200))
+    .max(SEARCH_QUERIES)
+    .describe("Keyword searches over earlier sessions. An empty list skips the search."),
+});
 export const SessionReviewOutputSchema = z.strictObject({
   summary: z.string().min(1).max(2048).describe("What the review found, in one or two sentences"),
   decisions: z
@@ -71,7 +77,9 @@ export type SessionReviewResult =
   | {
       readonly status: "reviewed";
       readonly summary: string;
-      /** The review model's token usage. */
+      /** The searches the model wrote, kept so the review stays inspectable. */
+      readonly queries: readonly string[];
+      /** The review model's token usage across both steps. */
       readonly usage: AgentUsage;
       readonly results: readonly CapabilityPublicationResult[];
     };
@@ -79,7 +87,7 @@ export type SessionReviewResult =
 export interface CreateSessionReviewOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly store: CapabilityLifecycleStore;
-  readonly history: Pick<HistoryPort, "search">;
+  readonly history: Pick<HistoryPort, "search" | "rebuild">;
   readonly inference: StructuredInferencePort;
   readonly reviewer: LearningRoleConfiguration;
   readonly publisher: CapabilityPublisher;
@@ -88,6 +96,15 @@ export interface CreateSessionReviewOptions {
 
 function bounded(value: string, maximum: number): string {
   return value.length <= maximum ? value : `${value.slice(0, maximum)}…`;
+}
+
+function combinedUsage(left: AgentUsage, right: AgentUsage): AgentUsage {
+  return Object.freeze({
+    inputTokens: left.inputTokens + right.inputTokens,
+    outputTokens: left.outputTokens + right.outputTokens,
+    totalTokens: left.totalTokens + right.totalTokens,
+    estimatedCost: left.estimatedCost + right.estimatedCost,
+  });
 }
 
 /**
@@ -155,25 +172,6 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
       createdAt: message.createdAt,
       request: bounded(message.content, REQUEST_EXCERPT_CHARACTERS),
     }));
-    const related = [];
-    for (const message of requests.slice(-SEARCHED_REQUESTS)) {
-      const found = await options.history.search({
-        query: message.content,
-        sessionScope: Object.freeze({ kind: "previous", currentSessionId: request.sessionId }),
-        limit: HITS_PER_REQUEST,
-        maxExcerptChars: HISTORY_EXCERPT_CHARACTERS,
-        signal,
-      });
-      related.push({
-        request: bounded(message.content, 200),
-        matches: found.hits.map((hit) => ({
-          index: cite(hit.citation),
-          occurredAt: hit.citation.occurredAt,
-          excerpt: hit.citation.excerpt,
-        })),
-      });
-    }
-
     const bindings = await options.store.listBindings({
       project: request.project,
       sessionId: request.sessionId,
@@ -216,7 +214,7 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
       }),
     );
 
-    const reviewMessages: readonly AgentMessage[] = Object.freeze([
+    const reviewPacket: readonly AgentMessage[] = Object.freeze([
       Object.freeze({
         role: "user" as const,
         name: "session_review",
@@ -231,18 +229,62 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
         name: "current_capabilities",
         content: fitted(capabilities, (items) => canonicalJson({ capabilities: items })),
       }),
-      Object.freeze({
-        role: "user" as const,
-        name: "related_history",
-        content: fitted(related, (items) => canonicalJson({ earlierSessions: items })),
-      }),
     ]);
+    const written = await options.inference.run(
+      Object.freeze({
+        runId: nextId("review-session-queries"),
+        role: "session_reviewer" as const,
+        variant: options.reviewer.variant,
+        messages: Object.freeze([
+          ...reviewPacket,
+          Object.freeze({
+            role: "user" as const,
+            name: "write_search_queries",
+            content: `Write up to ${String(SEARCH_QUERIES)} keyword searches for this session's needs in earlier sessions.`,
+          }),
+        ]),
+        evidenceRefs: Object.freeze([]),
+        availableTools: Object.freeze([]),
+        signal,
+      }),
+      SessionReviewQueriesSchema,
+    );
+    signal.throwIfAborted();
+    const queries = [...new Set(written.value.queries)];
+    if (queries.length > 0) await options.history.rebuild();
+    const found = await Promise.all(
+      queries.map(
+        async (query) =>
+          await options.history.search({
+            query,
+            sessionScope: Object.freeze({ kind: "previous", currentSessionId: request.sessionId }),
+            limit: HITS_PER_QUERY,
+            maxExcerptChars: HISTORY_EXCERPT_CHARACTERS,
+            signal,
+          }),
+      ),
+    );
+    const related = found.map((result) => ({
+      query: result.query,
+      matches: result.hits.map((hit) => ({
+        index: cite(hit.citation),
+        occurredAt: hit.citation.occurredAt,
+        excerpt: hit.citation.excerpt,
+      })),
+    }));
     const inferred = await options.inference.run(
       Object.freeze({
         runId: nextId("review-session"),
         role: "session_reviewer" as const,
         variant: options.reviewer.variant,
-        messages: reviewMessages,
+        messages: Object.freeze([
+          ...reviewPacket,
+          Object.freeze({
+            role: "user" as const,
+            name: "related_history",
+            content: fitted(related, (items) => canonicalJson({ earlierSessions: items })),
+          }),
+        ]),
         evidenceRefs: Object.freeze([]),
         availableTools: Object.freeze([]),
         signal,
@@ -269,7 +311,8 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
     return Object.freeze({
       status: "reviewed",
       summary: inferred.value.summary,
-      usage: inferred.trace.usage,
+      queries: Object.freeze(queries),
+      usage: combinedUsage(written.trace.usage, inferred.trace.usage),
       results: Object.freeze(results),
     });
   };

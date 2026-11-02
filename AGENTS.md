@@ -22,7 +22,7 @@
 - The TUI uses `@earendil-works/pi-tui` directly and renders read models. UI components never own durable state.
 - `WorkspaceStore` owns persistence boundaries. SQLite is authoritative for operational state; ordinary editable workspace files are authoritative for declarative definitions.
 - Recorded definition revisions resolve to immutable, byte-stable snapshots. Turns, inspection, and revert never depend on mutable working-file bytes.
-- FTS, embedding, search-document, and UI read-model data are rebuildable indexes or projections. Derived data must cite an authoritative SQLite row or recorded file revision.
+- FTS, search-document, and UI read-model data are rebuildable indexes or projections. Derived data must cite an authoritative SQLite row or recorded file revision.
 - Every persisted datum has exactly one declared authority. Do not dual-write competing canonical copies or reconstruct current operational state from activity history.
 - SQLite transactions, constraints, migrations, integrity checks, and backups govern operational recovery. Activity and file-revision records preserve provenance and debugging history; they are not a universal recovery journal.
 - Do not create a runtime ledger or a second operational authority beside SQLite.

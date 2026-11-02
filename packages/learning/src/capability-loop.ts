@@ -19,7 +19,7 @@ import {
   learnedCapabilitySkillSuffix,
   sha256,
 } from "@noesis/domain";
-import type { ExactCitation, HistoryPort } from "@noesis/intelligence";
+import type { ExactCitation } from "@noesis/intelligence";
 import type { CapabilityLifecycleStore, NoesisWorkspaceStore } from "@noesis/workspace";
 import { z } from "zod";
 import {
@@ -180,7 +180,6 @@ export interface CapabilityLearningModule {
 export interface CreateCapabilityLearningModuleOptions {
   readonly workspace: NoesisWorkspaceStore;
   readonly store: CapabilityLifecycleStore;
-  readonly history: Pick<HistoryPort, "search">;
   readonly inference: StructuredInferencePort;
   readonly reflector: LearningRoleConfiguration;
   readonly programs?: CapabilityProgramLibrary;
@@ -314,7 +313,7 @@ const MINIMUM_CITATION_CHARACTERS = 96;
 const MAX_REFLECTION_CITATIONS = 32;
 interface ReflectionCitationCandidate {
   readonly citation: ExactCitation;
-  readonly kind: "message" | "tool_call" | "outcome" | "history";
+  readonly kind: "message" | "tool_call" | "outcome";
   readonly priority: number;
   readonly toolName?: string;
   readonly toolStatus?: string;
@@ -579,10 +578,7 @@ function representativeCurrentTurnCitations(
   });
   return Object.freeze([...direct, ...tools]);
 }
-function reflectionEvidencePacket(
-  currentCandidates: readonly ReflectionCitationCandidate[],
-  historyCitations: readonly ExactCitation[],
-): {
+function reflectionEvidencePacket(currentCandidates: readonly ReflectionCitationCandidate[]): {
   readonly citations: readonly ExactCitation[];
   readonly content: string;
 } {
@@ -600,13 +596,6 @@ function reflectionEvidencePacket(
         left.citation.occurredAt.localeCompare(right.citation.occurredAt) ||
         canonicalJson(left.citation.source).localeCompare(canonicalJson(right.citation.source)),
     );
-  // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-  const candidates = [
-    ...selectedCurrent,
-    ...historyCitations
-      .slice(0, Math.max(0, MAX_REFLECTION_CITATIONS - selectedCurrent.length))
-      .map((citation) => Object.freeze({ citation, kind: "history" as const, priority: 3 })),
-  ];
   const toolGroups = [
     ...new Map(
       currentCandidates
@@ -633,14 +622,13 @@ function reflectionEvidencePacket(
     }))
     .slice(0, 32);
   let excerptCharacters = CURRENT_TURN_CITATION_CHARACTERS;
-  const retained = [...candidates];
+  const retained = [...selectedCurrent];
   while (retained.length > 0) {
     const citations = retained.map((candidate) => resizeCitation(candidate.citation, excerptCharacters));
     const content = canonicalJson({
       coverage: {
         currentTurnSources: currentCandidates.length,
-        representedCurrentTurnSources: retained.filter((candidate) => candidate.kind !== "history").length,
-        priorSessionSources: historyCitations.length,
+        representedCurrentTurnSources: retained.length,
         toolGroups,
       },
       citations: citations.map((citation, index) => ({
@@ -945,20 +933,11 @@ export function createCapabilityLearningModule(
         status: "no_change",
         reason: "The turn failed before the model produced any output, so it shows nothing about behavior",
       });
-    const [history, bindings] = await Promise.all([
-      options.history.search({
-        query: input.turn.correction ?? input.turn.userMessage,
-        sessionScope: Object.freeze({ kind: "previous", currentSessionId: input.turn.sessionId }),
-        limit: 8,
-        maxExcerptChars: 800,
-        signal,
-      }),
-      options.store.listBindings({
-        project: input.project,
-        sessionId: input.turn.sessionId,
-        limit: 1000,
-      }),
-    ]);
+    const bindings = await options.store.listBindings({
+      project: input.project,
+      sessionId: input.turn.sessionId,
+      limit: 1000,
+    });
     const [definitions, currentRevisions, selectedTurnRevisions, availablePrograms] = await Promise.all([
       options.store.getDefinitions(bindings.map((binding) => binding.capabilityId)),
       Promise.all(bindings.map(async (binding) => await options.store.getRevision(binding.revision))),
@@ -1005,10 +984,7 @@ export function createCapabilityLearningModule(
           }),
         ])
       : turnEvidence;
-    const evidence = reflectionEvidencePacket(
-      currentEvidence,
-      history.hits.map((hit) => hit.citation),
-    );
+    const evidence = reflectionEvidencePacket(currentEvidence);
     const citations = evidence.citations;
     const bindingById = new Map(bindings.map((binding) => [binding.capabilityId, binding] as const));
     const definitionNames = new Map(
