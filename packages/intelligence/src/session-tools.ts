@@ -1226,12 +1226,16 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     const parsed = OpenSessionInputSchema.safeParse(input);
     if (!parsed.success) return invalidInput(parsed.error);
     const { sessionId } = parsed.data;
-    const session = await options.workspace.operational.sessions.get(sessionId);
-    if (!session || session.metadata["deletedAt"] !== undefined)
-      return fail("not_found", `Session ${sessionId} does not exist or was deleted.`);
-    const privateResult = authorizePrivateSearch(parsed.data.includePrivate ?? false, sessionId);
-    if (!privateResult.ok) return privateResult;
-    return { ok: true, value: Object.freeze({ sessionId, includePrivate: privateResult.value }) };
+    try {
+      const session = await options.workspace.operational.sessions.get(sessionId);
+      if (!session || session.metadata["deletedAt"] !== undefined)
+        return fail("not_found", `Session ${sessionId} does not exist or was deleted.`);
+      const privateResult = authorizePrivateSearch(parsed.data.includePrivate ?? false, sessionId);
+      if (!privateResult.ok) return privateResult;
+      return { ok: true, value: Object.freeze({ sessionId, includePrivate: privateResult.value }) };
+    } catch (cause) {
+      return fail("backend_failure", `Opening session failed: ${errorMessage(cause)}`, true);
+    }
   };
   const definitions: readonly SessionToolDefinition[] = Object.freeze([
     Object.freeze({

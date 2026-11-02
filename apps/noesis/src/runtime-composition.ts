@@ -2787,7 +2787,8 @@ export async function createApplicationRuntimeComposition(
         context.signal.throwIfAborted();
         const { sessionId, includePrivate } = authorized.value;
         const frozen = await freezeSessionViewDocument(workspace, sessionId, { includePrivate });
-        const runId = activeExecutionWorkflowRuns.get(context.executionId);
+        const runId =
+          activeExecutionWorkflowRuns.get(context.executionId) ?? plan.subAgentActor?.workflowRunId;
         if (runId) {
           const pinned = await workspace.operational.workflows.pinSessionView({
             runId,
@@ -2886,6 +2887,8 @@ export async function createApplicationRuntimeComposition(
         if (plan.subAgentActor && (!parentRecord || parentRecord.status === "closed"))
           throw new Error("Parent subagent is unavailable");
         const originParent = parentAgentAddress();
+        const workflowRunId =
+          activeExecutionWorkflowRuns.get(context.executionId) ?? plan.subAgentActor?.workflowRunId;
         const origin = Object.freeze(
           createConditionalObject({
             projectId: project.projectId,
@@ -2894,6 +2897,7 @@ export async function createApplicationRuntimeComposition(
             executionId: context.executionId,
           } as const)
             .addOptional(plan.subAgentActor ? { parentAgentId: plan.subAgentActor.agentId } : undefined)
+            .addOptional(workflowRunId ? { workflowRunId } : undefined)
             .finish(),
         );
         const unsignedPlan = Object.freeze(
@@ -4031,14 +4035,22 @@ export async function createApplicationRuntimeComposition(
         model: record.frozenPlan.route.model,
         thinkingLevel: record.frozenPlan.thinkingLevel,
         permissionSnapshot: record.frozenPlan.authority.permissionSnapshot,
-        subAgentActor: Object.freeze({
-          agentId: record.agentId,
-          taskId: task.taskId,
-          parent: record.parentAgentId
-            ? Object.freeze({ kind: "subagent" as const, id: record.parentAgentId })
-            : Object.freeze({ kind: "foreground" as const, id: record.originSessionId }),
-          allowedTools: Object.freeze(record.frozenPlan.frozenTools.map((tool) => tool.name)),
-        }),
+        subAgentActor: Object.freeze(
+          createConditionalObject({
+            agentId: record.agentId,
+            taskId: task.taskId,
+            parent: record.parentAgentId
+              ? Object.freeze({ kind: "subagent" as const, id: record.parentAgentId })
+              : Object.freeze({ kind: "foreground" as const, id: record.originSessionId }),
+            allowedTools: Object.freeze(record.frozenPlan.frozenTools.map((tool) => tool.name)),
+          } as const)
+            .addOptional(
+              record.frozenPlan.origin.workflowRunId
+                ? { workflowRunId: record.frozenPlan.origin.workflowRunId }
+                : undefined,
+            )
+            .finish(),
+        ),
         createdAt: task.createdAt,
       } as const)
         .addOptional(record.frozenPlan.context ? { contextDocument: record.frozenPlan.context } : undefined)
