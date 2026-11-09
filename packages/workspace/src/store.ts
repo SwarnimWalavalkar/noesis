@@ -4835,19 +4835,32 @@ function createSearchIndex(
       const firstMatch =
         db.prepare(`SELECT instr(highlight(search_fts, 1, char(1), char(2)), char(1)) - 1 AS offset
          FROM search_fts WHERE search_fts MATCH ? AND rowid = ?`);
-      return rows.map((row) => ({
-        ...decodeSearchDocument(row),
-        // FTS5 reports BM25 as a negative number where lower is better.
-        score: -requiredNumber(row, "rank"),
-        matchOffset: Math.max(
+      return rows.map((row) => {
+        const document = decodeSearchDocument(row);
+        // SQLite counts code points; JavaScript strings index UTF-16 code units.
+        const codePoints = Math.max(
           0,
           requiredNumber(firstMatch.get(query, requiredNumber(row, "fts_rowid")), "offset"),
-        ),
-      }));
+        );
+        return {
+          ...document,
+          // FTS5 reports BM25 as a negative number where lower is better.
+          score: -requiredNumber(row, "rank"),
+          matchOffset: utf16Offset(document.body, codePoints),
+        };
+      });
     },
     openCanonicalSource: async (source: CanonicalSearchSource) =>
       await openCanonicalSource(db, paths, source),
   });
+}
+function utf16Offset(text: string, codePoints: number): number {
+  let offset = 0;
+  for (let counted = 0; counted < codePoints && offset < text.length; counted += 1) {
+    const unit = text.charCodeAt(offset);
+    offset += unit >= 0xd800 && unit <= 0xdbff && offset + 1 < text.length ? 2 : 1;
+  }
+  return offset;
 }
 function sessionSensitivity(db: DatabaseSync, sessionId: string): SearchDocument["sensitivity"] | undefined {
   const session = db.prepare("SELECT metadata_json FROM sessions WHERE session_id = ?").get(sessionId);

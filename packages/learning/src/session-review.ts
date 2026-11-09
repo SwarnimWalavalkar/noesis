@@ -250,7 +250,13 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
       SessionReviewQueriesSchema,
     );
     signal.throwIfAborted();
-    const queries = [...new Set(written.value.queries)];
+    const seen = new Set<string>();
+    const queries = written.value.queries.filter((query) => {
+      const key = query.trim().toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     if (queries.length > 0) await options.history.rebuild();
     const found = await Promise.all(
       queries.map(

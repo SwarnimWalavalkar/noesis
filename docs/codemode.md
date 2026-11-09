@@ -53,7 +53,7 @@ Results contain bounded evidence with exact citations. A search returns 20 resul
 
 The optional `after` and `before` filters take an ISO-8601 date or datetime. `after` is inclusive and `before` is exclusive. The optional `source` filter limits results to conversation messages (`"message"`) or tool calls and their output (`"tool_output"`).
 
-All searches in one turn share a total budget of about 31,000 characters. When the budget withholds results, `telemetry.status` is `budget_exhausted` and `telemetry.omittedResults` counts them. That does not mean the words failed to match, so the agent should ask for fewer results with `maxResults`.
+All searches in one turn share a total budget of about 31,000 characters. When the budget withholds results, `telemetry.status` is `budget_exhausted` and `telemetry.omittedResults` counts them. That does not mean the words failed to match. A smaller `maxResults` cannot recover withheld results later in the same turn, so the agent should choose a smaller `maxResults`, about 8 per query, before fanning out.
 
 ## Subagent lifecycle
 

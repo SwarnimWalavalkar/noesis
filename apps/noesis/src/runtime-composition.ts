@@ -1038,7 +1038,7 @@ function rolePrompt(name: RoleName): string {
       "Create or revise a Capability only when one of these supports it, and name it in evidence.kind:",
       "- explicit_request: the user asked Noesis to remember something or to behave differently from now on.",
       "- user_correction: the user corrected or redid the turn's work, and the correction would apply again in later work.",
-      "- repeated_across_sessions: the user says, or the turn's own evidence shows, that the same need or correction came up in an earlier session. A separate session review searches earlier sessions; you see only this exchange.",
+      "- repeated_across_sessions: the turn's own evidence shows the same need or correction from an earlier session, e.g., the user pasted that exchange or a tool in this turn returned it. A user's claim alone is not enough here; a separate session review searches earlier sessions to confirm repetition.",
       "- verified_method: a method worked in this turn, the user accepted the result, and the user is likely to need it again.",
       "Quote the user's words or the observed result in evidence.quote. State in evidence.wouldOtherwise what the user would have to repeat or correct without this Capability. If you cannot, return no_change.",
       "Do not learn from a one-off request, from ordinary success, or from your own opinion of the turn. Do not learn from failures outside the model's control, e.g., provider, network, or runtime errors. The cause field states how the turn ended.",

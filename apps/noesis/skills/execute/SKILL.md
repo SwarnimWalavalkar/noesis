@@ -43,7 +43,7 @@ return { readme, status };
 - Double-quote exact phrases: `'"rollback decision" migration'`.
 - Reformulate and fan out several queries with `Promise.all`, using synonyms and the likely wording of the original, rather than expecting one query to find everything. Set `maxResults` to about 8 when fanning out, because all searches in a turn share one context budget.
 - Narrow with `scope`, `sessionId`, `after`, `before`, and `source` (`"message"` or `"tool_output"`) rather than guessing dates or sources from excerpts.
-- `telemetry.status: "budget_exhausted"` means results were withheld, not that nothing matched. Search again with a smaller `maxResults`.
+- `telemetry.status: "budget_exhausted"` means results were withheld, not that nothing matched. The budget is already spent for this turn, so choose a smaller `maxResults` before fanning out rather than after.
 - An empty result means only that these words did not match. Try different words before concluding that the evidence does not exist.
 
 Code Mode, subagents, and shell commands have no implicit duration or call-count ceiling. Pass an optional `timeoutMs` only when the task itself needs a deadline; the user can cancel active work at any time.

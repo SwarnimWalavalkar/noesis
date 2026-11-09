@@ -91,15 +91,32 @@ describe("longitudinal history", () => {
     expect(await history.resolve([citation])).toEqual([citation]);
   });
 
+  test("centres excerpts on the match when astral characters precede it", async () => {
+    await workspace.operational.messages.put({
+      messageId: "message-astral",
+      sessionId: "session-a",
+      role: "user",
+      content: `${"\u{1F600}".repeat(200)} the pangolin evidence sits here`,
+      sensitivity: "normal",
+      createdAt: "2026-01-01T00:01:30.000Z",
+      metadata: {},
+    });
+    const history = createHistoryPort({ workspace });
+    await history.rebuild();
+    const result = await history.search({ query: "pangolin", limit: 1, maxExcerptChars: 32 });
+    expect(result.hits[0]?.citation.excerpt).toContain("pangolin");
+  });
+
   test("bounds excerpts and excludes private or secret history unless explicitly allowed", async () => {
     const history = createHistoryPort({ workspace });
     await history.rebuild();
 
     const normal = await history.search({
-      query: "project codename zephyr ultrasecretvalue",
+      query: "project codename zephyr ultrasecretvalue citations",
       limit: 1,
       maxExcerptChars: 64,
     });
+    expect(normal.hits.length).toBeGreaterThan(0);
     expect(
       normal.hits.every(
         (hit) =>
