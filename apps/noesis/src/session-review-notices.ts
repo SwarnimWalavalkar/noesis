@@ -30,18 +30,18 @@ export function sessionReviewNotices(
       );
       const completedAt = job.completedAt ?? job.updatedAt;
       const reactionTurn = userTurns.find((turn) => turn.createdAt > completedAt);
-      const first = published[0];
+      // A Capability result leads, so a promotion never hides a decision the user must make.
+      const first = published.find((item) => "capabilityId" in item) ?? published[0];
       if (!first || !reactionTurn) return [];
       return [
         Object.freeze(
           createConditionalObject({
             jobId: job.jobId,
             stage: "reflection" as const,
-            // A promotion changes no Capability, so it reads as a completed review.
-            status: first.status === "program_promoted" ? ("completed" as const) : first.status,
+            status: first.status,
             // One notice names every change the review made.
             // The review usually covers a session the user has already left.
-            summary: `Review of an earlier session · ${published
+            summary: `Review of an earlier session · ${[first, ...published.filter((item) => item !== first)]
               .map((item) => ("message" in item ? item.message : result.data.summary))
               .join(" · ")}`,
             updatedAt: job.updatedAt,

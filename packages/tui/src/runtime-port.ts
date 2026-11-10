@@ -199,6 +199,7 @@ export interface TuiLearningActivitySummary {
     | "paused"
     | "restored"
     | "binding_changed"
+    | "program_promoted"
     | "stale"
     | "failed";
   readonly summary: string;

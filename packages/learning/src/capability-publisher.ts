@@ -45,6 +45,8 @@ export const CapabilityEffectDraftSchema = z.discriminatedUnion("kind", [
     kind: z.literal("program"),
     mode: z.enum(["script", "workflow"]),
     name: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/u),
+    /** Which library owns the Program. Omitted means the project one first, then the global one. */
+    scope: z.enum(["project", "global"]).optional(),
   }),
 ]);
 
@@ -165,6 +167,8 @@ export interface CapabilityProgramLibrary {
     readonly {
       readonly mode: "script" | "workflow";
       readonly scope: "project" | "global";
+      /** A global Program that a project Program with the same name hides from name lookups. */
+      readonly shadowed?: boolean;
       readonly name: string;
       readonly description: string;
       readonly revision: number;
@@ -175,6 +179,7 @@ export interface CapabilityProgramLibrary {
     mode: "script" | "workflow",
     name: string,
     project: ProjectRef,
+    scope?: "project" | "global",
   ) => Promise<Extract<CapabilityEffect, { readonly kind: "program" }> | undefined>;
   /** Copies a project Program into the global library, leaving the original intact. */
   readonly promote?: (
@@ -206,7 +211,7 @@ export interface CapabilityPublisher {
     context: CapabilityPublicationContext,
     signal: AbortSignal,
   ) => Promise<CapabilityPublicationResult>;
-  /** Moves a project Program to the global library as a new revision that cites its source. */
+  /** Copies a project Program to the global library as a new revision that cites its source. */
   readonly promoteProgram: (
     decision: ProgramPromotionDecision,
     context: Pick<CapabilityPublicationContext, "project" | "evidenceRefs" | "actor">,
@@ -451,8 +456,12 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
           draft.mode,
           draft.name,
           input.project,
+          draft.scope,
         );
-        if (!resolved) throw new Error(`Unknown saved ${draft.mode} Program ${draft.name}`);
+        if (!resolved)
+          throw new Error(
+            `Unknown saved ${draft.scope ? `${draft.scope} ` : ""}${draft.mode} Program ${draft.name}`,
+          );
         return resolved;
       }),
     );
@@ -860,12 +869,23 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
           kind: "program" as const,
           mode: effect.program.mode,
           name: effect.program.name,
+          scope: effect.program.project ? ("project" as const) : ("global" as const),
         })),
       ),
       // Keep the exact pinned Program revisions instead of resolving the live library.
       resolver: Object.freeze({
-        resolve: async (mode: "script" | "workflow", name: string) =>
-          programs.find((effect) => effect.program.mode === mode && effect.program.name === name),
+        resolve: async (
+          mode: "script" | "workflow",
+          name: string,
+          _project: ProjectRef,
+          scope?: "project" | "global",
+        ) =>
+          programs.find(
+            (effect) =>
+              effect.program.mode === mode &&
+              effect.program.name === name &&
+              (scope === undefined || (scope === "project") === (effect.program.project !== undefined)),
+          ),
       }),
     } as const)
       .addOptional(programs[0] ? { project: programs[0].program.project } : undefined)

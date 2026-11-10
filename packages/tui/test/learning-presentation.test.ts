@@ -67,6 +67,7 @@ describe("learning notice presentation", () => {
     ["revised", "Capability updated · revised summary"],
     ["paused", "Capability paused · paused summary"],
     ["stale", "unchanged · stale summary"],
+    ["program_promoted", "Program now global · program_promoted summary"],
   ] as const)("presents %s outcomes", (status, expected) => {
     expect(learningActivityNoticeForTurn([activity(status)], "turn-1")).toBe(expected);
   });

@@ -50,6 +50,7 @@ export function learningActivityNotice(activity: TuiLearningActivitySummary): st
   if (activity.status === "paused") return `Capability paused · ${summary}`;
   if (activity.status === "restored") return `Capability restored · ${summary}`;
   if (activity.status === "binding_changed") return `Capability settings updated · ${summary}`;
+  if (activity.status === "program_promoted") return `Program now global · ${summary}`;
   if (activity.status === "stale") return `unchanged · ${summary}`;
   return undefined;
 }

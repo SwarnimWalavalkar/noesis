@@ -1,5 +1,6 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
 import { JsonValueSchema, type JsonValue, sha256 } from "@noesis/domain";
@@ -116,7 +117,7 @@ const RunResult = z.looseObject({
 });
 
 test("a global Program saved in one project runs by name in another, and the project's own wins", async () => {
-  const { within } = await fixture();
+  const { home, within } = await fixture();
   const saved = await within("project-a", async ({ turn }) =>
     z
       .looseObject({
@@ -175,6 +176,33 @@ test("a global Program saved in one project runs by name in another, and the pro
       ),
     );
     expect(exact.value).toMatchObject({ scope: "global", value: { from: "global" } });
+    const scoped = RunResult.parse(
+      await turn(
+        'return await tools.programs.run({ mode: "script", name: "say-origin", scope: "global", input: { value: 1 } });',
+      ),
+    );
+    expect(scoped.value).toMatchObject({ scope: "global", definitionRevisionId: globalRevisionId });
+    // Each run is authorized against the owner of the code that actually ran.
+    const database = new DatabaseSync(join(home, "database", "noesis.sqlite"), { readOnly: true });
+    try {
+      const resources = z
+        .array(z.strictObject({ resource: z.string() }))
+        .parse(
+          database
+            .prepare(
+              "SELECT resource FROM authority_operations WHERE resource LIKE '%:script:say-origin:run' ORDER BY rowid",
+            )
+            .all(),
+        )
+        .map(({ resource }) => resource);
+      expect(resources.slice(-3)).toEqual([
+        `program:${projectId}:script:say-origin:run`,
+        "program:global:script:say-origin:run",
+        "program:global:script:say-origin:run",
+      ]);
+    } finally {
+      database.close();
+    }
     expect(await turn("return await tools.programs.list({});")).toMatchObject({
       value: [
         { name: "say-origin", scope: "project", shadowed: false },
@@ -189,7 +217,7 @@ test("a global Program saved in one project runs by name in another, and the pro
     const runs = z
       .looseObject({ value: z.array(z.looseObject({ scope: z.string(), definitionRevisionId: z.string() })) })
       .parse(await turn("return await tools.programs.runs({});"));
-    expect(runs.value.map((item) => item.scope)).toEqual(["global", "project", "global"]);
+    expect(runs.value.map((item) => item.scope)).toEqual(["global", "project", "global", "global"]);
   });
 
   await within("project-c", async ({ runtime }) => {
@@ -374,6 +402,59 @@ test("a Capability bound to a global Program stays global and works in another p
     const recorded = await runtime.debug.workspace.operational.codeExecutions.listForSession(sessionId);
     expect(recorded.find((execution) => execution.program)?.program).toMatchObject({ name: "shared-tool" });
     expect(recorded.find((execution) => execution.program)?.program?.projectId).toBeUndefined();
+  });
+});
+
+test("a promoted Program attaches to a global Capability from its source project", async () => {
+  const { within } = await fixture();
+  const capabilityId = await within("project-a", async ({ turn, runtime }) => {
+    await turn(`return ${saveScript("promoted-tool", "project-a")};`);
+    await turn(
+      'return await tools.programs.promote({ mode: "script", name: "promoted-tool", reason: "Two projects need it." });',
+    );
+    const proposal = (scope?: string) => ({
+      name: "Promoted everywhere",
+      description: "Use the promoted Program.",
+      applicability: "When the promoted Program applies.",
+      summary: "Attach the promoted Program.",
+      rationale: "It is useful in every project.",
+      anticipatedEffect: "The Program is available.",
+      effects: [
+        scope
+          ? { kind: "program", mode: "script", name: "promoted-tool", scope }
+          : { kind: "program", mode: "script", name: "promoted-tool" },
+      ],
+      scope: "global",
+      activationMode: "always",
+      consequence: "ordinary",
+      consequenceDescription: "Reversible.",
+    });
+    // Without a scope the project copy wins, which cannot back a global Capability.
+    expect(
+      await turn(
+        `try { return await tools.capabilities.refine({ decision: "create", proposal: ${JSON.stringify(proposal())} }); } catch (error) { return String(error); }`,
+      ),
+    ).toMatchObject({ value: expect.stringContaining("requires current-project scope") });
+    const published = z
+      .looseObject({ value: z.looseObject({ status: z.string(), capabilityId: z.string() }) })
+      .parse(
+        await turn(
+          `return await tools.capabilities.refine({ decision: "create", proposal: ${JSON.stringify(proposal("global"))} });`,
+        ),
+      );
+    expect(published.value.status).toBe("activated");
+    expect(
+      (await runtime.debug.workspace.capabilities.getBinding(published.value.capabilityId))?.scope,
+    ).toEqual({
+      kind: "global",
+    });
+    return published.value.capabilityId;
+  });
+  await within("project-b", async ({ turn }) => {
+    const toolName = `capability_${sha256(`${capabilityId}:script:promoted-tool`).slice(0, 12)}_script_promoted-tool`;
+    expect(
+      await turn(`return await noesis.invoke(${JSON.stringify(toolName)}, { value: 1 });`),
+    ).toMatchObject({ value: { from: "project-a" } });
   });
 });
 

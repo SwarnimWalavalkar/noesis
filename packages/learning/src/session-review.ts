@@ -306,13 +306,20 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
                   role: "user" as const,
                   name: "saved_programs",
                   content: fitted(
-                    savedPrograms.map(({ mode, scope, name, description, revision }) => ({
-                      mode,
-                      scope,
-                      name,
-                      description: bounded(description, 200),
-                      revision,
-                    })),
+                    // A global entry carries its exact revision, which promotion needs to replace it.
+                    savedPrograms.map(({ mode, scope, name, description, revision, definitionRevision }) =>
+                      createConditionalObject({
+                        mode,
+                        scope,
+                        name,
+                        description: bounded(description, 200),
+                        revision,
+                      } as const)
+                        .addOptional(
+                          scope === "global" ? { definitionRevisionId: definitionRevision.revisionId } : undefined,
+                        )
+                        .finish(),
+                    ),
                     (items) => canonicalJson({ programs: items }),
                   ),
                 }),

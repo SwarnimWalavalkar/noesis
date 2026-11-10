@@ -387,8 +387,9 @@ export async function findScriptRevision(
   project: ProjectRef,
   name: string,
   revisionId: string,
+  scope?: ProgramScopeName,
 ): Promise<StoredScriptProgram | undefined> {
-  for (const owner of ownersNearestFirst(project)) {
+  for (const owner of ownersNearestFirst(project).filter((owner) => !scope || owner.kind === scope)) {
     const stored = await readStoredScriptRevision(workspace, owner, name, revisionId);
     if (stored) return Object.freeze({ ...stored, owner });
   }
@@ -399,8 +400,9 @@ export async function findWorkflowRevision(
   project: ProjectRef,
   name: string,
   revisionId: string,
+  scope?: ProgramScopeName,
 ): Promise<StoredWorkflowProgram | undefined> {
-  for (const owner of ownersNearestFirst(project)) {
+  for (const owner of ownersNearestFirst(project).filter((owner) => !scope || owner.kind === scope)) {
     const stored = await readStoredWorkflowRevision(workspace, owner, name, revisionId);
     if (stored) return Object.freeze({ ...stored, owner });
   }
@@ -697,7 +699,10 @@ function executableWorkflowFields(manifest: WorkflowManifest) {
   };
 }
 
-/** The Capability view of the library: one effect per name, nearest scope first. */
+/**
+ * The Capability view of the library. A name resolves nearest scope first unless the caller names a
+ * scope, and the list includes a global Program a project one shadows so it can still be chosen.
+ */
 export function createCapabilityProgramLibrary(
   workspace: NoesisWorkspaceStore,
   activeProject: ProjectRef,
@@ -715,37 +720,34 @@ export function createCapabilityProgramLibrary(
       ]);
       const library = createTurnProgramLibrary({ scripts, workflows });
       return Object.freeze([
-        ...library
-          .scripts()
-          .filter(({ owner, manifest }) => !library.isShadowed("script", owner, manifest.name))
-          .map(({ manifest, definitionRevision, owner }) =>
-            Object.freeze({
-              mode: "script" as const,
-              scope: owner.kind,
-              name: manifest.name,
-              description: manifest.description,
-              revision: manifest.revision,
-              definitionRevision,
-            }),
-          ),
-        ...library
-          .workflows()
-          .filter(({ owner, manifest }) => !library.isShadowed("workflow", owner, manifest.name))
-          .map(({ manifest, definitionRevision, owner }) =>
-            Object.freeze({
-              mode: "workflow" as const,
-              scope: owner.kind,
-              name: manifest.name,
-              description: manifest.description,
-              revision: manifest.revision,
-              definitionRevision,
-            }),
-          ),
+        ...library.scripts().map(({ manifest, definitionRevision, owner }) =>
+          Object.freeze({
+            mode: "script" as const,
+            scope: owner.kind,
+            shadowed: library.isShadowed("script", owner, manifest.name),
+            name: manifest.name,
+            description: manifest.description,
+            revision: manifest.revision,
+            definitionRevision,
+          }),
+        ),
+        ...library.workflows().map(({ manifest, definitionRevision, owner }) =>
+          Object.freeze({
+            mode: "workflow" as const,
+            scope: owner.kind,
+            shadowed: library.isShadowed("workflow", owner, manifest.name),
+            name: manifest.name,
+            description: manifest.description,
+            revision: manifest.revision,
+            definitionRevision,
+          }),
+        ),
       ]);
     },
-    resolve: async (mode: ProgramMode, name: string, project: ProjectRef) => {
+    resolve: async (mode: ProgramMode, name: string, project: ProjectRef, scope?: ProgramScopeName) => {
       assertActiveProject(project);
-      for (const owner of ownersNearestFirst(project)) {
+      // A named scope selects that owner even when a project Program shadows the global one.
+      for (const owner of ownersNearestFirst(project).filter((owner) => !scope || owner.kind === scope)) {
         const stored =
           mode === "script"
             ? await readStoredScriptDefinition(workspace, owner, name)

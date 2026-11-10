@@ -1692,6 +1692,9 @@ describe("WorkspaceStore", () => {
       revision: 1,
       definitionRevisionId,
     });
+    expect((await store.operational.codeExecutions.get("execution-global"))?.projectId).toBe(
+      "project-running",
+    );
     // A project cannot claim the global revision as its own.
     const foreign = await writeSource("execution-foreign");
     await expect(

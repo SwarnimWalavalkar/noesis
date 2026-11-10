@@ -365,7 +365,7 @@ export const ProgramPromotionSchema = z.strictObject({
   projectId: z.string().min(1),
   revision: z.number().int().positive(),
   definitionRevisionId: z.string().min(1),
-  definitionDigest: z.string().min(1),
+  definitionDigest: z.string().regex(/^[a-f0-9]{64}$/u),
 });
 export const ScriptProgramManifestSchema = z.strictObject({
   kind: z.literal("noesis_program"),
