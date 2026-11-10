@@ -37,11 +37,22 @@ const singleLine = (value: string): string => value.replaceAll(/\s+/gu, " ").tri
 /** One YAML value. A plain value is easy to read; anything YAML could misread becomes a JSON string. */
 function yamlValue(value: string): string {
   const line = singleLine(value);
-  return /^[A-Za-z0-9][A-Za-z0-9 ,.()/'_-]*$/u.test(line) && !line.endsWith(" ")
+  return /^[A-Za-z0-9][A-Za-z0-9 ,.()/'_-]*$/u.test(line) &&
+    !line.endsWith(" ") &&
+    // YAML reads these as numbers, booleans, or null rather than text.
+    !/^[0-9]/u.test(line) &&
+    !/^(?:true|false|yes|no|on|off|null|y|n)$/iu.test(line)
     ? line
     : JSON.stringify(line);
 }
 function unquoted(value: string): string | undefined {
+  // A single-quoted YAML string escapes a quote by doubling it.
+  if (value.startsWith("'")) {
+    const inner = value.slice(1, -1);
+    if (value.length < 2 || !value.endsWith("'") || inner.replaceAll("''", "").includes("'"))
+      return undefined;
+    return inner.replaceAll("''", "'");
+  }
   if (!value.startsWith('"')) return value;
   try {
     const parsed: unknown = JSON.parse(value);
@@ -98,11 +109,11 @@ export function renderCapabilityDocument(
  * guidance and the notes keep their exact bytes.
  */
 export function capabilityDocumentInFolderFormat(folderName: string, text: string): string {
-  const normalized = text.replaceAll("\r\n", "\n");
-  const close = normalized.indexOf("\n---\n", 3);
-  const parsed = parseCapabilityDocument(normalized);
-  if (!parsed.ok || close < 0) return text;
-  return `${folderFrontmatter(folderName, parsed.content).join("\n")}\n${normalized.slice(close + 5)}`;
+  const parsed = parseCapabilityDocument(text);
+  // Only the frontmatter changes. The guidance and notes keep their exact bytes, line endings included.
+  const close = /\r?\n---\r?\n/u.exec(text.slice(3));
+  if (!parsed.ok || !close) return text;
+  return `${folderFrontmatter(folderName, parsed.content).join("\n")}\n${text.slice(3 + close.index + close[0].length)}`;
 }
 
 function parseFrontmatter(

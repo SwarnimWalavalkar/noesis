@@ -180,7 +180,6 @@ import {
   listVisibleWorkflows,
   type ProgramLookup,
   type ProgramOwner,
-  type ProgramScopeName,
   type StoredScriptProgram,
   type StoredWorkflowProgram,
   programDefinitionScope,
@@ -355,6 +354,16 @@ function frozenFolderPrograms(selection: FrozenTurnPlan["selectedCapabilities"][
     skillName: learnedCapabilitySkillName(selection.capabilityId, selection.name),
   });
   const programs = selection.folder?.programs ?? [];
+  // Admission verified each definition against its pin. The definition must also be the Program its entry names.
+  for (const program of programs) {
+    const manifest = z
+      .looseObject({ mode: z.string(), name: z.string() })
+      .parse(JSON.parse(program.definition.content));
+    if (manifest.mode !== program.mode || manifest.name !== program.name)
+      throw new Error(
+        `Capability ${selection.capabilityId} folder Program ${program.name} does not match its definition`,
+      );
+  }
   return Object.freeze({
     scripts: Object.freeze(
       programs.flatMap((program) =>
@@ -1939,7 +1948,7 @@ export async function createApplicationRuntimeComposition(
               : turnPrograms.workflow(name, lookup);
             if (!stored)
               throw new Error(
-                `Unknown ${label} workflow-mode Program ${name}${definitionRevisionId ? ` revision ${definitionRevisionId}` : ""}`,
+                `Unknown workflow-mode Program ${name}${definitionRevisionId ? ` revision ${definitionRevisionId}` : ""} in ${label}`,
               );
             if (!runWorkflow) throw new Error("Workflow runtime is not initialized");
             const result = await runWorkflow(stored, input, context);
@@ -1961,7 +1970,7 @@ export async function createApplicationRuntimeComposition(
             : turnPrograms.script(name, lookup);
           if (!stored)
             throw new Error(
-              `Unknown ${label} script-mode Program ${name}${definitionRevisionId ? ` revision ${definitionRevisionId}` : ""}`,
+              `Unknown script-mode Program ${name}${definitionRevisionId ? ` revision ${definitionRevisionId}` : ""} in ${label}`,
             );
           const { manifest, definitionRevision, owner } = stored;
           for (const requiredTool of manifest.requiredTools)

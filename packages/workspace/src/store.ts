@@ -1101,8 +1101,12 @@ export async function createWorkspaceStore(
             throw error;
           }
           for (const entry of entries) {
-            // Editors and the store leave dotfiles and atomic-write temporaries beside real files.
-            if (entry.name.startsWith(".") || entry.name.endsWith(".tmp")) continue;
+            // Editors leave dotfiles, and the store's atomic writes leave <name>.<pid>.<uuid>.tmp files.
+            if (
+              entry.name.startsWith(".") ||
+              /\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/u.test(entry.name)
+            )
+              continue;
             const path = relative ? `${relative}/${entry.name}` : entry.name;
             if (entry.isDirectory()) await visit(path);
             else if (entry.isFile()) files.push(path);
@@ -1241,7 +1245,11 @@ export async function createWorkspaceStore(
         for (let parent = dirname(target); parent.startsWith(`${keep}/`); parent = dirname(parent)) {
           const removed = await rmdir(parent).then(
             () => true,
-            () => false,
+            (cause: unknown) => {
+              // A folder that still holds files, or is already gone, stays as it is.
+              if (isMissing(cause) || isAlreadyExists(cause) || isNotEmpty(cause)) return false;
+              throw cause;
+            },
           );
           if (!removed) break;
         }
@@ -5021,6 +5029,9 @@ function ftsQuery(query: string): string {
 }
 function isMissing(cause: unknown): boolean {
   return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
+}
+function isNotEmpty(cause: unknown): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === "ENOTEMPTY";
 }
 function isAlreadyExists(cause: unknown): boolean {
   return cause instanceof Error && "code" in cause && cause.code === "EEXIST";

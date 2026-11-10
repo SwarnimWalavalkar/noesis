@@ -89,7 +89,7 @@ review-migration-1a2b3c/
   programs/check-rollback/   # program.json and index.mjs
 ```
 
-You can edit anything in the folder directly, and Noesis records your edit as a new version before the next turn. Restoring an earlier version rewrites the folder. A Capability has these parts:
+You can edit anything in the folder directly, and Noesis records a valid edit as a new version before the next turn. An edit it cannot read or apply stays in the folder and is reported in `/learning`. Restoring an earlier version rewrites the folder; an automatic restore leaves an edit Noesis has not recorded yet in place. A Capability has these parts:
 
 - **Guidance** is the body of `SKILL.md`, with the name and when it applies in its frontmatter.
 - **Resources** are any other files in the folder. Each version pins their exact bytes.

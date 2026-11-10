@@ -947,6 +947,25 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
     );
   };
 
+  /**
+   * True when the file still holds bytes this Capability already took in: Noesis's own sync wrote
+   * them, or some revision of the Capability pins the file revision recorded for them. Such bytes may
+   * be replaced or removed when the folder follows another revision. Anything else is an edit Noesis
+   * has not applied, such as a file recorded by a scan whose import then failed.
+   */
+  const isAdoptedFile = async (capabilityId: string, path: string, working: Uint8Array): Promise<boolean> => {
+    const lastRecorded = await options.workspace.reads.latestWorkingRevision(path);
+    if (lastRecorded?.revision.contentDigest !== sha256(working)) return false;
+    if (lastRecorded.actor.actorId === systemActor.actorId && lastRecorded.actor.kind === systemActor.kind)
+      return true;
+    const revisions = await options.store.listRevisions(capabilityId);
+    return revisions.some((lifecycle) =>
+      capabilityFolderFiles(lifecycle).some(
+        (file) => file.revision.revisionId === lastRecorded.revision.revisionId,
+      ),
+    );
+  };
+
   /** The exact Program a revision attaches, kept when an edit replaces only its guidance. */
   const currentProgram = (
     lifecycle: CapabilityLifecycleRevision,
@@ -1102,7 +1121,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       const path = `${folderPath}/${file.path}`;
       const working = await options.workspace.reads.readWorkingFile(path);
       if (working && sha256(working) === file.digest) continue;
-      if (working && !(await isUnchangedNoesisWrite(path, working))) {
+      if (working && !(await isAdoptedFile(capabilityId, path, working))) {
         // The file holds an edit Noesis has not recorded yet. A publication leaves it, so the next
         // scan applies the user's edit on top of this revision. The user's own restore or approval
         // replaces it, after keeping its bytes as a revision so nothing is lost.
@@ -1131,8 +1150,7 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
       const path = `${folderPath}/${extra}`;
       const working = await options.workspace.reads.readWorkingFile(path);
       if (!working) continue;
-      const recorded = await options.workspace.reads.latestWorkingRevision(path);
-      if (recorded?.revision.contentDigest !== sha256(working)) {
+      if (!(await isAdoptedFile(capabilityId, path, working))) {
         if (!userChoseRevision) continue;
         await options.workspace.recordDirectEdit(
           path,
@@ -1170,7 +1188,15 @@ export function createCapabilityPublisher(options: CreateCapabilityPublisherOpti
         continue;
       }
       const working = await options.workspace.reads.readWorkingFile(path);
-      if (!working) continue;
+      if (!working) {
+        // Without SKILL.md the folder is not a skill. Say so; the current revision stays in effect.
+        problems.push({
+          capabilityId: binding.capabilityId,
+          path,
+          error: `${CAPABILITY_DOCUMENT_FILE} is missing, so the Capability keeps its current revision`,
+        });
+        continue;
+      }
       const listing = await options.workspace.reads.listWorkingFiles(folderPath);
       const workingFiles = await Promise.all(
         listing.files.map(async (file) => {

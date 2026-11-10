@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  capabilityDocumentInFolderFormat,
   capabilityFolderDigest,
   capabilityGuidance,
   capabilityRevisionRef,
@@ -126,6 +127,31 @@ describe("Capability folders", () => {
     expect(capabilityGuidance(text)).toBe("Check the rollback path first.");
   });
 
+  test("frontmatter values stay text, single quotes read back, and moving a file keeps its body bytes", () => {
+    const text = renderCapabilityDocument(
+      "values-abc123",
+      { name: "null", when: "123", description: "true", guidance: "Keep them text." },
+      { rationale: "Asked.", history: [] },
+    );
+    expect(text).toContain('description: "true"');
+    expect(text).toContain('  title: "null"');
+    expect(text).toContain('  when: "123"');
+    expect(parseCapabilityDocument(text)).toMatchObject({
+      ok: true,
+      content: { name: "null", when: "123", description: "true" },
+    });
+    const edited = text.replace('  title: "null"', "  title: 'Review: it''s here'");
+    expect(parseCapabilityDocument(edited)).toMatchObject({
+      ok: true,
+      content: { name: "Review: it's here" },
+    });
+    const legacy =
+      "---\r\nname: Use pnpm\r\nwhen: Package commands.\r\ndescription: Use pnpm.\r\n---\r\n\r\nRun pnpm.\r\n";
+    expect(capabilityDocumentInFolderFormat("use-pnpm-abc123", legacy).endsWith("\r\nRun pnpm.\r\n")).toBe(
+      true,
+    );
+  });
+
   test("a direct edit anywhere in the folder becomes a revision that pins the whole folder", async () => {
     const { root, workspace, publisher, context, capabilityId, currentRevision, folder, write } =
       await setup();
@@ -243,6 +269,74 @@ describe("Capability folders", () => {
     expect(await readFile(join(root, folder, "programs/check/program.json"), "utf8")).toBe("{}");
   });
 
+  test("a revision's folder must hold exactly one SKILL.md, the one its guidance reads", async () => {
+    const { workspace, currentRevision } = await setup();
+    const { lifecycle } = await currentRevision();
+    const folder = lifecycle.revision.folder;
+    if (!folder) throw new Error("Expected a folder");
+    const [skill] = folder.files;
+    if (!skill) throw new Error("Expected SKILL.md");
+    for (const files of [[{ ...skill, path: "notes.md" }], [skill, skill]]) {
+      const revision = Object.freeze({
+        ...lifecycle.revision,
+        capabilityRevisionId: `revision-split-${String(files.length)}`,
+        folder: Object.freeze({ ...folder, files, digest: capabilityFolderDigest(files) }),
+      });
+      await expect(
+        workspace.capabilities.addRevision(
+          Object.freeze({ ...lifecycle, revision, reference: capabilityRevisionRef(revision) }),
+        ),
+      ).rejects.toThrow(/SKILL\.md|more than once/u);
+    }
+  });
+
+  test("a folder edit whose import failed survives an ordinary sync", async () => {
+    const { root, publisher, context, capabilityId, currentRevision, folder, write } = await setup();
+    const before = await currentRevision();
+    await write("references/new.md", "- Not imported yet\n");
+    await write("programs/broken/program.json", "{}");
+    const failed = await publisher.recordDocumentEdits(context, signal);
+    expect(failed.recorded).toEqual([]);
+    expect(failed.problems).toHaveLength(1);
+    await publisher.syncWorkingDocument(capabilityId);
+    expect(await readFile(join(root, folder, "references/new.md"), "utf8")).toBe("- Not imported yet\n");
+    expect(await readFile(join(root, folder, "programs/broken/program.json"), "utf8")).toBe("{}");
+    expect((await currentRevision()).binding.revision).toEqual(before.binding.revision);
+  });
+
+  test("an ambient restore puts back the bytes of a resource a later revision took in", async () => {
+    const { root, publisher, context, capabilityId, currentRevision, folder, write } = await setup();
+    await write("references/check.md", "v1\n");
+    await publisher.recordDocumentEdits(context, signal);
+    const first = await currentRevision();
+    await write("references/check.md", "v2\n");
+    await publisher.recordDocumentEdits(context, signal);
+    const second = await currentRevision();
+    expect(second.lifecycle.revision.capabilityRevisionId).not.toBe(
+      first.lifecycle.revision.capabilityRevisionId,
+    );
+    await publisher.publish(
+      {
+        decision: "restore",
+        capabilityId,
+        expectedBindingRevision: second.binding.revisionNumber,
+        capabilityRevisionId: first.lifecycle.revision.capabilityRevisionId,
+        reason: "The newer checklist hurt.",
+      },
+      { ...context, actor: Object.freeze({ actorId: "automatic-learning-organ", kind: "noesis" as const }) },
+      signal,
+    );
+    expect(await readFile(join(root, folder, "references/check.md"), "utf8")).toBe("v1\n");
+    // The next scan sees nothing new, so it does not undo the restore.
+    await expect(publisher.recordDocumentEdits(context, signal)).resolves.toEqual({
+      recorded: [],
+      problems: [],
+    });
+    expect((await currentRevision()).binding.revision.capabilityRevisionId).toBe(
+      first.lifecycle.revision.capabilityRevisionId,
+    );
+  });
+
   test("moves a single-file Capability into a folder without a new revision, and can repeat safely", async () => {
     const { root, workspace, publisher, context } = await setup();
     const actor = Object.freeze({ actorId: "capability-files", kind: "system" as const });
@@ -321,6 +415,11 @@ describe("Capability folders", () => {
     });
     // The revision and so its track record stay exactly as they were.
     expect((await pinned())?.revision).toEqual(before?.revision);
+    expect(
+      (await workspace.capabilities.listRevisions("capability-legacy")).map(
+        (item) => item.revision.capabilityRevisionId,
+      ),
+    ).toEqual(["revision-legacy"]);
     expect(sha256(await workspace.reads.readRevision(material))).toBe(material.contentDigest);
     // Running it again changes nothing.
     await expect(publisher.recordDocumentEdits(context, signal)).resolves.toEqual({

@@ -20,6 +20,7 @@ import {
   FileRevisionRefSchema,
   isCapabilityRevisionEffects,
   JsonValueSchema,
+  learnedCapabilitySkillName,
   ProjectRefSchema,
   sha256,
 } from "@noesis/domain";
@@ -925,9 +926,13 @@ export function validateFrozenTurnPlan(value: unknown): FrozenTurnPlan {
       .finish(),
   ) satisfies FrozenTurnPlan;
   for (const selection of plan.selectedCapabilities) {
-    const materials = selection.effects.map((effect) =>
-      effect.kind === "instruction" ? effect.material : effect.definition,
-    );
+    // A folder's Programs run from the plan, so they are held to the same pin as the effects.
+    const materials = [
+      ...selection.effects.map((effect) =>
+        effect.kind === "instruction" ? effect.material : effect.definition,
+      ),
+      ...(selection.folder?.programs.map((program) => program.definition) ?? []),
+    ];
     for (const material of materials) {
       if (sha256(material.content) !== material.revision.contentDigest)
         throw new Error(
@@ -1215,6 +1220,7 @@ const CAPABILITY_FOLDER_INDEX_ENTRIES = 40;
  */
 export function capabilityFolderIndex(selection: {
   readonly capabilityId: string;
+  readonly name: string;
   readonly revision: { readonly capabilityRevisionId: string };
   readonly folder?: FrozenCapabilityFolder;
 }): readonly string[] {
@@ -1227,6 +1233,10 @@ export function capabilityFolderIndex(selection: {
   const programLines = folder.programs
     .slice(0, CAPABILITY_FOLDER_INDEX_ENTRIES)
     .map((program) => `- ${program.mode} \`${program.name}\``);
+  if (folder.programs.length > CAPABILITY_FOLDER_INDEX_ENTRIES)
+    programLines.push(
+      `- and ${String(folder.programs.length - CAPABILITY_FOLDER_INDEX_ENTRIES)} more Programs`,
+    );
   const sections: string[] = [];
   if (fileLines.length > 0)
     sections.push(
@@ -1234,7 +1244,7 @@ export function capabilityFolderIndex(selection: {
     );
   if (programLines.length > 0)
     sections.push(
-      `Programs in this Capability's folder. Run one inside execute with tools.programs.run({ mode, name, input }):\n${programLines.join("\n")}`,
+      `Programs in this Capability's folder. Run one inside execute with tools.programs.run({ mode, name, skill: ${JSON.stringify(learnedCapabilitySkillName(selection.capabilityId, selection.name))}, input }):\n${programLines.join("\n")}`,
     );
   return Object.freeze(sections);
 }

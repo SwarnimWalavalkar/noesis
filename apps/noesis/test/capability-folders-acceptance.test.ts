@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, symlink, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveNoesisConfig } from "@noesis/config";
@@ -261,6 +261,26 @@ test("a Capability folder's Program is found only after the folder loads, and it
     return ran.definitionRevisionId;
   });
   expect(secondRevision).not.toBe(firstRevision);
+  // An exact folder revision runs once its folder loads, by the revision skills.load reports, and not before.
+  await within("project-b", async ({ turn }) => {
+    expect(
+      await turn(
+        attempt(
+          `tools.programs.run({ mode: "script", name: "check-rollback", definitionRevisionId: ${JSON.stringify(secondRevision)}, input: {} })`,
+        ),
+      ),
+    ).toMatchObject({ value: { ok: false, error: expect.stringContaining("Unknown") } });
+    const pinned = runResult(
+      await turn(
+        `const skill = await tools.skills.load({ name: ${JSON.stringify(skillName)} }); return await tools.programs.run({ mode: "script", name: "check-rollback", definitionRevisionId: skill.programs[0].definitionRevisionId, input: {} });`,
+      ),
+    );
+    expect(pinned).toMatchObject({
+      scope: "folder",
+      definitionRevisionId: secondRevision,
+      value: { checked: "v2" },
+    });
+  });
 
   // Restoring the revision before the folder gained files rewrites the folder and removes the Program.
   await within("project-a", async ({ turn, runtime }) => {
@@ -429,6 +449,17 @@ test("exporting a Capability writes a self-contained folder, with its pinned Pro
       ),
     ).toMatchObject({ value: { ok: false } });
     await expect(readdir(join(scratch, "outside"))).rejects.toThrow();
+    // A link inside the project that points outside it is judged by where it really leads.
+    await mkdir(join(scratch, "linked-outside"));
+    await symlink(join(scratch, "linked-outside"), join(root, "escape"));
+    expect(
+      await turn(
+        attempt(
+          `tools.capabilities.export({ capabilityId: ${JSON.stringify(created.value.capabilityId)}, destination: "escape/shared-check" })`,
+        ),
+      ),
+    ).toMatchObject({ value: { ok: false } });
+    expect(await readdir(join(scratch, "linked-outside"))).toEqual([]);
   });
 });
 

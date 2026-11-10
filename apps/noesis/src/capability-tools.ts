@@ -15,7 +15,8 @@ import {
   type ProjectRef,
 } from "@noesis/domain";
 import { mkdir, open as openFile, readdir, rm, stat } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   capabilityDocumentRevision,
   capabilityFolderFiles,
@@ -391,8 +392,19 @@ function revisionSummary(revision: CapabilityLifecycleRevision | undefined) {
     : null;
 }
 
+/**
+ * The real directory an export writes to. Symbolic links in existing ancestors are resolved, so the
+ * path that is authorized is the path that is written.
+ */
 function exportDestination(project: ProjectRef, destination: string): string {
-  return isAbsolute(destination) ? resolve(destination) : resolve(project.root, destination);
+  const requested = isAbsolute(destination) ? resolve(destination) : resolve(project.root, destination);
+  let existing = requested;
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  return resolve(realpathSync(existing), relative(existing, requested));
 }
 
 /** A Capability revision as a self-contained folder. A folder holds its Programs, so copy any pinned one in. */
@@ -599,7 +611,15 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
           ? capabilityFolderFiles(lifecycle).find((file) => file.path === input.path)
           : undefined;
         if (!pinned) return CapabilityInspectOutputSchema.parse({ view: "file", file: null });
-        const content = decoder.decode(await options.workspace.reads.readRevision(pinned.revision));
+        const bytes = await options.workspace.reads.readRevision(pinned.revision);
+        let content: string;
+        try {
+          content = decoder.decode(bytes);
+        } catch {
+          throw new Error(
+            `Capability file ${pinned.path} is not UTF-8 text (${String(bytes.byteLength)} bytes), so it cannot be shown as text`,
+          );
+        }
         const start = Math.min(input.start ?? 0, content.length);
         const end = Math.min(start + (input.maxCharacters ?? DEFAULT_MATERIAL_CHARACTERS), content.length);
         return CapabilityInspectOutputSchema.parse({
@@ -785,8 +805,12 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
           written.push(file.path);
         }
       } catch (error) {
-        // A partial copy is not a usable skill, so leave nothing behind.
-        await rm(target, { recursive: true, force: true });
+        // A partial copy is not a usable skill, so leave nothing behind. The destination was empty or
+        // absent, so everything in it is ours; a directory that already existed stays.
+        if (existing)
+          for (const entry of await readdir(target).catch(() => []))
+            await rm(join(target, entry), { recursive: true, force: true });
+        else await rm(target, { recursive: true, force: true });
         throw error;
       }
       return {

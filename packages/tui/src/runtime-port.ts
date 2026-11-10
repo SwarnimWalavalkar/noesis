@@ -119,8 +119,10 @@ export interface TuiExecutionSummary {
   readonly completedAt?: string;
   readonly program?: {
     readonly mode: "script";
-    /** Absent when the Program is in the global library. */
+    /** Absent when the Program is in the global library or a folder. */
     readonly projectId?: string;
+    /** The skill or Capability folder that holds the Program. */
+    readonly folderId?: string;
     readonly name: string;
     readonly revision: number;
     readonly definitionRevisionId: string;

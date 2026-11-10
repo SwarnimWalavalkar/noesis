@@ -1019,6 +1019,11 @@ export async function compileSkillFolderPrograms(
       const path = join(programsRoot, entry.name, fileName);
       const details = await lstat(path).catch(() => undefined);
       if (!details?.isFile()) continue;
+      // Refuse an oversized file before reading it. The compiler applies the exact Program limits.
+      if (details.size > 1024 * 1024)
+        throw new Error(
+          `Skill ${input.skillName} Program file programs/${entry.name}/${fileName} is too large`,
+        );
       files.push({ path: `programs/${entry.name}/${fileName}`, bytes: await readFile(path) });
     }
   }

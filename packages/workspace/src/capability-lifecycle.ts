@@ -204,6 +204,18 @@ export function createCapabilityLifecycleStore(
         throw new Error("Capability folder digest does not match its files");
       if (folder.files.some((file) => !isCapabilityFolderPath(file.path)))
         throw new Error("Capability folder files must stay inside the folder");
+      if (new Set(folder.files.map((file) => file.path)).size !== folder.files.length)
+        throw new Error("Capability folder lists a file path more than once");
+      // The guidance a turn reads and the SKILL.md a restore writes must be one file revision.
+      const skill = folder.files.filter((file) => file.path === "SKILL.md");
+      const [instruction] = parsed.revision.effects;
+      if (
+        skill.length !== 1 ||
+        instruction?.kind !== "instruction" ||
+        skill[0]?.revision.revisionId !== instruction.material.revisionId ||
+        skill[0]?.revision.contentDigest !== instruction.material.contentDigest
+      )
+        throw new Error("Capability folder must hold exactly one SKILL.md, matching its instruction");
     }
     for (const reference of [
       ...parsed.revision.effects.map((effect) =>

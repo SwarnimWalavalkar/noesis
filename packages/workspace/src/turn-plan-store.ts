@@ -75,9 +75,12 @@ export function createProtectedTurnPlanStore(
   const admit = async (input: FrozenTurnPlan): Promise<FrozenTurnPlan> => {
     const plan = validateFrozenTurnPlan(input);
     for (const selection of plan.selectedCapabilities) {
-      for (const material of selection.effects.map((effect) =>
-        effect.kind === "instruction" ? effect.material : effect.definition,
-      )) {
+      for (const material of [
+        ...selection.effects.map((effect) =>
+          effect.kind === "instruction" ? effect.material : effect.definition,
+        ),
+        ...(selection.folder?.programs.map((program) => program.definition) ?? []),
+      ]) {
         options.assertStoredReference(material.revision);
         if (sha256(material.content) !== material.revision.contentDigest)
           throw new Error(

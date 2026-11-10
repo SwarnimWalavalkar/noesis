@@ -314,9 +314,11 @@ function provenanceSection(
           ["definition", safeInspectorScalar(detail.program.definitionRevisionId)],
           [
             "scope",
-            detail.program.projectId === undefined
-              ? "global"
-              : `project ${safeInspectorScalar(detail.program.projectId)}`,
+            detail.program.folderId !== undefined
+              ? `folder ${safeInspectorScalar(detail.program.folderId)}`
+              : detail.program.projectId === undefined
+                ? "global"
+                : `project ${safeInspectorScalar(detail.program.projectId)}`,
           ],
         ] as const)
       : []),
