@@ -154,6 +154,8 @@ export interface FrozenSubAgentPlan {
   readonly frozenTools: readonly FrozenSubAgentToolReference[];
   /** JSON Schema that every task's final answer must satisfy. Absent means a text answer. */
   readonly output?: JsonObject;
+  /** Most model requests one task may make. The last offers no callable tools. Absent means no limit. */
+  readonly maxRounds?: number;
   /** Exact immutable material needed to reconstruct the actor's Broker catalog in this process. */
   readonly executionTemplate: FrozenTurnPlan;
   readonly authority: {
@@ -194,6 +196,7 @@ export const FrozenSubAgentPlanSchema = z.strictObject({
     }),
   ),
   output: z.record(z.string(), JsonValueSchema).optional(),
+  maxRounds: z.number().int().positive().optional(),
   executionTemplate: z.lazy(() => FrozenTurnPlanSchema),
   authority: z.strictObject({
     permissionSnapshot: z.strictObject({
@@ -250,6 +253,7 @@ export function validateFrozenSubAgentPlan(value: unknown): FrozenSubAgentPlan {
   } as const)
     .addOptional(plan.context ? { context: plan.context } : undefined)
     .addOptional(plan.output ? { output: Object.freeze({ ...plan.output }) } : undefined)
+    .addOptional(plan.maxRounds !== undefined ? { maxRounds: plan.maxRounds } : undefined)
     .finish();
   const { canonicalDigest, ...unsigned } = normalized;
   if (frozenSubAgentPlanDigest(unsigned) !== canonicalDigest)

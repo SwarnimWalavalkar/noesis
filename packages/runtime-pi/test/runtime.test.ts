@@ -1,3 +1,9 @@
+import type { JsonObject } from "@noesis/domain";
+import { createModels, InMemoryCredentialStore, type Provider } from "@earendil-works/pi-ai";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { opencodeProvider } from "@earendil-works/pi-ai/providers/opencode";
+import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { z } from "zod";
 import {
   fauxAssistantMessage,
   fauxText,
@@ -22,6 +28,7 @@ import {
   frozenTurnPlanDigest,
 } from "@noesis/agent-types";
 import {
+  createConditionalObject,
   type FileRevisionRef,
   isJsonObject,
   type JsonValue,
@@ -164,6 +171,7 @@ interface TestSubAgentTaskPlan {
   readonly thinkingLevel: FrozenSubAgentPlan["thinkingLevel"];
   readonly route: FrozenSubAgentPlan["route"];
   readonly frozenTools: FrozenSubAgentPlan["frozenTools"];
+  readonly maxRounds?: number;
   readonly authority: {
     readonly parentExecutionId: string;
     readonly parentToolCallId: string;
@@ -192,25 +200,31 @@ function createTestSubAgentTaskRunner(cwd: string, models: Models) {
       readonly emit: (event: AgentRuntimeEvent) => void;
     }) => {
       const template = frozenPlan();
-      const unsigned: Omit<FrozenSubAgentPlan, "canonicalDigest"> = Object.freeze({
-        schemaVersion: 1,
-        agentId: request.plan.runId,
-        childSessionId: `session-${request.plan.runId}`,
-        origin: Object.freeze({
-          projectId: "project-runtime-test",
-          sessionId: template.sessionId,
-          turnId: template.turnId,
-          executionId: request.plan.authority.parentExecutionId,
-        }),
-        route: request.plan.route,
-        thinkingLevel: request.plan.thinkingLevel,
-        renderedSystemPrompt: request.plan.systemPrompt,
-        frozenTools: request.plan.frozenTools,
-        executionTemplate: template,
-        authority: Object.freeze({ permissionSnapshot: template.permissionSnapshot }),
-        requestTokenBudget: request.plan.budget.requestTokenBudget,
-        createdAt: "2026-07-25T00:00:00.000Z",
-      });
+      const unsigned: Omit<FrozenSubAgentPlan, "canonicalDigest"> = Object.freeze(
+        createConditionalObject({
+          schemaVersion: 1,
+          agentId: request.plan.runId,
+          childSessionId: `session-${request.plan.runId}`,
+          origin: Object.freeze({
+            projectId: "project-runtime-test",
+            sessionId: template.sessionId,
+            turnId: template.turnId,
+            executionId: request.plan.authority.parentExecutionId,
+          }),
+          route: request.plan.route,
+          thinkingLevel: request.plan.thinkingLevel,
+          renderedSystemPrompt: request.plan.systemPrompt,
+          frozenTools: request.plan.frozenTools,
+          executionTemplate: template,
+          authority: Object.freeze({ permissionSnapshot: template.permissionSnapshot }),
+          requestTokenBudget: request.plan.budget.requestTokenBudget,
+          createdAt: "2026-07-25T00:00:00.000Z",
+        } as const)
+          .addOptional(
+            request.plan.maxRounds !== undefined ? { maxRounds: request.plan.maxRounds } : undefined,
+          )
+          .finish(),
+      );
       const plan: FrozenSubAgentPlan = Object.freeze({
         ...unsigned,
         canonicalDigest: frozenSubAgentPlanDigest(unsigned),
@@ -358,6 +372,41 @@ describe("agent runtime factories", () => {
       expect(authorize).toHaveBeenCalledTimes(failure === "budget" ? 0 : 1);
     },
   );
+
+  test("counts the last-round reminder against the frozen request budget", async () => {
+    const catalog = catalogWithTools("catalog-last-round-budget", ["probe.read"]);
+    const probe = catalog.tools.find((tool) => tool.name === "probe.read");
+    if (!probe) throw new Error("Controlled catalog is missing probe.read");
+    /** The complete-request estimate the projector reports when nothing fits. */
+    const estimate = async (plan: TestSubAgentTaskPlan): Promise<number> => {
+      const controlled = createControlledPiModels();
+      const failure = await createTestSubAgentTaskRunner(process.cwd(), controlled.models)
+        .run({
+          plan: { ...plan, budget: { requestTokenBudget: 1 } },
+          prepared: { ...reviewPrepared, catalog },
+          turnId: `budget-${plan.runId}`,
+          signal: new AbortController().signal,
+          authorizeModelCall: completedLease,
+          emit: () => undefined,
+        })
+        .then(
+          () => "",
+          (cause: unknown) => String(cause),
+        );
+      expect(controlled.provider.state.callCount).toBe(0);
+      return Number(/estimated=(\d+)/u.exec(failure)?.[1]);
+    };
+    // Both requests offer no callable tools and carry the same prompt; only the reminder differs.
+    const plain = await estimate({ ...reviewPlan, runId: "budget-plain" });
+    const lastRound = await estimate({
+      ...reviewPlan,
+      runId: "budget-last-round",
+      frozenTools: [probe],
+      maxRounds: 1,
+    });
+    expect(plain).toBeGreaterThan(0);
+    expect(lastRound).toBeGreaterThan(plain);
+  });
 
   test("keeps a failed settlement available for cleanup and prevents subsequent tools", async () => {
     const controlled = createControlledPiModels({
@@ -2496,4 +2545,177 @@ test.each([
     ),
   ).resolves.toMatchObject({ outcome: "completed" });
   expect(effects).toBe(1);
+});
+
+/**
+ * These providers cannot be called live in CI or on the machines this was verified on. Each case
+ * runs Pi's real request builder for that provider and captures the body it would send.
+ */
+const ProviderBodySchema = z.looseObject({
+  tools: z.array(z.unknown()).optional(),
+  tool_choice: z.unknown().optional(),
+});
+
+const encoder = new TextEncoder();
+const sse = (events: readonly string[]): Response =>
+  new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const event of events) controller.enqueue(encoder.encode(event));
+        controller.close();
+      },
+    }),
+    { status: 200, headers: { "content-type": "text/event-stream" } },
+  );
+
+const anthropicEvent = (type: string, body: JsonObject): string =>
+  `event: ${type}\ndata: ${JSON.stringify({ type, ...body })}\n\n`;
+const anthropicResponse = (block: "tool" | "text"): Response =>
+  sse([
+    anthropicEvent("message_start", {
+      message: {
+        id: "m",
+        type: "message",
+        role: "assistant",
+        model: "m",
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    }),
+    ...(block === "tool"
+      ? [
+          anthropicEvent("content_block_start", {
+            index: 0,
+            content_block: { type: "tool_use", id: "toolu_1", name: "execute", input: {} },
+          }),
+          anthropicEvent("content_block_delta", {
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: '{"source":"return 1"}' },
+          }),
+        ]
+      : [
+          anthropicEvent("content_block_start", { index: 0, content_block: { type: "text", text: "" } }),
+          anthropicEvent("content_block_delta", { index: 0, delta: { type: "text_delta", text: "Answer" } }),
+        ]),
+    anthropicEvent("content_block_stop", { index: 0 }),
+    anthropicEvent("message_delta", {
+      delta: { stop_reason: block === "tool" ? "tool_use" : "end_turn", stop_sequence: null },
+      usage: { output_tokens: 1 },
+    }),
+    anthropicEvent("message_stop", {}),
+  ]);
+
+const completionChunk = (delta: JsonObject, finish: string | null): string =>
+  `data: ${JSON.stringify({
+    id: "c",
+    object: "chat.completion.chunk",
+    created: 1,
+    model: "m",
+    choices: [{ index: 0, delta, finish_reason: finish }],
+    ...(finish ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : undefined),
+  })}\n\n`;
+const completionResponse = (block: "tool" | "text"): Response =>
+  sse([
+    block === "tool"
+      ? completionChunk(
+          {
+            role: "assistant",
+            tool_calls: [
+              {
+                index: 0,
+                id: "call_1",
+                type: "function",
+                function: { name: "execute", arguments: '{"source":"return 1"}' },
+              },
+            ],
+          },
+          null,
+        )
+      : completionChunk({ role: "assistant", content: "Answer" }, null),
+    completionChunk({}, block === "tool" ? "tool_calls" : "stop"),
+    "data: [DONE]\n\n",
+  ]);
+
+describe("the last round of a task with tool history", () => {
+  test.each<readonly [string, Provider, string, (block: "tool" | "text") => Response, unknown]>([
+    ["Anthropic", anthropicProvider(), "claude-fable-5", anthropicResponse, { type: "none" }],
+    [
+      "OpenRouter through Anthropic Messages",
+      openrouterProvider(),
+      "anthropic/claude-fable-5",
+      anthropicResponse,
+      { type: "none" },
+    ],
+    [
+      "OpenRouter through Chat Completions",
+      openrouterProvider(),
+      "aion-labs/aion-2.0",
+      completionResponse,
+      "none",
+    ],
+    [
+      "OpenCode Zen through Anthropic Messages",
+      opencodeProvider(),
+      "claude-fable-5",
+      anthropicResponse,
+      { type: "none" },
+    ],
+    ["OpenCode Zen through Chat Completions", opencodeProvider(), "big-pickle", completionResponse, "none"],
+  ])("%s keeps definitions and forbids calls", async (_label, provider, modelId, respond, toolChoice) => {
+    const credentials = new InMemoryCredentialStore();
+    await credentials.modify(provider.id, async () => ({ type: "api_key", key: "test-key" }));
+    const models = createModels({
+      credentials,
+      authContext: {
+        env: async (_name: string): Promise<string | undefined> => undefined,
+        fileExists: async (_path: string): Promise<boolean> => false,
+      },
+    });
+    models.setProvider(provider);
+    const bodies: z.infer<typeof ProviderBodySchema>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: string, init?: RequestInit) => {
+        bodies.push(ProviderBodySchema.parse(JSON.parse(z.string().parse(init?.body))));
+        return respond(bodies.length === 1 ? "tool" : "text");
+      }),
+    );
+    const catalog = catalogWithTools("catalog-last-round-payload", ["probe.read"]);
+    const probe = catalog.tools.find((tool) => tool.name === "probe.read");
+    if (!probe) throw new Error("Controlled catalog is missing probe.read");
+    try {
+      const result = await createTestSubAgentTaskRunner(process.cwd(), models).run({
+        plan: Object.freeze({
+          runId: "subagent-last-round-payload",
+          systemPrompt: "Use the supplied tool.",
+          prompt: "Explore, then answer.",
+          tools: Object.freeze([]),
+          thinkingLevel: "off",
+          route: Object.freeze({ provider: provider.id, model: modelId }),
+          frozenTools: Object.freeze([probe]),
+          maxRounds: 2,
+          authority: Object.freeze({ parentExecutionId: "parent", parentToolCallId: "call" }),
+          budget: Object.freeze({ requestTokenBudget: 4_000 }),
+        }),
+        prepared: Object.freeze({
+          catalog,
+          execute: async () => Object.freeze({ executionId: "e", value: 1, calls: 0, durationMs: 0 }),
+          close: async () => undefined,
+        }),
+        turnId: "task-last-round-payload",
+        signal: new AbortController().signal,
+        authorizeModelCall: async () => ({ complete: async () => undefined, fail: async () => undefined }),
+        emit: () => undefined,
+      });
+      expect(result.text).toContain("Answer");
+      expect(bodies).toHaveLength(2);
+      expect(bodies[0]?.tool_choice).toBeUndefined();
+      expect(bodies[1]?.tools).toHaveLength(1);
+      expect(bodies[1]?.tool_choice).toEqual(toolChoice);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

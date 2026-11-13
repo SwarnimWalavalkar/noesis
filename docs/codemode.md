@@ -86,11 +86,11 @@ A workflow run pins the digest it first reads for each session and disclosure mo
 
 ## Subagent lifecycle
 
-`agents.spawn({ name?, systemPrompt?, prompt, tools?, output?, thinkingLevel? })` records a subagent task and immediately returns stable `agentId` and `taskId` handles. Agents live within the Noesis process rather than one foreground turn or session.
+`agents.spawn({ name?, systemPrompt?, prompt, tools?, output?, maxRounds?, thinkingLevel? })` records a subagent task and immediately returns stable `agentId` and `taskId` handles. Agents live within the Noesis process rather than one foreground turn or session.
 
 `prompt` accepts text, a slice of `context` or of a session view, or an array of those.
 
-`agents.send`, `agents.list`, `agents.inspect`, `agents.wait`, `agents.cancel`, and `agents.close` manage collaboration. Productive tasks have no independent provider-round, tool-call, or wall-clock ceiling.
+`agents.send`, `agents.list`, `agents.inspect`, `agents.wait`, `agents.cancel`, and `agents.close` manage collaboration. Productive tasks have no independent provider-round, tool-call, or wall-clock ceiling unless the caller sets `maxRounds`.
 
 ### Tools
 
@@ -120,6 +120,12 @@ if (status !== "completed") throw new Error(error);
 ```
 
 `output` is a JSON Schema and works with or without tools. The final answer is parsed and validated, and `agents.wait` returns the validated value as `result`. An invalid answer gets one repair request, which cannot call tools. If the repair is also invalid, the task fails with the validation problem as its `error`. Without `output`, `result` is text.
+
+### Bounded exploration
+
+`maxRounds` limits the model requests one task may make. Use it when a tool-using task should explore for a while and then report; a judgment should use `tools: []` instead.
+
+The last round offers no callable tools and tells the model to answer, so the task ends with an answer instead of being cut off. `maxRounds: 1` behaves the same as `tools: []`. A failed provider attempt that is retried and an `output` repair request do not count against the limit. A follow-up task from `agents.send` gets a fresh count, and a message that arrives during the last round starts that follow-up task. Omitting `maxRounds` leaves the task with no ceiling.
 
 ### Concurrency
 

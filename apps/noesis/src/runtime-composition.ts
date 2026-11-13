@@ -2382,6 +2382,7 @@ export async function createApplicationRuntimeComposition(
       prompt: subAgentPromptSchema,
       tools: z.array(z.string().trim().min(1).max(256)).optional(),
       output: z.record(z.string(), JsonValueSchema).optional(),
+      maxRounds: z.number().int().positive().optional(),
       thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
     });
     type SubAgentPromptPart = z.infer<typeof subAgentPromptPartSchema>;
@@ -2591,9 +2592,9 @@ export async function createApplicationRuntimeComposition(
       name: "agents.spawn",
       label: "Spawn subagent",
       description:
-        "Durably admit a retained subagent and queue its first task in the background. Returns immediately with stable agent and task handles. Omit tools for the default set; a tools array is the exact list, and an empty array makes a plain model call. output is a JSON Schema for the final answer.",
+        "Durably admit a retained subagent and queue its first task in the background. Returns immediately with stable agent and task handles. Omit tools for the default set; a tools array is the exact list, and an empty array makes a plain model call. output is a JSON Schema for the final answer. maxRounds limits model requests per task for bounded exploration; the last one offers no callable tools, so the task ends with an answer.",
       identityMaterial: toJsonValue({
-        adapterRevision: "agents-spawn-v2",
+        adapterRevision: "agents-spawn-v3",
         defaults: plan.subAgentDefaults ?? null,
       }),
       inputSchema: subAgentInputSchema,
@@ -2695,6 +2696,7 @@ export async function createApplicationRuntimeComposition(
           } as const)
             .addOptional(plan.contextDocument ? { context: plan.contextDocument } : undefined)
             .addOptional(input.output ? { output: input.output } : undefined)
+            .addOptional(input.maxRounds !== undefined ? { maxRounds: input.maxRounds } : undefined)
             .finish(),
         );
         const frozenPlan: FrozenSubAgentPlan = Object.freeze({
