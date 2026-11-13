@@ -34,13 +34,26 @@ For a detail whose location is unknown, the agent can discover `history.search_s
 
 ```json
 {
-  "query": "original migration error and rollback decision",
+  "query": "\"rollback decision\" migration error",
   "scope": "current",
-  "maxResults": 3
+  "after": "2026-10-01",
+  "source": "tool_output",
+  "maxResults": 8
 }
 ```
 
-Results contain bounded evidence with exact citations. The agent can use `history.open_session_evidence` to open a bounded window around a returned citation. Search defaults to previous sessions when scope is omitted. Use `"all"` to include both current and previous sessions, or supply an exact `sessionId` instead of `scope`.
+Session search is a keyword search with stemming, ranked by BM25. It does not match by meaning, and no model call runs behind it, because the model calling it is the semantic layer. Any term in the query may match, and documents that match more of the terms rank higher. Double quotes require an exact phrase. A search for `deploying` also finds `deployed`, but a search for `rollout` does not find `release`. The agent therefore searches for the words the evidence would contain and runs several reformulated queries together:
+
+```js
+const queries = ["rollback decision", "revert migration", '"down migration"'];
+return await Promise.all(queries.map((query) => tools.history.search_sessions({ query, maxResults: 8 })));
+```
+
+Results contain bounded evidence with exact citations. A search returns 20 results by default. The agent can use `history.open_session_evidence` to open a bounded window around a returned citation. Search defaults to previous sessions when scope is omitted. Use `"all"` to include both current and previous sessions, or supply an exact `sessionId` instead of `scope`.
+
+The optional `after` and `before` filters take an ISO-8601 date or datetime. `after` is inclusive and `before` is exclusive. The optional `source` filter limits results to conversation messages (`"message"`) or tool calls and their output (`"tool_output"`).
+
+All searches in one turn share a total budget of about 31,000 characters. When the budget withholds results, `telemetry.status` is `budget_exhausted` and `telemetry.omittedResults` counts them. That does not mean the words failed to match. A smaller `maxResults` cannot recover withheld results later in the same turn, so the agent should choose a smaller `maxResults`, about 8 per query, before fanning out.
 
 ## Subagent lifecycle
 

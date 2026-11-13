@@ -53,9 +53,16 @@ test("creates a Capability from a need repeated across sessions and skips supers
     });
     const earlierText = "Write the release notes from the merged pull requests, grouped by area.";
     const searchedScopes: unknown[] = [];
-    const history: Pick<HistoryPort, "search"> = Object.freeze({
+    const searchedQueries: string[] = [];
+    let rebuilds = 0;
+    const history: Pick<HistoryPort, "search" | "rebuild"> = Object.freeze({
+      rebuild: async () => {
+        rebuilds += 1;
+        return Object.freeze({ documents: 1 });
+      },
       search: async (request) => {
         searchedScopes.push(request.sessionScope);
+        searchedQueries.push(request.query);
         return Object.freeze({
           query: request.query,
           hits: Object.freeze([
@@ -73,22 +80,19 @@ test("creates a Capability from a need repeated across sessions and skips supers
                 endOffset: earlierText.length,
                 contentDigest: sha256(earlierText),
               }),
-              combinedScore: 1,
+              score: 1,
             }),
           ]),
           candidateCount: 1,
-          appliedBounds: Object.freeze({
-            lexicalLimit: 1,
-            semanticLimit: 0,
-            rerankLimit: 0,
-            resultLimit: 3,
-            maxExcerptChars: 400,
-          }),
         });
       },
     });
     const inference = createScriptedLearningInferencePort({
       steps: [
+        Object.freeze({
+          role: "session_reviewer",
+          value: Object.freeze({ queries: ["release notes", '"grouped by area"', "release notes"] }),
+        }),
         Object.freeze({
           role: "session_reviewer",
           value: Object.freeze({
@@ -170,14 +174,31 @@ test("creates a Capability from a need repeated across sessions and skips supers
         },
         new AbortController().signal,
       ),
-    ).resolves.toMatchObject({ status: "reviewed", results: [{ status: "activated" }] });
-    // The review searches only earlier sessions for the same need.
-    expect(searchedScopes).toContainEqual({ kind: "previous", currentSessionId: "session-current" });
-    expect(inference.requests()[0]?.messages.map((message) => message.name)).toEqual([
+    ).resolves.toMatchObject({
+      status: "reviewed",
+      queries: ["release notes", '"grouped by area"'],
+      results: [{ status: "activated" }],
+    });
+    // The model writes the searches. They run on a fresh index over earlier sessions only.
+    expect(searchedQueries).toEqual(["release notes", '"grouped by area"']);
+    expect(rebuilds).toBe(1);
+    expect(new Set(searchedScopes.map((scope) => JSON.stringify(scope)))).toEqual(
+      new Set([JSON.stringify({ kind: "previous", currentSessionId: "session-current" })]),
+    );
+    const [writeQueries, decide] = inference.requests();
+    expect(writeQueries?.messages.map((message) => message.name)).toEqual([
+      "session_review",
+      "current_capabilities",
+      "write_search_queries",
+    ]);
+    expect(decide?.messages.map((message) => message.name)).toEqual([
       "session_review",
       "current_capabilities",
       "related_history",
     ]);
+    expect(decide?.messages.at(-1)?.content).toContain(earlierText);
+    expect(writeQueries?.availableTools).toEqual([]);
+    expect(decide?.availableTools).toEqual([]);
     const [definition] = await workspace.capabilities.listDefinitions();
     expect(definition?.name).toBe("Release notes by area");
     const binding = definition ? await workspace.capabilities.getBinding(definition.capabilityId) : undefined;
@@ -187,6 +208,83 @@ test("creates a Capability from a need repeated across sessions and skips supers
       { kind: "database_row", table: "messages", rowId: "turn-current:user" },
       { kind: "database_row", table: "messages", rowId: "turn-earlier:user" },
     ]);
+  } finally {
+    workspace.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a session review with no queries skips the search and still decides", async () => {
+  const root = await mkdtemp(join(tmpdir(), "noesis-session-review-no-queries-"));
+  const workspace = await createWorkspaceStore(join(root, "workspace"));
+  try {
+    await workspace.operational.sessions.put({
+      sessionId: "session-only",
+      title: "Only",
+      status: "idle",
+      provider: "fake",
+      model: "fake",
+      runtime: "fake",
+      createdAt: "2026-10-29T09:00:00.000Z",
+      updatedAt: "2026-10-29T10:00:00.000Z",
+      metadata: {},
+    });
+    await workspace.operational.messages.put({
+      messageId: "turn-only:user",
+      sessionId: "session-only",
+      role: "user",
+      content: "Rename this variable.",
+      sensitivity: "normal",
+      createdAt: "2026-10-29T10:00:00.000Z",
+      metadata: {},
+    });
+    const history: Pick<HistoryPort, "search" | "rebuild"> = Object.freeze({
+      rebuild: async () => {
+        throw new Error("Nothing to search, so the index must not be rebuilt");
+      },
+      search: async () => {
+        throw new Error("The model wrote no queries, so nothing may be searched");
+      },
+    });
+    const inference = createScriptedLearningInferencePort({
+      steps: [
+        Object.freeze({ role: "session_reviewer", value: Object.freeze({ queries: [] }) }),
+        Object.freeze({
+          role: "session_reviewer",
+          value: Object.freeze({ summary: "Nothing repeats.", decisions: [] }),
+        }),
+      ],
+    });
+    const review = createSessionReview({
+      workspace,
+      store: workspace.capabilities,
+      history,
+      inference,
+      publisher: createCapabilityPublisher({ workspace, store: workspace.capabilities }),
+      reviewer: Object.freeze({
+        variant: Object.freeze({
+          variantId: "session-reviewer-v1",
+          axis: "role" as const,
+          configurationRefs: Object.freeze([promptRevision]),
+        }),
+        promptRevision,
+        model: "fake",
+        reasoning: "low" as const,
+      }),
+    });
+
+    await expect(
+      review(
+        {
+          sessionId: "session-only",
+          project: Object.freeze({ projectId: "project-review", root }),
+          turnId: "turn-only",
+          occurredAt: "2026-10-29T10:00:00.000Z",
+        },
+        new AbortController().signal,
+      ),
+    ).resolves.toMatchObject({ status: "reviewed", summary: "Nothing repeats.", results: [] });
+    expect(inference.remaining()).toBe(0);
   } finally {
     workspace.close();
     await rm(root, { recursive: true, force: true });

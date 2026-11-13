@@ -281,6 +281,7 @@ describe("research role isolation", () => {
     expect(policy.allowedMessageNames).toEqual([
       "session_review",
       "current_capabilities",
+      "write_search_queries",
       "related_history",
       "output_contract",
       "output_repair",

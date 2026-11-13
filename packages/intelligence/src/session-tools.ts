@@ -9,7 +9,6 @@ import {
 import type {
   CanonicalSearchSource,
   NoesisWorkspaceStore,
-  SearchCandidate,
   SearchSessionScope,
   SearchSourceScope,
   Sensitivity,
@@ -147,46 +146,30 @@ function citationStringProjection(
     },
   };
 }
-const RetrievalStrategyIdSchema = z.enum([
-  "session-search.fts-only.v1",
-  "session-search.hybrid.v1",
-  "session-search.conservative.v1",
-]);
-type RetrievalStrategyId = z.infer<typeof RetrievalStrategyIdSchema>;
-export interface RetrievalStrategyVariant {
-  readonly strategyId: RetrievalStrategyId;
-  readonly mode: "fts_only" | "hybrid" | "no_retrieval";
-  readonly description: string;
-}
-// SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-export const SESSION_RETRIEVAL_STRATEGIES = Object.freeze({
-  ftsOnly: Object.freeze({
-    strategyId: "session-search.fts-only.v1",
-    mode: "fts_only",
-    description: "Exact lexical retrieval without embeddings or LLM reranking.",
-  }),
-  hybrid: Object.freeze({
-    strategyId: "session-search.hybrid.v1",
-    mode: "hybrid",
-    description: "Bounded lexical and semantic retrieval with the configured reranker.",
-  }),
-  conservative: Object.freeze({
-    strategyId: "session-search.conservative.v1",
-    mode: "no_retrieval",
-    description: "Explicit abstention that injects no prior-session context.",
-  }),
-} as const satisfies Readonly<Record<string, RetrievalStrategyVariant>>);
-const requestedStrategySchema = z.union([RetrievalStrategyIdSchema, z.literal("automatic")]);
+const dateBoundSchema = z.union([z.iso.date(), z.iso.datetime({ offset: true })]);
 export const SearchSessionsInputSchema = z
   .strictObject({
     query: querySchema,
     sessionId: identifierSchema.optional(),
     scope: z.enum(["current", "previous", "all"]).optional(),
+    after: dateBoundSchema
+      .optional()
+      .describe("Only evidence from this ISO-8601 date or datetime onward (inclusive)."),
+    before: dateBoundSchema.optional().describe("Only evidence from before this ISO-8601 date or datetime."),
+    source: z
+      .enum(["message", "tool_output"])
+      .optional()
+      .describe("Only conversation messages, or only tool calls and their output."),
     maxResults: z.number().int().min(1).max(20).optional(),
-    strategy: requestedStrategySchema.optional(),
     includePrivate: z.boolean().optional(),
   })
   .superRefine((value, context) => {
+    if (
+      value.after !== undefined &&
+      value.before !== undefined &&
+      !(Date.parse(value.after) < Date.parse(value.before))
+    )
+      context.addIssue({ code: "custom", message: "after must be earlier than before" });
     if (value.sessionId !== undefined && value.scope !== undefined)
       context.addIssue({
         code: "custom",
@@ -202,7 +185,6 @@ export const OpenSessionEvidenceInputSchema = z.strictObject({
 const focusedSearchInputFields = {
   sessionId: identifierSchema.optional(),
   maxResults: z.number().int().min(1).max(20).optional(),
-  strategy: requestedStrategySchema.optional(),
   includePrivate: z.boolean().optional(),
 };
 export const FindSimilarTasksInputSchema = z.strictObject({
@@ -232,23 +214,21 @@ export interface SessionContextFragment {
   readonly sensitive: boolean;
 }
 export interface RetrievalTelemetry {
-  readonly strategyId: RetrievalStrategyId;
-  readonly routeReason: string;
   readonly candidateCount: number;
   readonly resultCount: number;
+  /** Matching results withheld because the turn's search context budget ran out. */
+  readonly omittedResults: number;
   readonly contextCharacters: number;
   readonly maxFragmentCharacters: number;
   readonly maxTotalContextCharacters: number;
   readonly latencyMs: number;
   readonly refreshedDocuments: number;
-  readonly status: "completed" | "abstained" | "cancelled" | "failed";
+  /** budget_exhausted means results were withheld, not that the search found nothing. */
+  readonly status: "completed" | "budget_exhausted";
 }
 export interface SessionSearchHit {
   readonly fragmentId: string;
   readonly score: number;
-  readonly lexicalScore?: number;
-  readonly semanticScore?: number;
-  readonly rerankReason?: string;
 }
 export interface SessionSearchOutput {
   readonly query: string;
@@ -315,10 +295,11 @@ export interface CreateSessionSearchToolsOptions {
   readonly now?: () => number;
 }
 const DEFAULT_LIMITS: SessionToolLimits = Object.freeze({
-  maxResults: 8,
+  maxResults: 20,
   maxCandidates: 32,
   maxFragmentChars: 400,
-  maxTotalContextChars: 3200,
+  // One turn can fan out three full searches and most of a fourth, and still open one citation.
+  maxTotalContextChars: 32768,
   maxOpenChars: 1600,
 });
 interface SourceMetadata {
@@ -339,9 +320,6 @@ interface RankedCitation {
   readonly citation: SessionEvidenceCitation;
   readonly excerpt: string;
   readonly score: number;
-  readonly lexicalScore?: number;
-  readonly semanticScore?: number;
-  readonly rerankReason?: string;
 }
 const fileRevisionRowSchema = z.looseObject({
   revision_id: identifierSchema,
@@ -371,22 +349,6 @@ function provenanceResolutionKey(ref: EvidenceRef): string {
   if (ref.table === "file_revisions") return `file_revision:${ref.rowId}`;
   return `database_row:${ref.table}:${ref.rowId}`;
 }
-export function selectSessionRetrievalStrategy(request: {
-  readonly query: string;
-  readonly requested?: z.infer<typeof requestedStrategySchema>;
-}): {
-  readonly strategy: RetrievalStrategyVariant;
-  readonly reason: string;
-} {
-  if (request.requested && request.requested !== "automatic") {
-    const strategy = Object.values(SESSION_RETRIEVAL_STRATEGIES).find(
-      (candidate) => candidate.strategyId === request.requested,
-    );
-    if (!strategy) return { strategy: SESSION_RETRIEVAL_STRATEGIES.conservative, reason: "unknown strategy" };
-    return { strategy, reason: "explicit strategy" };
-  }
-  return { strategy: SESSION_RETRIEVAL_STRATEGIES.hybrid, reason: "automatic hybrid default" };
-}
 export function createSessionSearchTools(options: CreateSessionSearchToolsOptions): SessionSearchTools {
   const limits = normalizeLimits(options.limits);
   const now = options.now ?? Date.now;
@@ -398,7 +360,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       : Math.min(limits.maxOpenChars, Math.floor(limits.maxTotalContextChars / 2));
   let remainingSearchContextCharacters = limits.maxTotalContextChars - openContextCharacters;
   let remainingOpenContextCharacters = openContextCharacters;
-  let refreshed = false;
+  let refresh: Promise<number> | undefined;
   const fail = (
     code: SessionToolErrorCode,
     message: string,
@@ -410,13 +372,25 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
   const ensureNotCancelled = (signal?: AbortSignal): void => {
     if (signal?.aborted) throw new Error("SESSION_SEARCH_CANCELLED");
   };
+  // Queries fanned out with Promise.all share one rebuild, and only the first reports its count.
   const ensureFresh = async (signal?: AbortSignal): Promise<number> => {
-    if (options.refreshBeforeSearch === false || refreshed) return 0;
+    if (options.refreshBeforeSearch === false) return 0;
     ensureNotCancelled(signal);
-    const report = await options.history.rebuild();
+    if (refresh !== undefined) {
+      await refresh;
+      ensureNotCancelled(signal);
+      return 0;
+    }
+    refresh = options.history.rebuild().then(
+      (report) => report.documents,
+      (cause: unknown) => {
+        refresh = undefined;
+        throw cause;
+      },
+    );
+    const documents = await refresh;
     ensureNotCancelled(signal);
-    refreshed = true;
-    return report.documents;
+    return documents;
   };
   const resolveTransitiveProvenance = async (
     refs: readonly EvidenceRef[],
@@ -785,8 +759,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
     const source = canonicalSearchSourceSchema.parse(hit.citation.source);
     const metadata = await resolveSourceMetadata(source, signal);
     if (!metadata || !isAuthorized(metadata)) return undefined;
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    return createConditionalObject({
+    return {
       citation: makeCitation(
         source,
         documentIdForSource(hit.citation.source),
@@ -797,83 +770,23 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         hit.citation.contentDigest,
       ),
       excerpt: hit.citation.excerpt,
-      score: hit.combinedScore,
-    } as const)
-      .addOptional(!(hit.lexicalScore === undefined) ? { lexicalScore: hit.lexicalScore } : undefined)
-      .addOptional(!(hit.semanticScore === undefined) ? { semanticScore: hit.semanticScore } : undefined)
-      .addOptional(!(hit.rerankReason === undefined) ? { rerankReason: hit.rerankReason } : undefined)
-      .finish();
-  };
-  const rankedFromCandidate = async (
-    candidate: SearchCandidate,
-    query: string,
-    signal?: AbortSignal,
-  ): Promise<RankedCitation | undefined> => {
-    const source = canonicalSearchSourceSchema.parse(candidate.source);
-    const metadata = await resolveSourceMetadata(source, signal);
-    if (!metadata || !isAuthorized(metadata)) return undefined;
-    const excerpt = createExcerpt(candidate.body, query, limits.maxFragmentChars);
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    return createConditionalObject({
-      citation: makeCitation(
-        source,
-        candidate.documentId,
-        metadata,
-        excerpt.excerpt,
-        excerpt.startOffset,
-        excerpt.endOffset,
-        sha256(candidate.body),
-      ),
-      excerpt: excerpt.excerpt,
-      score: candidate.lexicalScore ?? 0,
-    } as const)
-      .addOptional(
-        !(candidate.lexicalScore === undefined) ? { lexicalScore: candidate.lexicalScore } : undefined,
-      )
-      .finish();
+      score: hit.score,
+    };
   };
   const runSearch = async (request: {
     readonly query: string;
     readonly sessionId?: string;
     readonly scope?: "current" | "previous" | "all";
     readonly maxResults: number;
-    readonly requestedStrategy?: z.infer<typeof requestedStrategySchema>;
     readonly includePrivate: boolean;
     readonly sourceScope?: SearchSourceScope;
+    readonly after?: string;
+    readonly before?: string;
     readonly accept: (metadata: SourceMetadata) => boolean | Promise<boolean>;
     readonly signal?: AbortSignal;
   }): Promise<SessionToolResult<SessionSearchOutput>> => {
     const startedAt = now();
-    // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-    const routed = selectSessionRetrievalStrategy(
-      createConditionalObject({
-        query: request.query,
-      } as const)
-        .addOptional(
-          !(request.requestedStrategy === undefined) ? { requested: request.requestedStrategy } : undefined,
-        )
-        .finish(),
-    );
     if (request.signal?.aborted) return fail("cancelled", "Session retrieval was cancelled.", true);
-    if (routed.strategy.mode === "no_retrieval")
-      return {
-        ok: true,
-        value: {
-          query: request.query,
-          hits: [],
-          fragments: [],
-          telemetry: telemetry({
-            strategyId: routed.strategy.strategyId,
-            routeReason: routed.reason,
-            candidateCount: 0,
-            fragments: [],
-            limits,
-            latencyMs: Math.max(0, now() - startedAt),
-            refreshedDocuments: 0,
-            status: "abstained",
-          }),
-        },
-      };
     try {
       ensureNotCancelled(request.signal);
       const refreshedDocuments = await ensureFresh(request.signal);
@@ -890,62 +803,39 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
             : request.scope === "all"
               ? undefined
               : { kind: "previous", currentSessionId: options.authorization.currentSessionId };
-      let candidateCount = 0;
-      let ranked: readonly (RankedCitation | undefined)[];
-      if (routed.strategy.mode === "fts_only") {
-        const configuration = await options.workspace.operational.searchConfiguration.get();
-        ensureNotCancelled(request.signal);
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        const candidates = await options.workspace.search.lexicalCandidates(
-          createConditionalObject({
-            query: request.query,
-            limit: Math.min(limits.maxCandidates, configuration.lexicalLimit),
-          } as const)
-            .addOptional(!(sessionScope === undefined) ? { sessionScope } : undefined)
-            .addOptional(
-              !(request.sourceScope === undefined) ? { sourceScope: request.sourceScope } : undefined,
-            )
-            .add({
-              includePrivate: privateResult.value,
-            } as const)
-            .finish(),
-        );
-        ensureNotCancelled(request.signal);
-        candidateCount = candidates.length;
-        ranked = await Promise.all(
-          candidates.map((candidate) => rankedFromCandidate(candidate, request.query, request.signal)),
-        );
-      } else {
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        const result = await options.history.search(
-          createConditionalObject({
-            query: request.query,
-          } as const)
-            .addOptional(!(sessionScope === undefined) ? { sessionScope } : undefined)
-            .addOptional(
-              !(request.sourceScope === undefined) ? { sourceScope: request.sourceScope } : undefined,
-            )
-            .add({
-              limit: limits.maxCandidates,
-              candidateFilter: async (source: CanonicalSearchSource) => {
-                const metadata = await resolveSourceMetadata(
-                  canonicalSearchSourceSchema.parse(source),
-                  request.signal,
-                );
-                return metadata !== undefined && isAuthorized(metadata) && (await request.accept(metadata));
-              },
-              lexicalLimit: limits.maxCandidates,
-              semanticLimit: limits.maxCandidates,
-              maxExcerptChars: limits.maxFragmentChars,
-            } as const)
-            .addOptional(privateResult.value ? ({ privacy: "include_private" } as const) : undefined)
-            .addOptional(request.signal ? { signal: request.signal } : undefined)
-            .finish(),
-        );
-        ensureNotCancelled(request.signal);
-        candidateCount = result.candidateCount;
-        ranked = await Promise.all(result.hits.map((hit) => rankedFromHistory(hit, request.signal)));
-      }
+      // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
+      const result = await options.history.search(
+        createConditionalObject({
+          query: request.query,
+          limit: limits.maxCandidates,
+          candidateLimit: limits.maxCandidates,
+          maxExcerptChars: limits.maxFragmentChars,
+          candidateFilter: async (source: CanonicalSearchSource) => {
+            const metadata = await resolveSourceMetadata(
+              canonicalSearchSourceSchema.parse(source),
+              request.signal,
+            );
+            return metadata !== undefined && isAuthorized(metadata) && (await request.accept(metadata));
+          },
+        } as const)
+          .addOptional(sessionScope === undefined ? undefined : { sessionScope })
+          .addOptional(request.sourceScope === undefined ? undefined : { sourceScope: request.sourceScope })
+          .addOptional(
+            request.after === undefined
+              ? undefined
+              : { occurredAfter: new Date(request.after).toISOString() },
+          )
+          .addOptional(
+            request.before === undefined
+              ? undefined
+              : { occurredBefore: new Date(request.before).toISOString() },
+          )
+          .addOptional(privateResult.value ? ({ privacy: "include_private" } as const) : undefined)
+          .addOptional(request.signal ? { signal: request.signal } : undefined)
+          .finish(),
+      );
+      ensureNotCancelled(request.signal);
+      const ranked = await Promise.all(result.hits.map((hit) => rankedFromHistory(hit, request.signal)));
       const accepted: RankedCitation[] = [];
       for (const item of ranked) {
         ensureNotCancelled(request.signal);
@@ -970,20 +860,9 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         const reserved = reserveCitation(item.citation, item.excerpt, item.score, "search");
         if (!reserved) break;
         fragments.push(reserved.fragment);
-        // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
-        hits.push(
-          createConditionalObject({
-            fragmentId: reserved.fragment.id,
-            score: item.score,
-          } as const)
-            .addOptional(!(item.lexicalScore === undefined) ? { lexicalScore: item.lexicalScore } : undefined)
-            .addOptional(
-              !(item.semanticScore === undefined) ? { semanticScore: item.semanticScore } : undefined,
-            )
-            .addOptional(!(item.rerankReason === undefined) ? { rerankReason: item.rerankReason } : undefined)
-            .finish(),
-        );
+        hits.push({ fragmentId: reserved.fragment.id, score: item.score });
       }
+      const omittedResults = accepted.length - fragments.length;
       ensureNotCancelled(request.signal);
       return {
         ok: true,
@@ -992,14 +871,13 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
           hits,
           fragments,
           telemetry: telemetry({
-            strategyId: routed.strategy.strategyId,
-            routeReason: routed.reason,
-            candidateCount,
+            candidateCount: result.candidateCount,
+            omittedResults,
             fragments,
             limits,
             latencyMs: Math.max(0, now() - startedAt),
             refreshedDocuments,
-            status: "completed",
+            status: omittedResults > 0 ? "budget_exhausted" : "completed",
           }),
         },
       };
@@ -1024,13 +902,11 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
           !(parsed.data.sessionId === undefined) ? { sessionId: parsed.data.sessionId } : undefined,
         )
         .addOptional(!(parsed.data.scope === undefined) ? { scope: parsed.data.scope } : undefined)
+        .addOptional(!(parsed.data.source === undefined) ? { sourceScope: parsed.data.source } : undefined)
+        .addOptional(!(parsed.data.after === undefined) ? { after: parsed.data.after } : undefined)
+        .addOptional(!(parsed.data.before === undefined) ? { before: parsed.data.before } : undefined)
         .add({
           maxResults: Math.min(parsed.data.maxResults ?? limits.maxResults, limits.maxResults),
-        } as const)
-        .addOptional(
-          !(parsed.data.strategy === undefined) ? { requestedStrategy: parsed.data.strategy } : undefined,
-        )
-        .add({
           includePrivate: parsed.data.includePrivate ?? false,
           accept: () => true,
         } as const)
@@ -1054,11 +930,6 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
         )
         .add({
           maxResults: Math.min(parsed.data.maxResults ?? limits.maxResults, limits.maxResults),
-        } as const)
-        .addOptional(
-          !(parsed.data.strategy === undefined) ? { requestedStrategy: parsed.data.strategy } : undefined,
-        )
-        .add({
           includePrivate: parsed.data.includePrivate ?? false,
           sourceScope: "session_or_outcome",
           accept: (metadata: SourceMetadata) =>
@@ -1192,9 +1063,8 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       const output: OpenSessionEvidenceOutput = {
         fragment: reserved.fragment,
         telemetry: telemetry({
-          strategyId: "session-search.fts-only.v1",
-          routeReason: "exact citation open",
           candidateCount: 1,
+          omittedResults: 0,
           fragments: [reserved.fragment],
           limits,
           latencyMs: Math.max(0, now() - startedAt),
@@ -1217,7 +1087,7 @@ export function createSessionSearchTools(options: CreateSessionSearchToolsOption
       name: "search_sessions",
       label: "Search sessions",
       description:
-        "Run hybrid lexical and semantic retrieval with reranking over the current compacted session, previous sessions, all sessions, or one exact sessionId, and return bounded evidence with exact citations. The default scope is previous sessions; use scope=current when older context from this session may have been compacted. One precise query normally suffices; an empty or irrelevant result means only that this bounded search found no relevant evidence. Normal cross-session search needs no private flag; private retrieval accepts either one exact authorized sessionId or scope=current for the current authorized session.",
+        "Keyword search with BM25 ranking and stemming over the current compacted session, previous sessions, all sessions, or one exact sessionId. Returns bounded evidence with exact citations. Any term may match, and documents matching more terms rank higher; double quotes require an exact phrase. It does not match by meaning, so search for the words the evidence would contain and run several reformulated queries together with Promise.all. The default scope is previous sessions; use scope=current when older context from this session may have been compacted. An empty result means only that these words did not match; status budget_exhausted means the turn's search budget withheld results, and is already spent, so choose a smaller maxResults (about 8) before fanning out. Normal cross-session search needs no private flag; private retrieval accepts either one exact authorized sessionId or scope=current for the current authorized session.",
       inputSchema: SearchSessionsInputSchema,
       execute: searchSessions,
     }),
@@ -1269,27 +1139,6 @@ function evidenceRefKey(ref: EvidenceRef): string {
   if (ref.kind === "artifact_file") return `artifact_file:${ref.artifactId}`;
   return `${ref.kind}:${ref.revisionId}`;
 }
-function createExcerpt(
-  content: string,
-  query: string,
-  maxChars: number,
-): {
-  readonly excerpt: string;
-  readonly startOffset: number;
-  readonly endOffset: number;
-} {
-  if (content.length <= maxChars) return { excerpt: content, startOffset: 0, endOffset: content.length };
-  const terms = query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]+/gu) ?? [];
-  const lower = content.toLocaleLowerCase();
-  const firstMatch = terms
-    .map((term) => lower.indexOf(term))
-    .filter((index) => index >= 0)
-    .sort((left, right) => left - right)[0];
-  const center = firstMatch ?? 0;
-  const startOffset = Math.max(0, Math.min(content.length - maxChars, center - Math.floor(maxChars / 3)));
-  const endOffset = Math.min(content.length, startOffset + maxChars);
-  return { excerpt: content.slice(startOffset, endOffset), startOffset, endOffset };
-}
 function verifyExactExcerpt(content: string, citation: SessionEvidenceCitation): void {
   if (
     sha256(content) !== citation.contentDigest ||
@@ -1315,9 +1164,8 @@ function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 function telemetry(input: {
-  readonly strategyId: RetrievalTelemetry["strategyId"];
-  readonly routeReason: string;
   readonly candidateCount: number;
+  readonly omittedResults: number;
   readonly fragments: readonly SessionContextFragment[];
   readonly limits: SessionToolLimits;
   readonly latencyMs: number;
@@ -1325,10 +1173,9 @@ function telemetry(input: {
   readonly status: RetrievalTelemetry["status"];
 }): RetrievalTelemetry {
   return {
-    strategyId: input.strategyId,
-    routeReason: input.routeReason,
     candidateCount: input.candidateCount,
     resultCount: input.fragments.length,
+    omittedResults: input.omittedResults,
     contextCharacters: input.fragments.reduce((sum, fragment) => sum + fragment.content.length, 0),
     maxFragmentCharacters: input.limits.maxFragmentChars,
     maxTotalContextCharacters: input.limits.maxTotalContextChars,

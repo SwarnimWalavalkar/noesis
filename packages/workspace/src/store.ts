@@ -71,7 +71,6 @@ import {
   decodeSubAgentTimeline,
   decodeToolCall,
   decodeUserIntent,
-  decodeVector,
   decodeWorkflowPhaseRun,
   decodeWorkflowRun,
   JsonRecordSchema,
@@ -99,7 +98,6 @@ import type {
   NoesisWorkspaceStore,
   OperationalRepositories,
   OutcomeRecord,
-  SearchCandidate,
   SearchConfiguration,
   SearchDocument,
   SearchSourceScope,
@@ -126,7 +124,11 @@ const ActorSchema = z.strictObject({
   actorId: z.string().min(1),
   kind: z.enum(["user", "noesis", "external_system", "system"]),
 });
-const SearchSourceScopeSchema = z.enum(["session_or_outcome"]) satisfies z.ZodType<SearchSourceScope>;
+const SearchSourceScopeSchema = z.enum([
+  "session_or_outcome",
+  "message",
+  "tool_output",
+]) satisfies z.ZodType<SearchSourceScope>;
 // BOUNDARY: Operational identities canonicalize arbitrary adapter payloads into durable JSON.
 const persistedJsonValue = (value: unknown): JsonValue | undefined => {
   const encoded = JSON.stringify(value);
@@ -3779,11 +3781,9 @@ function createOperationalRepositories(
     SearchConfigurationSchema.parse(configuration);
     database.transaction(() => {
       db.prepare(`UPDATE search_configuration SET
-          lexical_limit = ?, semantic_limit = ?, rerank_limit = ?, max_excerpt_chars = ?,
+          lexical_limit = ?, max_excerpt_chars = ?,
           include_private = ?, updated_at = ? WHERE configuration_id = 'default'`).run(
         configuration.lexicalLimit,
-        configuration.semanticLimit,
-        configuration.rerankLimit,
         configuration.maxExcerptChars,
         configuration.includePrivate ? 1 : 0,
         configuration.updatedAt,
@@ -4767,24 +4767,27 @@ function createSearchIndex(
       .all(options.includePrivate ? 1 : 0, options.includeSecret ? 1 : 0);
     return rows.map(decodeSearchDocument);
   };
-  const sourceScopeParameters = (value: SearchSourceScope | undefined): readonly [number, number] => {
-    const scope = value === undefined ? undefined : SearchSourceScopeSchema.parse(value);
-    return [scope === undefined ? 1 : 0, scope === "session_or_outcome" ? 1 : 0];
+  const sourceScopeSql = (value: SearchSourceScope | undefined): string => {
+    if (value === undefined) return "1 = 1";
+    const scope = SearchSourceScopeSchema.parse(value);
+    const tables =
+      scope === "session_or_outcome"
+        ? "'sessions', 'outcomes'"
+        : scope === "message"
+          ? "'messages'"
+          : "'tool_calls'";
+    return `source_kind = 'database_row' AND source_table IN (${tables})`;
   };
-  const sourceScopeSql = `(
-    ? = 1
-    OR (? = 1 AND source_kind = 'database_row' AND source_table IN ('sessions', 'outcomes'))
-  )`;
   return Object.freeze({
     clear: async () => {
       database.transaction(() => {
-        db.exec("DELETE FROM search_embeddings; DELETE FROM search_fts; DELETE FROM search_documents;");
+        db.exec("DELETE FROM search_fts; DELETE FROM search_documents;");
       });
     },
     rebuildDocuments: async () => {
       const documents = await sourceRows();
       database.transaction(() => {
-        db.exec("DELETE FROM search_embeddings; DELETE FROM search_fts; DELETE FROM search_documents;");
+        db.exec("DELETE FROM search_fts; DELETE FROM search_documents;");
         insertDocuments(documents);
       });
       return documents;
@@ -4798,9 +4801,8 @@ function createSearchIndex(
       const exactSessionId = request.sessionScope?.kind === "exact" ? request.sessionScope.sessionId : null;
       const previousSessionId =
         request.sessionScope?.kind === "previous" ? request.sessionScope.currentSessionId : null;
-      const sourceScope = sourceScopeParameters(request.sourceScope);
       const rows = db
-        .prepare(`SELECT search_documents.*, bm25(search_fts) AS rank
+        .prepare(`SELECT search_documents.*, search_fts.rowid AS fts_rowid, bm25(search_fts) AS rank
            FROM search_fts JOIN search_documents USING(document_id)
            WHERE search_fts MATCH ?
              AND sensitivity != 'secret'
@@ -4812,7 +4814,9 @@ function createSearchIndex(
              ))
              AND (? IS NULL OR session_id = ?)
              AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))
-             AND ${sourceScopeSql}
+             AND (? IS NULL OR occurred_at >= ?)
+             AND (? IS NULL OR occurred_at < ?)
+             AND ${sourceScopeSql(request.sourceScope)}
            ORDER BY rank, search_documents.document_id LIMIT ?`)
         .all(
           query,
@@ -4821,73 +4825,42 @@ function createSearchIndex(
           exactSessionId,
           previousSessionId,
           previousSessionId,
-          ...sourceScope,
+          request.occurredAfter ?? null,
+          request.occurredAfter ?? null,
+          request.occurredBefore ?? null,
+          request.occurredBefore ?? null,
           Math.max(0, request.limit),
         );
-      return rows.map((row) => ({
-        ...decodeSearchDocument(row),
-        lexicalScore: 1 / (1 + Math.max(0, requiredNumber(row, "rank"))),
-      }));
-    },
-    putEmbeddings: async (modelId: string, embeddings: ReadonlyMap<string, readonly number[]>) => {
-      database.transaction(() => {
-        const statement =
-          db.prepare(`INSERT INTO search_embeddings(document_id, model_id, dimensions, vector_json)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(document_id, model_id) DO UPDATE SET
-             dimensions = excluded.dimensions, vector_json = excluded.vector_json`);
-        for (const [documentId, vector] of embeddings) {
-          if (vector.length === 0 || vector.some((value) => !Number.isFinite(value)))
-            throw new Error(`Invalid embedding for ${documentId}`);
-          statement.run(documentId, modelId, vector.length, JSON.stringify(vector));
-        }
-      });
-    },
-    semanticCandidates: async (
-      request: Parameters<NoesisWorkspaceStore["search"]["semanticCandidates"]>[0],
-    ) => {
-      if (request.limit <= 0) return [];
-      const exactSessionId = request.sessionScope?.kind === "exact" ? request.sessionScope.sessionId : null;
-      const previousSessionId =
-        request.sessionScope?.kind === "previous" ? request.sessionScope.currentSessionId : null;
-      const sourceScope = sourceScopeParameters(request.sourceScope);
-      const rows = db
-        .prepare(`SELECT search_documents.*, search_embeddings.vector_json
-           FROM search_embeddings JOIN search_documents USING(document_id)
-           WHERE model_id = ? AND sensitivity != 'secret'
-             AND (sensitivity = 'normal' OR ? = 1)
-             AND (session_id IS NULL OR NOT EXISTS(
-               SELECT 1 FROM sessions
-               WHERE sessions.session_id = search_documents.session_id
-                 AND json_type(sessions.metadata_json, '$.deletedAt') = 'text'
-             ))
-             AND (? IS NULL OR session_id = ?)
-             AND (? IS NULL OR (session_id IS NOT NULL AND session_id != ?))
-             AND ${sourceScopeSql}`)
-        .all(
-          request.modelId,
-          request.includePrivate ? 1 : 0,
-          exactSessionId,
-          exactSessionId,
-          previousSessionId,
-          previousSessionId,
-          ...sourceScope,
+      // A stemmed match need not contain the query's own spelling, so FTS reports where it matched.
+      const firstMatch =
+        db.prepare(`SELECT instr(highlight(search_fts, 1, char(1), char(2)), char(1)) - 1 AS offset
+         FROM search_fts WHERE search_fts MATCH ? AND rowid = ?`);
+      return rows.map((row) => {
+        const document = decodeSearchDocument(row);
+        // SQLite counts code points; JavaScript strings index UTF-16 code units.
+        const codePoints = Math.max(
+          0,
+          requiredNumber(firstMatch.get(query, requiredNumber(row, "fts_rowid")), "offset"),
         );
-      return rows
-        .map((row): SearchCandidate => ({
-          ...decodeSearchDocument(row),
-          semanticScore: cosineSimilarity(request.vector, decodeVector(requiredString(row, "vector_json"))),
-        }))
-        .sort(
-          (left, right) =>
-            (right.semanticScore ?? 0) - (left.semanticScore ?? 0) ||
-            left.documentId.localeCompare(right.documentId),
-        )
-        .slice(0, request.limit);
+        return {
+          ...document,
+          // FTS5 reports BM25 as a negative number where lower is better.
+          score: -requiredNumber(row, "rank"),
+          matchOffset: utf16Offset(document.body, codePoints),
+        };
+      });
     },
     openCanonicalSource: async (source: CanonicalSearchSource) =>
       await openCanonicalSource(db, paths, source),
   });
+}
+function utf16Offset(text: string, codePoints: number): number {
+  let offset = 0;
+  for (let counted = 0; counted < codePoints && offset < text.length; counted += 1) {
+    const unit = text.charCodeAt(offset);
+    offset += unit >= 0xd800 && unit <= 0xdbff && offset + 1 < text.length ? 2 : 1;
+  }
+  return offset;
 }
 function sessionSensitivity(db: DatabaseSync, sessionId: string): SearchDocument["sensitivity"] | undefined {
   const session = db.prepare("SELECT metadata_json FROM sessions WHERE session_id = ?").get(sessionId);
@@ -4942,27 +4915,15 @@ async function openCanonicalSource(
     .get(source.rowId);
   return row === undefined ? undefined : requiredString(row, "body");
 }
-function cosineSimilarity(left: readonly number[], right: readonly number[]): number {
-  if (left.length !== right.length || left.length === 0) return -1;
-  let dot = 0;
-  let leftMagnitude = 0;
-  let rightMagnitude = 0;
-  for (const [index, leftValue] of left.entries()) {
-    const rightValue = right[index];
-    if (rightValue === undefined) return -1;
-    dot += leftValue * rightValue;
-    leftMagnitude += leftValue * leftValue;
-    rightMagnitude += rightValue * rightValue;
-  }
-  if (leftMagnitude === 0 || rightMagnitude === 0) return 0;
-  return dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude));
-}
+/**
+ * Builds an FTS5 query: double-quoted text is one phrase, every other token stands alone, and any
+ * match counts, with BM25 ranking documents that match more of the query higher.
+ */
 function ftsQuery(query: string): string {
-  return query
-    .trim()
-    .split(/\s+/u)
-    .filter(Boolean)
-    .map((token) => `"${token.replaceAll('"', '""')}"`)
+  return [...query.matchAll(/"([^"]*)"|([^\s"]+)/gu)]
+    .map((match) => (match[1] ?? match[2] ?? "").trim())
+    .filter((term) => term.length > 0)
+    .map((term) => `"${term}"`)
     .join(" OR ");
 }
 function isMissing(cause: unknown): boolean {

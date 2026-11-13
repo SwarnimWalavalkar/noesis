@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { EvidenceRef, FileRevisionRef, ProjectRef } from "@noesis/domain";
 import { learnedCapabilitySkillName, sha256 } from "@noesis/domain";
-import type { HistoryPort } from "@noesis/intelligence";
 import { createWorkspaceStore, type NoesisWorkspaceStore } from "@noesis/workspace";
 import { afterEach, describe, expect, test } from "vitest";
 import { type CapabilityProgramLibrary, createCapabilityLearningModule } from "../src/capability-loop.ts";
@@ -27,22 +26,6 @@ const promptRevision: FileRevisionRef = Object.freeze({
   contentDigest: sha256("reflector"),
 });
 
-const emptyHistory: Pick<HistoryPort, "search"> = Object.freeze({
-  search: async (request) =>
-    Object.freeze({
-      query: request.query,
-      hits: Object.freeze([]),
-      candidateCount: 0,
-      appliedBounds: Object.freeze({
-        lexicalLimit: 0,
-        semanticLimit: 0,
-        rerankLimit: 0,
-        resultLimit: request.limit ?? 8,
-        maxExcerptChars: request.maxExcerptChars ?? 800,
-      }),
-    }),
-});
-
 describe("Capability learning loop", () => {
   test("does not reflect on a turn that failed before the model produced output", async () => {
     const root = await mkdtemp(join(tmpdir(), "noesis-capability-loop-skip-"));
@@ -52,7 +35,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      history: emptyHistory,
       inference,
       reflector: Object.freeze({
         variant: Object.freeze({
@@ -241,7 +223,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      history: emptyHistory,
       inference,
       reflector: Object.freeze({
         variant: Object.freeze({
@@ -617,7 +598,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      history: emptyHistory,
       inference,
       reflector: Object.freeze({
         variant: Object.freeze({
@@ -769,7 +749,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      history: emptyHistory,
       inference,
       reflector: Object.freeze({
         variant: Object.freeze({
@@ -917,7 +896,6 @@ describe("Capability learning loop", () => {
     const module = createCapabilityLearningModule({
       workspace,
       store: workspace.capabilities,
-      history: emptyHistory,
       inference,
       publisher,
       reflector: Object.freeze({
