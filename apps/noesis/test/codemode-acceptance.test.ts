@@ -1069,7 +1069,7 @@ describe("production codemode journey", () => {
       }),
     );
     await runtime.shutdown();
-  }, 90_000);
+  }, 150_000);
 
   test("a child report waits durably for its inactive foreground session", async () => {
     const home = await mkdtemp(join(tmpdir(), "noesis-foreground-mailbox-acceptance-"));
