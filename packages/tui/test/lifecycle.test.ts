@@ -129,6 +129,7 @@ describe("Noesis TUI lifecycle", () => {
           revision: 1,
           requiredTools: Object.freeze([]),
           mode: "script" as const,
+          scope: "project" as const,
           definitionDigest: "a".repeat(64),
           phaseNames: Object.freeze([]),
           workingPath: "programs/projects/project-test/script/stale/program.mjs",

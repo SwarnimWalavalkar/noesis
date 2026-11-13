@@ -404,7 +404,7 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
             `Programs · ${String(programs.length)}`,
             ...programs.map(
               (program) =>
-                `• ${program.name} · ${program.mode} · r${String(program.revision)}${program.mode === "workflow" ? ` · ${String(program.phaseNames.length)} phases` : ""}\n  ${program.description}\n  ${program.mode === "workflow" ? program.phaseNames.join(" → ") : program.requiredTools.join(", ") || "pure JavaScript"}\n  ${program.workingPath}${program.sourceWorkingPath ? `\n  source ${program.sourceWorkingPath}` : ""}`,
+                `• ${program.name} · ${program.mode} · ${program.scope}${program.shadowed ? " (a project Program with this name runs instead)" : ""} · r${String(program.revision)}${program.mode === "workflow" ? ` · ${String(program.phaseNames.length)} phases` : ""}\n  ${program.description}\n  ${program.mode === "workflow" ? program.phaseNames.join(" → ") : program.requiredTools.join(", ") || "pure JavaScript"}\n  ${program.workingPath}${program.sourceWorkingPath ? `\n  source ${program.sourceWorkingPath}` : ""}${program.promotedFrom ? `\n  promoted from ${program.promotedFrom}` : ""}${program.editProblem ? `\n  edit not applied: ${program.editProblem}` : ""}`,
             ),
             "",
             "Ask Noesis to run one by name, or to save work as a Program.",
@@ -428,7 +428,8 @@ export async function runSlashCommand(text: string, context: SlashCommandContext
     publishInspector(
       program
         ? [
-            `${program.name} · ${program.mode} · r${String(program.revision)}`,
+            `${program.name} · ${program.mode} · ${program.scope} · r${String(program.revision)}`,
+            ...(program.promotedFrom ? [`promoted from ${program.promotedFrom}`] : []),
             program.description,
             program.workingPath,
             `definition ${program.definitionDigest}`,

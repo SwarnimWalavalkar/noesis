@@ -51,3 +51,48 @@ test("announces a session review's published change on the next turn after it co
     },
   ]);
 });
+
+test("a promotion is announced, and a Capability decision in the same review leads the notice", () => {
+  const turns = [{ turnId: "turn-after", createdAt: "2026-10-29T11:30:00.000Z" }];
+  const promotion = {
+    status: "program_promoted",
+    mode: "script",
+    name: "release-notes",
+    definitionRevisionId: "revision-global",
+    programRevision: 1,
+    unchanged: false,
+    message: "Promoted Program release-notes to global: Two projects use it.",
+  };
+  expect(
+    sessionReviewNotices(
+      [
+        review("job-promoted", "2026-10-29T11:00:00.000Z", [promotion]),
+        review("job-mixed", "2026-10-29T11:00:00.000Z", [
+          promotion,
+          { status: "pending", capabilityId: "capability-notes", message: "Release notes need approval" },
+        ]),
+      ],
+      turns,
+    ),
+  ).toEqual([
+    {
+      jobId: "job-promoted",
+      stage: "reflection",
+      status: "program_promoted",
+      summary:
+        "Review of an earlier session · Promoted Program release-notes to global: Two projects use it.",
+      updatedAt: "2026-10-29T11:00:00.000Z",
+      reactionTurnId: "turn-after",
+    },
+    {
+      jobId: "job-mixed",
+      stage: "reflection",
+      status: "pending",
+      summary:
+        "Review of an earlier session · Release notes need approval · Promoted Program release-notes to global: Two projects use it.",
+      updatedAt: "2026-10-29T11:00:00.000Z",
+      reactionTurnId: "turn-after",
+      capabilityId: "capability-notes",
+    },
+  ]);
+});

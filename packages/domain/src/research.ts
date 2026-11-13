@@ -103,7 +103,7 @@ export interface PermissionManifest {
 
 /**
  * One exact Capability revision. Its first effect is always the instruction file revision; it may
- * also attach one exact project Program revision.
+ * also attach one exact saved Program revision.
  */
 export interface CapabilityRevision {
   readonly capabilityRevisionId: string;
@@ -121,11 +121,11 @@ export interface CapabilityInstructionEffect {
 
 export type ProgramMode = "script" | "workflow";
 
-/** One immutable revision of an ordinary project Program. */
+/** One immutable revision of an ordinary Program. No `project` means it is in the global library. */
 export interface ProgramRevisionRef {
   readonly mode: ProgramMode;
   readonly name: string;
-  readonly project: ProjectRef;
+  readonly project?: ProjectRef;
   readonly definitionRevision: FileRevisionRef;
 }
 
@@ -281,8 +281,8 @@ export function validateCapabilityEffects(effects: readonly CapabilityEffect[]):
 }
 
 /**
- * Project Programs keep their existing project authority, so a Capability that attaches one must
- * be bound to that same project.
+ * A project Program only exists in its project, so a Capability that attaches one must be bound to
+ * that same project. A global Program can be attached under any scope.
  */
 export function assertCapabilityEffectsEligible(input: {
   readonly effects: readonly CapabilityEffect[];
@@ -292,6 +292,7 @@ export function assertCapabilityEffectsEligible(input: {
   for (const effect of input.effects) {
     if (effect.kind !== "program") continue;
     const { program } = effect;
+    if (!program.project) continue;
     if (program.project.projectId !== input.project.projectId || program.project.root !== input.project.root)
       throw new Error(`Capability Program ${program.name} belongs to another project`);
     if (input.scope.kind !== "project")

@@ -125,6 +125,8 @@ function assertRevisionSupportsScope(revision: CapabilityLifecycleRevision, scop
   for (const effect of revision.revision.effects) {
     if (effect.kind !== "program") continue;
     const { program } = effect;
+    // A global Program exists everywhere, so any scope can use it.
+    if (!program.project) continue;
     if (
       scope.kind !== "project" ||
       scope.project.projectId !== program.project.projectId ||

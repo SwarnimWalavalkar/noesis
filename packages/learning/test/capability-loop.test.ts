@@ -571,6 +571,7 @@ describe("Capability learning loop", () => {
         Object.freeze([
           Object.freeze({
             mode: "script" as const,
+            scope: "project" as const,
             name: "comparative-research-scout",
             description: "Run bounded comparative research.",
             revision: 1,
@@ -730,6 +731,7 @@ describe("Capability learning loop", () => {
         Object.freeze([
           Object.freeze({
             mode: "workflow" as const,
+            scope: "project" as const,
             name: "evidence-synthesis",
             description: "Synthesize evidence.",
             revision: 1,

@@ -272,6 +272,19 @@ describe("research role isolation", () => {
     ).toThrow("rejects messages beyond its message bound");
   });
 
+  test("admits the saved Programs a session review sends", () => {
+    const policy = createDefaultRoleContextPolicy("session_reviewer");
+    const messages = [
+      { role: "user" as const, name: "session_review", content: "the session" },
+      { role: "user" as const, name: "current_capabilities", content: "[]" },
+      { role: "user" as const, name: "related_history", content: "[]" },
+      { role: "user" as const, name: "saved_programs", content: '{"programs":[]}' },
+    ];
+    expect(
+      applyRoleContextPolicy(request("session_reviewer", "review-v1", messages), policy).messages,
+    ).toEqual(messages);
+  });
+
   test("derives custom isolated-role policies without weakening the default whitelist", () => {
     const policy = createRestrictedRoleContextPolicy("session_reviewer", {
       policyId: "application-reviewer-v1",
@@ -283,6 +296,7 @@ describe("research role isolation", () => {
       "current_capabilities",
       "write_search_queries",
       "related_history",
+      "saved_programs",
       "output_contract",
       "output_repair",
     ]);

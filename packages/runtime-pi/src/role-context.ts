@@ -25,7 +25,13 @@ const isolatedRoleMessageNames = {
     "pending_capability",
     "user_change_request",
   ],
-  session_reviewer: ["session_review", "current_capabilities", "write_search_queries", "related_history"],
+  session_reviewer: [
+    "session_review",
+    "current_capabilities",
+    "write_search_queries",
+    "related_history",
+    "saved_programs",
+  ],
 } as const satisfies Readonly<Record<Exclude<AgentRole, "foreground">, readonly string[]>>;
 export function createDefaultRoleContextPolicy(role: AgentRole): RoleContextPolicy {
   const foreground = role === "foreground";

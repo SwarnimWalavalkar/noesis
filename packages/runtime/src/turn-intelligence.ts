@@ -610,13 +610,22 @@ export function createTurnIntelligencePlanner(
                   kind: "instruction" as const,
                   material: await materialize(options.workspace, effect.material),
                 })
-              : Object.freeze({
-                  kind: "program" as const,
-                  mode: effect.program.mode,
-                  name: effect.program.name,
-                  project: Object.freeze({ ...effect.program.project }),
-                  definition: await materialize(options.workspace, effect.program.definitionRevision),
-                }),
+              : Object.freeze(
+                  createConditionalObject({
+                    kind: "program" as const,
+                    mode: effect.program.mode,
+                    name: effect.program.name,
+                  } as const)
+                    .addOptional(
+                      effect.program.project
+                        ? { project: Object.freeze({ ...effect.program.project }) }
+                        : undefined,
+                    )
+                    .add({
+                      definition: await materialize(options.workspace, effect.program.definitionRevision),
+                    } as const)
+                    .finish(),
+                ),
           ),
         );
         const always = binding.activationMode === "always";

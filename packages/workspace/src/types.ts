@@ -159,7 +159,8 @@ export interface CodeExecutionRecord {
   readonly sourceDigest: string;
   readonly program?: {
     readonly mode: "script";
-    readonly projectId: string;
+    /** The project that owns the Program definition. Absent for a global Program. */
+    readonly projectId?: string;
     readonly name: string;
     readonly revision: number;
     readonly definitionRevisionId: string;

@@ -769,7 +769,7 @@ function foregroundCapabilitySurfaceMessage(
         kind: effect.kind,
         name: effect.program.name,
         mode: effect.program.mode,
-        initialForegroundExposure: "exact_project_program_adapter",
+        initialForegroundExposure: "exact_program_adapter",
       });
     });
     const item = Object.freeze({
@@ -784,12 +784,17 @@ function foregroundCapabilitySurfaceMessage(
 }
 function availableProgramsMessage(programs: Awaited<ReturnType<CapabilityProgramLibrary["list"]>>): string {
   const projected = programs
-    .map(({ mode, name, description, revision }) => ({ mode, name, description, revision }))
+    .map(({ mode, scope, shadowed, name, description, revision }) =>
+      shadowed
+        ? { mode, scope, shadowed, name, description, revision }
+        : { mode, scope, name, description, revision },
+    )
     .sort((left, right) => left.mode.localeCompare(right.mode) || left.name.localeCompare(right.name))
     .slice(0, AVAILABLE_PROGRAMS_MAX_ITEMS);
   while (projected.length > 0) {
     const encoded = canonicalJson({
-      instruction: "Program effects must reference one exact saved project Program from this list.",
+      instruction:
+        "Program effects must reference one exact saved Program from this list. A project Program keeps the Capability in this project. A global Program works under any scope. A Program effect without scope picks the project Program first; set scope to choose a shadowed global Program.",
       programs: projected,
       omittedCount: Math.max(0, programs.length - projected.length),
     });
@@ -797,7 +802,7 @@ function availableProgramsMessage(programs: Awaited<ReturnType<CapabilityProgram
     projected.pop();
   }
   return canonicalJson({
-    instruction: "No saved project programs fit the bounded reflection context.",
+    instruction: "No saved Programs fit the bounded reflection context.",
     programs: [],
     omittedCount: programs.length,
   });
@@ -1178,25 +1183,31 @@ export function createCapabilityLearningModule(
       proposal?.rationale ??
       ("reason" in decision ? decision.reason : "Capability decision");
     const frozenPrograms = new Map(
-      availablePrograms.map((program) => [`${program.mode}:${program.name}`, program] as const),
+      availablePrograms.map(
+        (program) => [`${program.mode}:${program.scope}:${program.name}`, program] as const,
+      ),
     );
     const programResolver: Pick<CapabilityProgramLibrary, "resolve"> = Object.freeze({
-      resolve: async (mode, name, requestedProject) => {
+      resolve: async (mode, name, requestedProject, scope) => {
         if (
           requestedProject.projectId !== input.project.projectId ||
           requestedProject.root !== input.project.root
         )
           throw new Error(`Capability program library cannot cross project ${input.project.projectId}`);
-        const program = frozenPrograms.get(`${mode}:${name}`);
+        const program = scope
+          ? frozenPrograms.get(`${mode}:${scope}:${name}`)
+          : (frozenPrograms.get(`${mode}:project:${name}`) ?? frozenPrograms.get(`${mode}:global:${name}`));
         if (!program) return undefined;
         return Object.freeze({
           kind: "program" as const,
-          program: Object.freeze({
-            mode,
-            name,
-            project: Object.freeze({ ...input.project }),
-            definitionRevision: program.definitionRevision,
-          }),
+          program: Object.freeze(
+            createConditionalObject({ mode, name } as const)
+              .addOptional(
+                program.scope === "project" ? { project: Object.freeze({ ...input.project }) } : undefined,
+              )
+              .add({ definitionRevision: program.definitionRevision } as const)
+              .finish(),
+          ),
         });
       },
     });

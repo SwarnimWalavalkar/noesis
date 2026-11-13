@@ -312,7 +312,12 @@ function provenanceSection(
             `${safeInspectorScalar(detail.program.name)} · ${detail.program.mode} r${String(detail.program.revision)}`,
           ],
           ["definition", safeInspectorScalar(detail.program.definitionRevisionId)],
-          ["project", safeInspectorScalar(detail.program.projectId)],
+          [
+            "scope",
+            detail.program.projectId === undefined
+              ? "global"
+              : `project ${safeInspectorScalar(detail.program.projectId)}`,
+          ],
         ] as const)
       : []),
     ...(detail.parentExecutionId

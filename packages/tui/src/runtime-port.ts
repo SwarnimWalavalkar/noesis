@@ -119,7 +119,8 @@ export interface TuiExecutionSummary {
   readonly completedAt?: string;
   readonly program?: {
     readonly mode: "script";
-    readonly projectId: string;
+    /** Absent when the Program is in the global library. */
+    readonly projectId?: string;
     readonly name: string;
     readonly revision: number;
     readonly definitionRevisionId: string;
@@ -136,6 +137,13 @@ export interface TuiExecutionArtifact {
 
 export interface TuiProgramSummary {
   readonly mode: "script" | "workflow";
+  readonly scope: "project" | "global";
+  /** A project Program with the same name runs instead of this global one. */
+  readonly shadowed?: boolean;
+  /** The project revision this global Program was promoted from. */
+  readonly promotedFrom?: string;
+  /** A direct edit to this Program that Noesis could not record. The last revision stays current. */
+  readonly editProblem?: string;
   readonly name: string;
   readonly description: string;
   readonly revision: number;
@@ -191,6 +199,7 @@ export interface TuiLearningActivitySummary {
     | "paused"
     | "restored"
     | "binding_changed"
+    | "program_promoted"
     | "stale"
     | "failed";
   readonly summary: string;
