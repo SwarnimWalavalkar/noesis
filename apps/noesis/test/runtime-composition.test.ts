@@ -1844,6 +1844,7 @@ describe("apps/noesis production control-plane composition", () => {
       "history.search_sessions",
       "history.open_session_evidence",
       "history.find_similar_tasks",
+      "history.open_session",
     ];
     expect(preparedCatalogs[0]?.tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(sessionCatalogTools),

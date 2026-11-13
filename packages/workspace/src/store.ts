@@ -4434,6 +4434,33 @@ function createOperationalRepositories(
           .prepare("SELECT * FROM workflow_phase_runs WHERE run_id = ? ORDER BY phase_index")
           .all(runId)
           .map(decodeWorkflowPhaseRun),
+      pinSessionView: async (pin: {
+        readonly runId: string;
+        readonly sessionId: string;
+        readonly includePrivate: boolean;
+        readonly digest: string;
+        readonly pinnedAt: string;
+      }) =>
+        database.transaction(() => {
+          const includePrivate = pin.includePrivate ? 1 : 0;
+          const inserted = db
+            .prepare(`INSERT INTO workflow_session_view_pins(
+                run_id, session_id, include_private, digest, pinned_at
+              ) VALUES (?, ?, ?, ?, ?)
+              ON CONFLICT(run_id, session_id, include_private) DO NOTHING`)
+            .run(pin.runId, pin.sessionId, includePrivate, pin.digest, pin.pinnedAt);
+          if (Number(inserted.changes) === 1)
+            recordActivity(systemActor, "workflow_run.session_view_pinned", "workflow_run", pin.runId, [
+              pin.sessionId,
+            ]);
+          return requiredString(
+            db
+              .prepare(`SELECT digest FROM workflow_session_view_pins
+                WHERE run_id = ? AND session_id = ? AND include_private = ?`)
+              .get(pin.runId, pin.sessionId, includePrivate),
+            "digest",
+          );
+        }),
       interruptRunning: async (interruptedAt: string) =>
         database.transaction(() => {
           const runningPhases = db

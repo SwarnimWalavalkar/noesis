@@ -56,6 +56,7 @@ import {
 import {
   createHistoryPort,
   createSessionSearchTools,
+  OpenSessionInputSchema,
   type HistoryPort,
   type SessionToolDefinition,
 } from "@noesis/intelligence";
@@ -107,6 +108,7 @@ import {
   type SubAgentSupervisor,
   type SubAgentTaskExecutionPort,
   type SessionContextMessage,
+  freezeSessionViewDocument,
 } from "@noesis/runtime";
 import {
   createRestrictedRoleContextPolicy,
@@ -1642,6 +1644,10 @@ export async function createApplicationRuntimeComposition(
     }
     const contextDocuments = new Map<string, RuntimeExecutionContextDocument>();
     const activeExecutionContexts = new Map<string, RuntimeExecutionContextDocument>();
+    /** Session views each active execution opened; only these and its `context` may fill a prompt. */
+    const activeExecutionSessionViews = new Map<string, Map<string, RuntimeExecutionContextDocument>>();
+    /** The workflow run whose pins govern session views opened by an active execution. */
+    const activeExecutionWorkflowRuns = new Map<string, string>();
     const activeExecutionEventSinks = new Map<
       string,
       Parameters<Awaited<ReturnType<PiCodeExecutionAdapter["prepare"]>>["execute"]>[3]
@@ -2559,6 +2565,7 @@ export async function createApplicationRuntimeComposition(
       requestTokenBudget: number,
     ): Promise<string> => {
       const activeContext = activeExecutionContexts.get(executionId);
+      const sessionViews = activeExecutionSessionViews.get(executionId);
       const refs = subAgentPromptParts(value);
       const expanded: { readonly content: string; readonly context: boolean }[] = [];
       const maximumExpandedCharacters = requestTokenBudget * 4;
@@ -2571,11 +2578,15 @@ export async function createApplicationRuntimeComposition(
           expanded.push(Object.freeze({ content: ref, context: false }));
           continue;
         }
-        if (!activeContext) throw new Error("ContextView requires an active Code Mode execution");
+        if (!activeContext && !sessionViews)
+          throw new Error("ContextView requires an active Code Mode execution");
         const handle = ref.__noesisContext;
-        if (handle.documentId !== activeContext.frozen.documentId)
-          throw new Error("ContextView does not belong to this Code Mode execution");
-        if (handle.end > activeContext.frozen.characterLength)
+        const document =
+          handle.documentId === activeContext?.frozen.documentId
+            ? activeContext
+            : sessionViews?.get(handle.documentId);
+        if (!document) throw new Error("ContextView does not belong to this Code Mode execution");
+        if (handle.end > document.frozen.characterLength)
           throw new Error("ContextView range is outside the frozen context document");
         const partLength = handle.end - handle.start;
         if (partLength > maximumExpandedCharacters - expandedCharacters)
@@ -2583,7 +2594,7 @@ export async function createApplicationRuntimeComposition(
         expandedCharacters += partLength;
         expanded.push(
           Object.freeze({
-            content: (await activeContext.read()).slice(handle.start, handle.end),
+            content: (await document.read()).slice(handle.start, handle.end),
             context: true,
           }),
         );
@@ -2600,6 +2611,54 @@ export async function createApplicationRuntimeComposition(
       if (!rendered.trim()) throw new Error("Subagent prompt must not be empty");
       return rendered;
     };
+    const historyOpenSessionTool = defineTool({
+      name: "history.open_session",
+      label: "Open session",
+      description:
+        "Open one recorded session as an immutable view with the same interface as `context`: `.length`, `.slice(start, end)`, and `await .text()`. A slice can go directly in an `agents.spawn` prompt. The view is a snapshot taken now. Secret content is always replaced by an `omitted` line, and private content is too unless includePrivate is set for the current or an authorized session. A deleted session is rejected. Inside a workflow run, later reads of the session must match the first one or they fail.",
+      identityMaterial: toJsonValue({ adapterRevision: "history-open-session-v1" }),
+      inputSchema: OpenSessionInputSchema,
+      outputSchema: z.strictObject({
+        documentId: z.string(),
+        path: z.string(),
+        characterLength: z.number().int().nonnegative(),
+        byteLength: z.number().int().nonnegative(),
+        contentDigest: z.string(),
+      }),
+      effect: () => ({ effect: "read", resource: "noesis-history:open_session", estimatedCost: 0 }),
+      execute: async (input, context) => {
+        const authorized = await createSessionSearchTools({
+          workspace,
+          history,
+          authorization: Object.freeze({ currentSessionId: context.sessionId }),
+        }).authorizeOpenSession(input);
+        if (!authorized.ok)
+          throw new Error(`open_session failed [${authorized.error.code}]: ${authorized.error.message}`);
+        context.signal.throwIfAborted();
+        const { sessionId, includePrivate } = authorized.value;
+        const frozen = await freezeSessionViewDocument(workspace, sessionId, { includePrivate });
+        const runId =
+          activeExecutionWorkflowRuns.get(context.executionId) ?? plan.subAgentActor?.workflowRunId;
+        if (runId) {
+          const pinned = await workspace.operational.workflows.pinSessionView({
+            runId,
+            sessionId,
+            includePrivate,
+            digest: frozen.contentDigest,
+            pinnedAt: new Date().toISOString(),
+          });
+          if (pinned !== frozen.contentDigest)
+            throw new Error(
+              `Workflow run ${runId} is pinned to different content for session ${sessionId}. The session changed after the run first read it, so start a new run to read its current content.`,
+            );
+        }
+        const document = registerContextDocument(frozen);
+        const opened = activeExecutionSessionViews.get(context.executionId) ?? new Map();
+        opened.set(frozen.documentId, document);
+        activeExecutionSessionViews.set(context.executionId, opened);
+        return toJsonValue(document.request);
+      },
+    });
     const agentsSpawnTool = defineTool({
       name: "agents.spawn",
       label: "Spawn subagent",
@@ -2678,6 +2737,8 @@ export async function createApplicationRuntimeComposition(
         if (plan.subAgentActor && (!parentRecord || parentRecord.status === "closed"))
           throw new Error("Parent subagent is unavailable");
         const originParent = parentAgentAddress();
+        const workflowRunId =
+          activeExecutionWorkflowRuns.get(context.executionId) ?? plan.subAgentActor?.workflowRunId;
         const origin = Object.freeze(
           createConditionalObject({
             projectId: project.projectId,
@@ -2686,6 +2747,7 @@ export async function createApplicationRuntimeComposition(
             executionId: context.executionId,
           } as const)
             .addOptional(plan.subAgentActor ? { parentAgentId: plan.subAgentActor.agentId } : undefined)
+            .addOptional(workflowRunId ? { workflowRunId } : undefined)
             .finish(),
         );
         const unsignedPlan = Object.freeze(
@@ -2971,6 +3033,7 @@ export async function createApplicationRuntimeComposition(
       ...localWorkTools,
       ...capabilityTools,
       skillLoadTool,
+      historyOpenSessionTool,
       agentsSpawnTool,
       agentsSendTool,
       agentsListTool,
@@ -3158,6 +3221,10 @@ export async function createApplicationRuntimeComposition(
           (() => undefined),
       );
       if (eventBridge?.subAgentAncestor) subAgentExecutionIds.add(executionId);
+      const inheritedWorkflowRun = parentExecutionId
+        ? activeExecutionWorkflowRuns.get(parentExecutionId)
+        : undefined;
+      if (inheritedWorkflowRun) activeExecutionWorkflowRuns.set(executionId, inheritedWorkflowRun);
       try {
         await onPrepared(executionId);
         const executionRequest = createConditionalObject({
@@ -3243,6 +3310,8 @@ export async function createApplicationRuntimeComposition(
         throw error;
       } finally {
         activeExecutionContexts.delete(executionId);
+        activeExecutionSessionViews.delete(executionId);
+        activeExecutionWorkflowRuns.delete(executionId);
         activeExecutionEventSinks.delete(executionId);
         subAgentExecutionIds.delete(executionId);
       }
@@ -3442,6 +3511,7 @@ export async function createApplicationRuntimeComposition(
             undefined,
             async () => {
               executionPrepared = true;
+              activeExecutionWorkflowRuns.set(executionId, runId);
               await workspace.operational.workflows.putPhase({
                 runId,
                 phaseIndex,
@@ -3815,14 +3885,22 @@ export async function createApplicationRuntimeComposition(
         model: record.frozenPlan.route.model,
         thinkingLevel: record.frozenPlan.thinkingLevel,
         permissionSnapshot: record.frozenPlan.authority.permissionSnapshot,
-        subAgentActor: Object.freeze({
-          agentId: record.agentId,
-          taskId: task.taskId,
-          parent: record.parentAgentId
-            ? Object.freeze({ kind: "subagent" as const, id: record.parentAgentId })
-            : Object.freeze({ kind: "foreground" as const, id: record.originSessionId }),
-          allowedTools: Object.freeze(record.frozenPlan.frozenTools.map((tool) => tool.name)),
-        }),
+        subAgentActor: Object.freeze(
+          createConditionalObject({
+            agentId: record.agentId,
+            taskId: task.taskId,
+            parent: record.parentAgentId
+              ? Object.freeze({ kind: "subagent" as const, id: record.parentAgentId })
+              : Object.freeze({ kind: "foreground" as const, id: record.originSessionId }),
+            allowedTools: Object.freeze(record.frozenPlan.frozenTools.map((tool) => tool.name)),
+          } as const)
+            .addOptional(
+              record.frozenPlan.origin.workflowRunId
+                ? { workflowRunId: record.frozenPlan.origin.workflowRunId }
+                : undefined,
+            )
+            .finish(),
+        ),
         createdAt: task.createdAt,
       } as const)
         .addOptional(record.frozenPlan.context ? { contextDocument: record.frozenPlan.context } : undefined)

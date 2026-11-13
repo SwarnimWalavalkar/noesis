@@ -178,7 +178,7 @@ function sourceWithLastExpressionCompletion(source) {
     expressionEnd,
   )});${source.slice(statementEnd)}`;
 }
-function delegate(kind, payload) {
+function delegate(kind, payload, revive = (value) => value) {
   const requestId = `sdk_${++sequence}`;
   const result = new Promise((resolve, reject) => {
     pending.set(requestId, { resolve, reject });
@@ -199,7 +199,7 @@ function delegate(kind, payload) {
   const consume = () =>
     result.then(({ value, callId }) => {
       successfulCallIds.add(callId);
-      return value;
+      return revive(value);
     });
   return Object.freeze({
     // oxlint-disable-next-line unicorn/no-thenable -- awaiting is the observation boundary we must track.
@@ -209,11 +209,20 @@ function delegate(kind, payload) {
     [Symbol.toStringTag]: "Promise",
   });
 }
+/** Only this tool's output is revived, so no other tool's result can direct a view at a chosen file. */
+const SESSION_VIEW_TOOL = "history.open_session";
+function invokeTool(name, input) {
+  return delegate(
+    "invoke",
+    { name, input },
+    name === SESSION_VIEW_TOOL ? (value) => createContextView(createContextDocument(value)) : undefined,
+  );
+}
 function createTools(names) {
   const families = new Map();
   const tools = new Map();
   for (const name of names) {
-    const invoke = (input = {}) => delegate("invoke", { name, input });
+    const invoke = (input = {}) => invokeTool(name, input);
     const separator = name.indexOf(".");
     if (separator < 0) {
       tools.set(name, invoke);
@@ -246,11 +255,7 @@ const noesis = Object.freeze({
         .finish(),
     ),
   describe: (name) => delegate("describe", { name: String(name) }),
-  invoke: (name, input = {}) =>
-    delegate("invoke", {
-      name: String(name),
-      input,
-    }),
+  invoke: (name, input = {}) => invokeTool(String(name), input),
 });
 function normalizeSliceIndex(value, length, fallback) {
   if (value === undefined) return fallback;
