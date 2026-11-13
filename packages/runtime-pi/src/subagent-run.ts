@@ -99,6 +99,10 @@ function providerToolPlan(names: ReadonlySet<string>): {
   });
 }
 
+const PI_SUBAGENT_LAST_ROUND_REMINDER = `<system-reminder>
+This is the last model request for this task, and tools are unavailable for it. Give your final answer now from what you already have, and say plainly what you could not finish.
+</system-reminder>`;
+
 export interface PiSubAgentModelCallLease {
   readonly complete: (request: { readonly output: string; readonly usage: AgentUsage }) => Promise<void>;
   readonly fail: (reason: string, usage?: AgentUsage, status?: "failed" | "cancelled") => Promise<void>;
@@ -296,8 +300,11 @@ export function createPiSubAgentTaskRunner(
     const selectedNames = new Set(request.plan.frozenTools.map((tool) => tool.name));
     const toolPlan = providerToolPlan(selectedNames);
     const offersTools = toolPlan.execute || toolPlan.direct.length > 0;
-    task.answerOnly = !offersTools;
-    let definitionsOffered = offersTools;
+    const maxRounds = request.plan.maxRounds;
+    task.answerOnly = !offersTools || maxRounds === 1;
+    let definitionsOffered = !task.answerOnly;
+    let answeredRounds = 0;
+    let repairing = false;
     /** The latest answer lost tool calls it was not allowed to make. */
     let latestAnswerStripped = false;
     const selectedPrepared: PreparedPiCodeExecution = Object.freeze({
@@ -417,10 +424,9 @@ export function createPiSubAgentTaskRunner(
           models: requestModels,
           model,
           tools: toolPlan.execute ? [executeTool, ...directTools] : [...directTools],
-          activeToolNames: [
-            ...(toolPlan.execute ? [executeTool.name] : []),
-            ...directTools.map((tool) => tool.name),
-          ],
+          activeToolNames: definitionsOffered
+            ? [...(toolPlan.execute ? [executeTool.name] : []), ...directTools.map((tool) => tool.name)]
+            : [],
           thinkingLevel: request.plan.thinkingLevel,
           compaction: NOESIS_PI_COMPACTION_SETTINGS,
           steeringMode: "all",
@@ -455,8 +461,13 @@ export function createPiSubAgentTaskRunner(
           const activeTools = (await harness.getTools(context)).filter((tool) =>
             activeToolNames.has(tool.name),
           );
+          // Sent with this request only, and recorded with it; the session never stores it. It is
+          // part of the request, so the frozen budget counts it.
+          const lastRound = maxRounds !== undefined && offersTools && task.answerOnly && !repairing;
           const projected = budgetProjector.project({
-            messages,
+            messages: lastRound
+              ? [...messages, priorUserMessage(PI_SUBAGENT_LAST_ROUND_REMINDER, Date.now())]
+              : messages,
             systemPrompt: request.plan.renderedSystemPrompt,
             activeToolMaterial: JSON.stringify(
               activeTools.map((tool) => ({
@@ -639,6 +650,12 @@ export function createPiSubAgentTaskRunner(
         // A provider may ignore the request not to call tools. Answer-only must still end the task.
         const answer = task.answerOnly ? withoutToolCalls(event.message) : event.message;
         latestAnswerStripped = answer !== event.message;
+        // Provider failures are retried and stay outside the limit. Calls this round proposed still
+        // run, because the guard above read the state before this round could end the task's tools.
+        if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") {
+          answeredRounds += 1;
+          if (maxRounds !== undefined && answeredRounds >= maxRounds - 1) task.answerOnly = true;
+        }
         return answer === event.message ? undefined : { message: answer };
       });
       // Tool calls in history can require definitions on the wire, so a task that has already used
@@ -695,6 +712,7 @@ export function createPiSubAgentTaskRunner(
           let decoded = decodeCompiledSubAgentOutput(assistantText(final), outputSchema);
           if (!decoded.ok) {
             task.answerOnly = true;
+            repairing = true;
             // No tool calls in history, so nothing requires definitions. A tool choice without
             // definitions is itself rejected by some APIs, so the two are removed together.
             if (toolCalls === 0) {
@@ -709,7 +727,9 @@ export function createPiSubAgentTaskRunner(
           if (!decoded.ok)
             throw new Error(`Subagent final answer does not match its output schema: ${decoded.failure}`);
           resultText = canonicalJson(decoded.value);
-        } else if (latestAnswerStripped && !assistantText(final).trim())
+        } else if (maxRounds !== undefined && answeredRounds >= maxRounds && !assistantText(final).trim())
+          throw new Error("Subagent reached its round limit without an answer");
+        else if (latestAnswerStripped && !assistantText(final).trim())
           throw new Error("Subagent answered only with tool calls it could not run");
         request.emit({ type: "status", status: "completed" });
         return Object.freeze({

@@ -330,6 +330,129 @@ describe("exact subagent tools", () => {
   });
 });
 
+describe("maxRounds", () => {
+  const lastUser = (context: Context): string => JSON.stringify(context.messages.at(-1) ?? null);
+  const readCall = (id: string) => controlledToolCallResponse("file_read", { path: "package.json" }, id);
+
+  test("a task with tools does tool work, then answers on its last round", async () => {
+    const requests: Context[] = [];
+    const { value } = await runProgram(
+      `return await agents.wait(await agents.spawn({ prompt: "Explore.", tools: ["files.read"], maxRounds: 2 }));`,
+      ({ context }) => {
+        requests.push(context);
+        if (requests.length === 1) return readCall("call-explore");
+        // The provider ignores the request not to call tools; the answer still ends the task.
+        const call = readCall("call-too-many");
+        return { ...call, content: [{ type: "text", text: "Found it." }, ...call.content] };
+      },
+    );
+    expect(requests).toHaveLength(2);
+    expect(toolNames(requests[1] ?? { messages: [] })).toHaveLength(1);
+    expect(lastUser(requests[1] ?? { messages: [] })).toContain("last model request");
+    expect(lastUser(requests[0] ?? { messages: [] })).not.toContain("last model request");
+    expect(value).toMatchObject({ status: "completed", result: "Found it." });
+  });
+
+  test("maxRounds 1 is a plain model call even when tools are listed", async () => {
+    const requests: Context[] = [];
+    const { value } = await runProgram(
+      `return (await agents.wait(await agents.spawn({ prompt: "Answer.", tools: ["files.read"], maxRounds: 1 }))).result;`,
+      ({ context }) => {
+        requests.push(context);
+        return "Answered.";
+      },
+    );
+    expect(value).toBe("Answered.");
+    expect(requests).toHaveLength(1);
+    expect(toolNames(requests[0] ?? { messages: [] })).toEqual([]);
+  });
+
+  test("a task that finishes early is unaffected", async () => {
+    let calls = 0;
+    const { value } = await runProgram(
+      `return (await agents.wait(await agents.spawn({ prompt: "Answer.", maxRounds: 5 }))).result;`,
+      ({ context }) => {
+        calls += 1;
+        expect(lastUser(context)).not.toContain("last model request");
+        return "Early answer.";
+      },
+    );
+    expect(value).toBe("Early answer.");
+    expect(calls).toBe(1);
+  });
+
+  test("the repair request does not count against the limit", async () => {
+    const requests: Context[] = [];
+    const { value } = await runProgram(
+      `return await agents.wait(await agents.spawn({ prompt: "Explore.", tools: ["files.read"], maxRounds: 2, output: ${SAFE_SCHEMA} }));`,
+      ({ context }) => {
+        requests.push(context);
+        if (requests.length === 1) return readCall("call-explore");
+        return requests.length === 2 ? "Not JSON." : '{"safe":true}';
+      },
+    );
+    expect(requests).toHaveLength(3);
+    expect(lastUser(requests[2] ?? { messages: [] })).toContain("did not satisfy");
+    expect(lastUser(requests[2] ?? { messages: [] })).not.toContain("last model request");
+    expect(value).toMatchObject({ status: "completed", result: { safe: true } });
+  });
+
+  test("a follow-up task gets a fresh count", async () => {
+    let calls = 0;
+    const { value } = await runProgram(
+      `const handle = await agents.spawn({ prompt: "first", tools: ["files.read"], maxRounds: 2 });
+       const first = await agents.wait(handle);
+       const sent = await agents.send({ to: handle.agentId, message: "second" });
+       const second = await agents.wait({ taskId: sent.taskId });
+       return [first.result, second.result];`,
+      ({ context }) => {
+        calls += 1;
+        return context.messages.at(-1)?.role === "toolResult" ||
+          lastUser(context).includes("last model request")
+          ? `answer ${String(calls)}`
+          : readCall(`call-${String(calls)}`);
+      },
+    );
+    expect(calls).toBe(4);
+    expect(value).toEqual(["answer 2", "answer 4"]);
+  });
+
+  test("an answerless last round fails instead of returning an empty result", async () => {
+    const { value } = await runProgram(
+      `return await agents.wait(await agents.spawn({ prompt: "Explore.", tools: ["files.read"], maxRounds: 2 }));`,
+      () => readCall("call-always"),
+    );
+    expect(value).toMatchObject({
+      status: "failed",
+      error: expect.stringContaining("round limit without an answer"),
+    });
+  });
+
+  test("an empty answer before the limit is not reported as reaching it", async () => {
+    let calls = 0;
+    const { value } = await runProgram(
+      `const task = await agents.wait(await agents.spawn({ prompt: "Explore.", tools: ["files.read"], maxRounds: 2 }));
+       return { status: task.status, result: task.result };`,
+      () => {
+        calls += 1;
+        return "";
+      },
+    );
+    expect(calls).toBe(1);
+    expect(value).toEqual({ status: "completed", result: "" });
+  });
+
+  test.each(["0", "-1", "1.5"])("rejects maxRounds %s at admission", async (maxRounds) => {
+    const { error } = await runProgram(
+      `return await agents.spawn({ prompt: "x", maxRounds: ${maxRounds} });`,
+      () => {
+        throw new Error("A rejected spawn must not reach the provider");
+      },
+    );
+    expect(error).toContain("maxRounds");
+  });
+});
+
 describe("joining a task by its handle", () => {
   test("wait accepts the handle, with or without a timeout, and stays strict otherwise", async () => {
     const { value } = await runProgram(
