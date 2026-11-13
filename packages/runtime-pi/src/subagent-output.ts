@@ -4,27 +4,34 @@ import { canonicalJson, JsonValueSchema, type JsonObject, type JsonValue } from 
 import { z } from "zod";
 
 /**
- * One validator for every caller schema. It implements JSON Schema 2020-12 fully, never fills in a
- * `default`, and rejects unknown keywords such as draft-7 `dependencies` at admission instead of
- * silently ignoring them.
+ * A fresh JSON Schema 2020-12 validator for one caller schema. Each schema gets its own instance, so
+ * one schema's `$id` cannot collide with another copy of it and nothing stays cached afterwards. It
+ * never fills in a `default`, and it rejects unknown keywords such as a misspelled one at admission
+ * instead of silently ignoring them.
  */
-const validator = new Ajv2020({
-  allErrors: true,
-  strictSchema: true,
-  strictNumbers: true,
-  strictTypes: false,
-  strictTuples: false,
-  strictRequired: false,
-  validateFormats: true,
-});
-// ajv-formats is CommonJS; its function is also exported as `default`.
-ajvFormats.default(validator);
+function createValidator(): Ajv2020 {
+  const validator = new Ajv2020({
+    allErrors: true,
+    strictSchema: true,
+    strictNumbers: true,
+    strictTypes: false,
+    strictTuples: false,
+    strictRequired: false,
+    validateFormats: true,
+  });
+  // ajv-formats is CommonJS; its function is also exported as `default`.
+  ajvFormats.default(validator);
+  return validator;
+}
 
 /** Decoder for a caller-supplied JSON Schema. A schema that cannot be compiled fails at admission. */
 export function compileSubAgentOutput(schema: JsonObject): z.ZodType<JsonValue> {
   let validate: ValidateFunction;
   try {
-    validate = validator.compile(schema);
+    // An asynchronous validator returns a Promise, which would read as a pass. Ajv honors `$async`
+    // only at the root and refuses it inside a synchronous schema.
+    if (schema["$async"] === true) throw new Error("asynchronous schemas ($async) are not supported");
+    validate = createValidator().compile(schema);
   } catch (cause) {
     throw new Error(
       `Subagent output is not a usable JSON Schema: ${cause instanceof Error ? cause.message : String(cause)}`,
