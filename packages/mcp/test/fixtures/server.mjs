@@ -44,6 +44,9 @@ server.registerTool(
       });
     }
     await server.sendLoggingMessage({ level: "info", data: "echoed" });
+    // The client SDK drops a progress notification that it reads in the same chunk as the result,
+    // so leave a gap before answering.
+    await new Promise((resolve) => setTimeout(resolve, 100));
     return { content: [{ type: "text", text: value }], structuredContent: { echoed: value } };
   },
 );
