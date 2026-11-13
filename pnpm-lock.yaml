@@ -8,7 +8,7 @@ overrides:
   body-parser@>=2.0.0 <2.4.0: 2.4.0
   brace-expansion@>=4.0.0 <5.0.12: 5.0.12
   fast-uri@>=3.0.0 <3.1.9: 3.1.9
-  '@hono/node-server@>=1.19.10 <2.1.3': 2.1.3
+  '@hono/node-server@>=1.19.10 <2.1.6': 2.1.6
   ip-address@<10.7.5: 10.7.5
   minimatch@<11.0.1: 11.0.4
   proxy-addr@<2.0.8: 2.0.8
@@ -49,8 +49,8 @@ importers:
         specifier: 2.2.3
         version: 2.2.3
       hono:
-        specifier: 4.13.14
-        version: 4.13.14
+        specifier: 4.13.16
+        version: 4.13.16
       import-meta-resolve:
         specifier: 4.2.0
         version: 4.2.0
@@ -677,11 +677,11 @@ packages:
       '@modelcontextprotocol/sdk':
         optional: true
 
-  '@hono/node-server@2.1.3':
-    resolution: {integrity: sha512-TA//nWMqPhbfdfneACk6t5a9eqbS9lABEPyKn0/xZTah3H3U2XaVg85rJFl0/Fyit0I552YDHgXGVSf3GwqbUw==}
+  '@hono/node-server@2.1.6':
+    resolution: {integrity: sha512-p/KH9MnfNcsm3sR6x4lNgm5j+QN4Et8srKredl9DZfXiyZ1UQ3aQ2YVpFLbqktYN5JI+DB+VZFKM2PqE5hLKjQ==}
     engines: {node: '>=20'}
     peerDependencies:
-      hono: ^4
+      hono: ^4 || ^5.0.0-0
 
   '@isaacs/nonrecursive-glob-match@1.0.3':
     resolution: {integrity: sha512-SI7kyKHq4XXDRozw+r9GlRZkia1ZkFrpLW98r2IC2Bpr8YkFGE3fvjzmxCG0x78A++69HmDNrDvSMYBZmHGpKA==}
@@ -1583,8 +1583,8 @@ packages:
   highlight.js@10.7.3:
     resolution: {integrity: sha512-tzcUFauisWKNHaRkN4Wjl/ZA07gENAjFl3J/c480dprkGTg5EQstgaNFqBfUqCq54kZRIEcreTsAgF/m2quD7A==}
 
-  hono@4.13.14:
-    resolution: {integrity: sha512-yhRLQ21U6qa9Hsu2N7Qcbh8tE+WKEcoErjIo56LeSGiGXGp9sA7UpE86Ui9uexb61KakiGwuHMn2QdV7w6i6kQ==}
+  hono@4.13.16:
+    resolution: {integrity: sha512-AOLOEhvrV+iH92xXCnFr/5+3KjPKcI3xP63XJtX5spAnkznPdHijlIsUTpi7/9EhWqrTCekw5c5zh1K+YsVw7A==}
     engines: {node: '>=16.9.0'}
 
   hosted-git-info@9.0.3:
@@ -2607,9 +2607,9 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@hono/node-server@2.1.3(hono@4.13.14)':
+  '@hono/node-server@2.1.6(hono@4.13.16)':
     dependencies:
-      hono: 4.13.14
+      hono: 4.13.16
 
   '@isaacs/nonrecursive-glob-match@1.0.3': {}
 
@@ -2661,7 +2661,7 @@ snapshots:
 
   '@modelcontextprotocol/sdk@1.32.2(zod@4.6.7)':
     dependencies:
-      '@hono/node-server': 2.1.3(hono@4.13.14)
+      '@hono/node-server': 2.1.6(hono@4.13.16)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -2671,7 +2671,7 @@ snapshots:
       eventsource-parser: 3.1.1
       express: 5.2.1
       express-rate-limit: 8.6.2(express@5.2.1)
-      hono: 4.13.14
+      hono: 4.13.16
       jose: 6.2.8
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
@@ -3342,7 +3342,7 @@ snapshots:
 
   highlight.js@10.7.3: {}
 
-  hono@4.13.14: {}
+  hono@4.13.16: {}
 
   hosted-git-info@9.0.3:
     dependencies:
