@@ -71,6 +71,7 @@ export * from "./role-runner.ts";
 export * from "./role-types.ts";
 export * from "./skill-invocation.ts";
 export * from "./skill-library.ts";
+export * from "./subagent-output.ts";
 export * from "./subagent-run.ts";
 function assistantText(message: { readonly content: readonly unknown[] }): string {
   return message.content

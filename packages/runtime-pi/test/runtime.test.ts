@@ -575,10 +575,20 @@ describe("agent runtime factories", () => {
       runId: "subagent-steer-flush",
       systemPrompt: "Follow both steering messages.",
       prompt: "Begin the controlled task.",
-      tools: Object.freeze([]),
+      tools: Object.freeze(["probe.read"]),
       thinkingLevel: "off",
       route: Object.freeze({ provider: CONTROLLED_PI_PROVIDER, model: CONTROLLED_PI_MODEL }),
-      frozenTools: Object.freeze([]),
+      // A task without tools holds messages back for a later task; this one must consume them.
+      frozenTools: Object.freeze([
+        Object.freeze({
+          name: "probe.read",
+          label: "Probe",
+          description: "Probe",
+          revisionId: "revision-probe",
+          inputSchema: {},
+          outputSchema: {},
+        }),
+      ]),
       authority: Object.freeze({
         parentExecutionId: "execution-parent",
         parentToolCallId: "tool-call-parent",

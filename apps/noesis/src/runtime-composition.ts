@@ -118,8 +118,10 @@ import {
   formatSkillsForNoesisPrompt,
   foregroundToolContext,
   createStructuredInferencePort,
-  FOREGROUND_DIRECT_TOOL_NAMES,
-  PI_SUBAGENT_SYSTEM_PROMPT,
+  compileSubAgentOutput,
+  decodeSubAgentOutput,
+  DEFAULT_SUBAGENT_TOOL_NAMES,
+  renderPiSubAgentSystemPrompt,
   type PiCodeExecutionAdapter,
   type PiCodeExecutionEvent,
   type PiSubAgentTaskRunner,
@@ -2379,6 +2381,7 @@ export async function createApplicationRuntimeComposition(
       systemPrompt: z.string().trim().min(1).optional(),
       prompt: subAgentPromptSchema,
       tools: z.array(z.string().trim().min(1).max(256)).optional(),
+      output: z.record(z.string(), JsonValueSchema).optional(),
       thinkingLevel: z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]).optional(),
     });
     type SubAgentPromptPart = z.infer<typeof subAgentPromptPartSchema>;
@@ -2588,9 +2591,9 @@ export async function createApplicationRuntimeComposition(
       name: "agents.spawn",
       label: "Spawn subagent",
       description:
-        "Durably admit a retained subagent and start its first task in the background. Returns immediately with stable agent and task handles.",
+        "Durably admit a retained subagent and queue its first task in the background. Returns immediately with stable agent and task handles. Omit tools for the default set; a tools array is the exact list, and an empty array makes a plain model call. output is a JSON Schema for the final answer.",
       identityMaterial: toJsonValue({
-        adapterRevision: "agents-spawn-v1",
+        adapterRevision: "agents-spawn-v2",
         defaults: plan.subAgentDefaults ?? null,
       }),
       inputSchema: subAgentInputSchema,
@@ -2620,17 +2623,14 @@ export async function createApplicationRuntimeComposition(
         const requestedTools = Object.freeze([...new Set(input.tools ?? [])]);
         if (requestedTools.length !== (input.tools ?? []).length)
           throw new Error("Subagent tool names must be unique");
-        const collaborationTools = [
-          "agents.send",
-          "agents.list",
-          "agents.inspect",
-          "agents.wait",
-          "agents.cancel",
-          "agents.close",
-        ];
-        const allowedNames = Object.freeze([
-          ...new Set([...FOREGROUND_DIRECT_TOOL_NAMES, ...requestedTools, ...collaborationTools]),
-        ]);
+        // The default narrows to what this actor holds, so a nested spawn can never widen authority.
+        const availableNames = new Set(preparedForSubAgents.catalog.tools.map((tool) => tool.name));
+        const allowedNames = input.tools
+          ? requestedTools
+          : Object.freeze(
+              DEFAULT_SUBAGENT_TOOL_NAMES.filter((name) => !plan.subAgentActor || availableNames.has(name)),
+            );
+        if (input.output) compileSubAgentOutput(input.output);
         const frozenTools = Object.freeze(
           allowedNames.map((name) => {
             const descriptor = preparedForSubAgents?.catalog.tools.find((tool) => tool.name === name);
@@ -2639,9 +2639,12 @@ export async function createApplicationRuntimeComposition(
           }),
         );
         const thinkingLevel = input.thinkingLevel ?? defaults.thinkingLevel;
-        const renderedSystemPrompt = [PI_SUBAGENT_SYSTEM_PROMPT, input.systemPrompt?.trim()]
-          .filter((part): part is string => Boolean(part))
-          .join("\n\n");
+        const renderedSystemPrompt = renderPiSubAgentSystemPrompt(
+          createConditionalObject({ toolNames: allowedNames })
+            .addOptional(input.systemPrompt ? { systemPrompt: input.systemPrompt } : undefined)
+            .addOptional(input.output ? { output: input.output } : undefined)
+            .finish(),
+        );
         const estimatedRequestTokens =
           estimateContextTokens(renderedSystemPrompt) +
           estimateContextTokens(renderedPrompt) +
@@ -2691,6 +2694,7 @@ export async function createApplicationRuntimeComposition(
             createdAt,
           } as const)
             .addOptional(plan.contextDocument ? { context: plan.contextDocument } : undefined)
+            .addOptional(input.output ? { output: input.output } : undefined)
             .finish(),
         );
         const frozenPlan: FrozenSubAgentPlan = Object.freeze({
@@ -2866,19 +2870,29 @@ export async function createApplicationRuntimeComposition(
       name: "agents.wait",
       label: "Wait for subagent",
       description:
-        "Join one exact subagent task to use its result value in later code. Settled results reach the requesting actor automatically as a system reminder, so do not wait only to learn that work finished. Code that discards this value is rejected. Cancelling or timing out this wait never cancels the task.",
-      identityMaterial: toJsonValue({ adapterRevision: "agents-wait-v2" }),
+        "Join one exact subagent task to use its result value in later code. result is the validated value when the task declared output, otherwise text. Settled results reach the requesting actor automatically as a system reminder, so do not wait only to learn that work finished. Code that discards this value is rejected. Cancelling or timing out this wait never cancels the task. The agents.wait SDK function also accepts the handle returned by agents.spawn.",
+      identityMaterial: toJsonValue({ adapterRevision: "agents-wait-v3" }),
       inputSchema: z.strictObject({
         taskId: z.string().min(1),
         timeoutMs: z.number().int().positive().max(2_147_483_647).optional(),
       }),
-      outputSchema: subAgentTaskResultSchema,
+      outputSchema: subAgentTaskResultSchema.extend({ result: JsonValueSchema }),
       effect: () => ({ effect: "read", resource: `subagent:${project.projectId}:wait`, estimatedCost: 0 }),
       execute: async ({ taskId, timeoutMs }, context) => {
         if (!subAgentSupervisor) throw new Error("Subagent supervisor is unavailable");
-        return subAgentTaskResultOutput(
-          await subAgentSupervisor.wait(taskId, context.signal, timeoutMs, currentAgentAddress()),
-        );
+        const task = await subAgentSupervisor.wait(taskId, context.signal, timeoutMs, currentAgentAddress());
+        const output = subAgentTaskResultOutput(task);
+        if (task.status !== "completed") return output;
+        const schema = (await workspace.operational.subAgents.get(task.agentId))?.frozenPlan.output;
+        if (!schema) return output;
+        // The result artifact is the complete validated answer; the task row keeps only a preview.
+        const record = await workspace.operational.subAgents.getTask(taskId);
+        const artifact = record?.resultArtifactId
+          ? await workspace.getArtifactMetadata(record.resultArtifactId)
+          : undefined;
+        if (!artifact) throw new Error(`Subagent task ${taskId} has no recorded result`);
+        const bytes = await workspace.reads.readArtifact(artifact);
+        return { ...output, result: decodeSubAgentOutput(new TextDecoder().decode(bytes), schema) };
       },
     });
     const agentsCancelTool = defineTool({
@@ -3989,9 +4003,10 @@ export async function createApplicationRuntimeComposition(
     createId: (prefix) => createId(prefix === "task" ? "subagent_task" : "agent_message"),
     persistResult: async ({ agent: record, task, text }) => {
       const bytes = encoder.encode(text);
+      const structured = record.frozenPlan.output !== undefined;
       const artifact = await workspace.artifacts.writeArtifact({
-        path: `subagents/${sha256(record.agentId).slice(0, 32)}/tasks/${sha256(task.taskId).slice(0, 32)}/result.txt`,
-        mediaType: "text/plain",
+        path: `subagents/${sha256(record.agentId).slice(0, 32)}/tasks/${sha256(task.taskId).slice(0, 32)}/result.${structured ? "json" : "txt"}`,
+        mediaType: structured ? "application/json" : "text/plain",
         bytes,
         actor: Object.freeze({ actorId: record.agentId, kind: "noesis" as const }),
         relationshipRefs: Object.freeze([

@@ -62,6 +62,19 @@ const child = await agents.spawn({
 return await agents.wait({ taskId: child.taskId });
 ```
 
+A decision that depends on meaning can be a plain model call: a subagent with no tools, whose answer is checked against a schema.
+
+```js
+const { status, result, error } = await agents.wait(
+  await agents.spawn({
+    prompt: ["Is this rollback safe?", context.slice(-8000)],
+    tools: [],
+    output: { type: "object", properties: { safe: { type: "boolean" } }, required: ["safe"] },
+  }),
+);
+if (status !== "completed") throw new Error(error);
+```
+
 Useful procedures can become saved Programs: scripts to run again, or workflows that can resume from recorded progress. A Program belongs to one project or to the global library, so it can follow you between projects. Its exact revisions can also become part of a learned Capability.
 
 See [codemode, context, and subagents](docs/codemode.md) for the APIs and inspection controls.

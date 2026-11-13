@@ -1,6 +1,6 @@
 # Codemode, context, and subagents
 
-Codemode lets the model compose tool calls in JavaScript through `execute`. The direct tools are file read, file write with exact replacement, shell, and `execute`. Other tools are progressively discoverable through codemode.
+Codemode lets the model compose tool calls in JavaScript through `execute`. The foreground agent's direct tools are file read, file write with exact replacement, shell, and `execute`. Other tools are progressively discoverable through codemode. A subagent can be narrowed to an exact tool list.
 
 Tool calls through codemode use the same frozen Tool Catalog, Broker, and authority as direct calls. Generated code can save project or global Programs in script or workflow mode, and run them by name or by exact revision. Reflection or the foreground agent can attach an exact saved Program revision to a Capability.
 
@@ -86,11 +86,44 @@ A workflow run pins the digest it first reads for each session and disclosure mo
 
 ## Subagent lifecycle
 
-`agents.spawn({ name?, systemPrompt?, prompt, tools?, thinkingLevel? })` records a subagent task and immediately returns stable `agentId` and `taskId` handles. Agents live within the Noesis process rather than one foreground turn or session.
+`agents.spawn({ name?, systemPrompt?, prompt, tools?, output?, thinkingLevel? })` records a subagent task and immediately returns stable `agentId` and `taskId` handles. Agents live within the Noesis process rather than one foreground turn or session.
 
-`prompt` accepts text, a slice of `context` or of a session view, or an array of those. `tools` accepts canonical names from the frozen Tool Catalog.
+`prompt` accepts text, a slice of `context` or of a session view, or an array of those.
 
 `agents.send`, `agents.list`, `agents.inspect`, `agents.wait`, `agents.cancel`, and `agents.close` manage collaboration. Productive tasks have no independent provider-round, tool-call, or wall-clock ceiling.
+
+### Tools
+
+`tools` decides what the subagent can use:
+
+| `tools`      | The subagent receives                                                                                                                           |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Omitted      | `execute`, the direct tools, and the collaboration tools                                                                                        |
+| `[...names]` | Exactly those canonical tools. `execute` is added only when a listed tool can only be reached through it                                        |
+| `[]`         | No tools. The provider request carries no tool definitions, and the task ends after one answer, or one repair request when `output` was invalid |
+
+A list can only narrow. Names must come from the frozen Tool Catalog, authority stays the same, and recursive spawning still needs an explicit `agents.spawn` grant. When a subagent that was narrowed spawns its own child and omits `tools`, the child receives only the default tools its parent holds.
+
+### Judgments and structured answers
+
+A model call is a subagent with no tools. Use one for a decision that depends on meaning:
+
+```js
+const { status, result, error } = await agents.wait(
+  await agents.spawn({
+    prompt: ["Is this rollback safe?", context.slice(-8000)],
+    tools: [],
+    output: { type: "object", properties: { safe: { type: "boolean" } }, required: ["safe"] },
+  }),
+);
+if (status !== "completed") throw new Error(error);
+```
+
+`output` is a JSON Schema and works with or without tools. The final answer is parsed and validated, and `agents.wait` returns the validated value as `result`. An invalid answer gets one repair request, which cannot call tools. If the repair is also invalid, the task fails with the validation problem as its `error`. Without `output`, `result` is text.
+
+### Concurrency
+
+A process runs at most eight subagent tasks at once. Further tasks stay `pending` and start in order, so `Promise.all` over hundreds of items queues instead of flooding the provider. A parent that is blocked in `agents.wait` gives up its slot until the child settles, so a tree of waiting parents cannot starve its own children. A `timeoutMs` on `agents.wait` includes queue time. When the wait ends, including by timeout, the parent resumes at the next free slot, ahead of tasks that have not started, so the cap stays exact. The cap limits how many tasks run together, not how long any task runs.
 
 ### Results and messages
 
@@ -102,7 +135,7 @@ When a task completes, fails, or is interrupted, Noesis sends a completion notic
 
 No notice is sent when the requester is already joined to the task through `agents.wait`, or when the task was cancelled. A task started by a completion notice does not send a notice of its own.
 
-`agents.wait` is for using a result in later code. Execution is rejected before it starts if code discards a wait's value, for example `await agents.wait({ taskId });` as a statement or a discarded `Promise.all` of waits. Assigning the value, returning it, or passing it on is allowed.
+`agents.wait` is for using a result in later code. In code, it accepts either the handle returned by `agents.spawn` or `{ taskId, timeoutMs? }`. Execution is rejected before it starts if code discards a wait's value, for example `await agents.wait({ taskId });` as a statement or a discarded `Promise.all` of waits. Assigning the value, returning it, or passing it on is allowed.
 
 When one agent's output feeds another agent or a later step, use a workflow Program. A phase can spawn agents and join them, and the next phase receives the joined values:
 

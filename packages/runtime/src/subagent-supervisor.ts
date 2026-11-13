@@ -120,6 +120,22 @@ export interface CreateSubAgentSupervisorOptions {
    * recorded the reminder and its mailbox delivery; `pending` releases the claim for a later turn.
    */
   readonly deliverForeground?: (reminder: ForegroundReminder) => Promise<"delivered" | "pending">;
+  /** Most tasks running at once across the process. Further tasks stay pending until a slot frees. */
+  readonly maxConcurrentTasks?: number;
+}
+
+/**
+ * Keeps a large fan-out from flooding the provider while still making steady progress. Eight tasks
+ * of ten-second rounds is about 50 requests a minute, the rate entry-level provider tiers allow.
+ */
+export const DEFAULT_MAX_CONCURRENT_SUBAGENT_TASKS = 8;
+
+/** The slot one running actor holds, given up while the actor is blocked joining another task. */
+interface ActorSlot {
+  holding: boolean;
+  finished: boolean;
+  joins: number;
+  reacquiring: Promise<void> | undefined;
 }
 
 const MAX_NOTICE_RESULT_CHARACTERS = 8_000;
@@ -229,7 +245,58 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
   /** Actors whose `agents.wait` received a task's terminal value, consumed by notice routing. */
   const joinedBy = new Map<string, readonly AgentAddress[]>();
   const agentTails = new Map<string, Promise<void>>();
+  const maxConcurrentTasks = options.maxConcurrentTasks ?? DEFAULT_MAX_CONCURRENT_SUBAGENT_TASKS;
+  if (!Number.isSafeInteger(maxConcurrentTasks) || maxConcurrentTasks < 1)
+    throw new Error("maxConcurrentTasks must be a positive integer");
+  let occupiedSlots = 0;
+  const slotQueue: (() => void)[] = [];
+  const actorSlots = new Map<string, ActorSlot>();
   let closing = false;
+
+  /** A resuming actor was already running, so it takes the next free slot ahead of tasks that never started. */
+  const acquireSlot = async (resuming = false): Promise<void> => {
+    if (closing || occupiedSlots < maxConcurrentTasks) {
+      occupiedSlots += 1;
+      return;
+    }
+    const granted = Promise.withResolvers<void>();
+    if (resuming) slotQueue.unshift(granted.resolve);
+    else slotQueue.push(granted.resolve);
+    await granted.promise;
+  };
+  const releaseSlot = (): void => {
+    // The freed slot passes straight to the oldest queued task, keeping the count unchanged.
+    const next = slotQueue.shift();
+    if (next) next();
+    else occupiedSlots -= 1;
+  };
+  /**
+   * A parent joining its child gives up its slot, so a tree of waiting parents cannot occupy every
+   * slot while the children they wait on stay queued. The returned function takes a slot back.
+   */
+  const yieldSlotWhileJoining = (actor: AgentAddress | undefined): (() => Promise<void>) => {
+    const slot = actor?.kind === "subagent" ? actorSlots.get(actor.id) : undefined;
+    if (!slot) return async () => undefined;
+    slot.joins += 1;
+    if (slot.holding) {
+      slot.holding = false;
+      releaseSlot();
+    }
+    return async () => {
+      slot.joins -= 1;
+      if (slot.joins > 0 || slot.holding || slot.finished) return;
+      slot.reacquiring ??= acquireSlot(true).then(() => {
+        slot.reacquiring = undefined;
+        slot.holding = true;
+        // The actor ended or began another join while it queued, so it no longer needs this slot.
+        if (slot.finished || slot.joins > 0) {
+          slot.holding = false;
+          releaseSlot();
+        }
+      });
+      await slot.reacquiring;
+    };
+  };
 
   const publish = (event: SubAgentRuntimeEvent): void => {
     for (const listener of listeners) listener(event);
@@ -290,38 +357,51 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
   const schedule = (agentId: string, taskId: string): void => {
     if (closing || running.has(taskId)) return;
     const execution = (async () => {
-      const start = await serializeAgent(agentId, async () => {
-        if (closing) return undefined;
-        const startedAt = now();
-        const claimed = await options.workspace.operational.subAgents.claimTask(taskId, startedAt);
-        if (!claimed) return undefined;
-        let agent = await options.workspace.operational.subAgents.get(agentId);
-        if (!agent || agent.status === "closed" || agent.status === "suspended") {
-          await settleTask(claimed, {
-            status: "interrupted",
-            error: "Subagent became unavailable before task start",
-          });
-          return undefined;
-        }
-        agent = await updateAgentStatus(agent, "running", startedAt);
-        const allMessages = await options.workspace.operational.subAgents.listMessages(agentId);
-        // A follow-up task's trigger may be a message first addressed to an earlier task.
-        const messages = allMessages.filter(
-          (message) => message.taskId === taskId || message.messageId === claimed.triggerMessageId,
-        );
-        for (const message of messages) {
-          if (message.status !== "accepted") continue;
-          await options.workspace.operational.subAgents.putMessage({
-            ...message,
-            status: "claimed",
-            claimedAt: startedAt,
-          });
-        }
-        publish({ type: "changed", agentId, taskId });
-        return Object.freeze({ agent, claimed, messages });
-      });
-      if (!start) return;
+      // Queue outside the agent's serial tail so messages and cancellation still reach a queued task.
+      await acquireSlot();
+      let start;
+      try {
+        start = await serializeAgent(agentId, async () => {
+          if (closing) return undefined;
+          const startedAt = now();
+          const claimed = await options.workspace.operational.subAgents.claimTask(taskId, startedAt);
+          if (!claimed) return undefined;
+          let agent = await options.workspace.operational.subAgents.get(agentId);
+          if (!agent || agent.status === "closed" || agent.status === "suspended") {
+            await settleTask(claimed, {
+              status: "interrupted",
+              error: "Subagent became unavailable before task start",
+            });
+            return undefined;
+          }
+          agent = await updateAgentStatus(agent, "running", startedAt);
+          const allMessages = await options.workspace.operational.subAgents.listMessages(agentId);
+          // A follow-up task's trigger may be a message first addressed to an earlier task.
+          const messages = allMessages.filter(
+            (message) => message.taskId === taskId || message.messageId === claimed.triggerMessageId,
+          );
+          for (const message of messages) {
+            if (message.status !== "accepted") continue;
+            await options.workspace.operational.subAgents.putMessage({
+              ...message,
+              status: "claimed",
+              claimedAt: startedAt,
+            });
+          }
+          publish({ type: "changed", agentId, taskId });
+          return Object.freeze({ agent, claimed, messages });
+        });
+      } catch (cause) {
+        releaseSlot();
+        throw cause;
+      }
+      if (!start) {
+        releaseSlot();
+        return;
+      }
       const { agent, claimed, messages } = start;
+      const slot: ActorSlot = { holding: true, finished: false, joins: 0, reacquiring: undefined };
+      actorSlots.set(agentId, slot);
       let settledForNotice: SubAgentTaskRecord | undefined;
       let resultText: string | undefined;
       try {
@@ -362,6 +442,12 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
           error,
         });
       } finally {
+        if (actorSlots.get(agentId) === slot) actorSlots.delete(agentId);
+        slot.finished = true;
+        if (slot.holding) {
+          slot.holding = false;
+          releaseSlot();
+        }
         const currentAgent = await options.workspace.operational.subAgents.get(agentId);
         if (currentAgent && currentAgent.status === "running")
           await updateAgentStatus(currentAgent, closing ? "suspended" : "idle", now());
@@ -756,7 +842,8 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
     const current = await options.workspace.operational.subAgents.getTask(taskId);
     if (!current) throw new Error(`Subagent task ${taskId} does not exist`);
     if (isTerminal(current)) return taskResult(current);
-    return await new Promise<SubAgentTaskResult>((resolve, reject) => {
+    const reclaimSlot = yieldSlotWhileJoining(waiter);
+    const joined = new Promise<SubAgentTaskResult>((resolve, reject) => {
       let timer: NodeJS.Timeout | undefined;
       const listenersForTask = waiters.get(taskId) ?? new Set();
       const entry: TaskWaiter = createConditionalObject({
@@ -791,6 +878,18 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
         if (latest && isTerminal(latest)) settle(taskResult(latest));
       }, reject);
     });
+    let result: SubAgentTaskResult;
+    try {
+      result = await joined;
+    } catch (cause) {
+      // A cancelled actor is stopping, so it does not wait for a slot. A timed-out actor keeps running,
+      // so it resumes only once it holds a slot again and the concurrency cap stays exact.
+      if (signal?.aborted) void reclaimSlot();
+      else await reclaimSlot();
+      throw cause;
+    }
+    await reclaimSlot();
+    return result;
   };
 
   const cancel: SubAgentSupervisor["cancel"] = async (taskId, reason) => {
@@ -804,8 +903,10 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
       status: "cancelled",
       error: reason?.trim() || "Subagent task was cancelled",
     });
+    // A task cancelled while queued leaves its agent still `starting`.
     const agent = await options.workspace.operational.subAgents.get(task.agentId);
-    if (agent && agent.status === "running") await updateAgentStatus(agent, "idle", now());
+    if (agent && (agent.status === "running" || agent.status === "starting"))
+      await updateAgentStatus(agent, "idle", now());
     return taskResult(settled);
   };
 
@@ -905,6 +1006,11 @@ export function createSubAgentSupervisor(options: CreateSubAgentSupervisorOption
   const shutdown: SubAgentSupervisor["shutdown"] = async () => {
     if (closing) return;
     closing = true;
+    // Queued tasks wake, see the shutdown, and end without starting.
+    for (const grant of slotQueue.splice(0)) {
+      occupiedSlots += 1;
+      grant();
+    }
     const agents = await Promise.all(
       [...running.keys()].map(async (taskId) => {
         const task = await options.workspace.operational.subAgents.getTask(taskId);
