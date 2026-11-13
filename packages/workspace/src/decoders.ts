@@ -54,6 +54,7 @@ const CodeExecutionStatusSchema = z.enum(["running", "completed", "failed", "can
 const ScriptProgramExecutionIdentitySchema = z.strictObject({
   mode: z.literal("script"),
   projectId: z.string().min(1).exactOptional(),
+  folderId: z.string().min(1).exactOptional(),
   name: z.string().min(1),
   revision: z.number().int().positive(),
   definitionRevisionId: z.string().min(1),
@@ -227,6 +228,7 @@ export function decodeCodeExecution(row: DatabaseRow | undefined): CodeExecution
   const stdoutArtifactId = optionalString(row, "stdout_artifact_id");
   const stderrArtifactId = optionalString(row, "stderr_artifact_id");
   const programProjectId = optionalString(row, "program_project_id");
+  const programFolderId = optionalString(row, "program_folder_id");
   const programMode = optionalString(row, "program_mode");
   const programName = optionalString(row, "program_name");
   const programRevision = row?.["program_revision"];
@@ -259,6 +261,7 @@ export function decodeCodeExecution(row: DatabaseRow | undefined): CodeExecution
             program: ScriptProgramExecutionIdentitySchema.parse(
               createConditionalObject({ mode: programMode } as const)
                 .addOptional(programProjectId === undefined ? undefined : { projectId: programProjectId })
+                .addOptional(programFolderId === undefined ? undefined : { folderId: programFolderId })
                 .add({
                   name: programName,
                   revision: programRevision,

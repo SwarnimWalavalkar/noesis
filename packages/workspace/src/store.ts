@@ -3,8 +3,8 @@ import { pipeline } from "node:stream/promises";
 import { ComposerAttachmentsSchema, composerContentDigest } from "@noesis/domain";
 import type { DatabaseRow } from "./database.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { constants as fsConstants, createReadStream, createWriteStream } from "node:fs";
-import { link, mkdir, open, readdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
+import { constants as fsConstants, createReadStream, createWriteStream, type Dirent } from "node:fs";
+import { link, mkdir, open, readdir, readFile, rename, rm, rmdir, stat, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { isDeepStrictEqual } from "node:util";
@@ -614,8 +614,8 @@ export async function createWorkspaceStore(
     const bytes = Uint8Array.from(request.bytes);
     const contentDigest = sha256(bytes);
     const latest = latestRevisionFor(target.stored);
-    if (latest?.contentDigest === contentDigest) return latest;
     if (writeWorkingFile) await persistAtomically(target.absolute, bytes);
+    if (latest?.contentDigest === contentDigest) return latest;
     const revisionId = createId("revision");
     const snapshotAbsolute = join(paths.revisions, revisionId, basename(target.absolute) || "content");
     await persistAtomically(snapshotAbsolute, bytes);
@@ -857,6 +857,7 @@ export async function createWorkspaceStore(
   const definitionMetadataRepository = createDefinitionMetadataRepository(database, recordActivity, now);
   const definitionMetadata: DefinitionMetadataPort = Object.freeze({
     getCurrent: definitionMetadataRepository.getCurrent,
+    getByRevisionId: definitionMetadataRepository.getByRevisionId,
     listCurrent: definitionMetadataRepository.listCurrent,
     listRevisions: definitionMetadataRepository.listRevisions,
   });
@@ -1087,6 +1088,37 @@ export async function createWorkspaceStore(
     capabilities,
     reads: Object.freeze({
       readDatabaseRow,
+      listWorkingFiles: async (workingDirectory: string) => {
+        const root = pathsForDefinition(workingDirectory).absolute;
+        const files: string[] = [];
+        const unsupported: string[] = [];
+        const visit = async (relative: string): Promise<void> => {
+          let entries: Dirent[];
+          try {
+            entries = await readdir(join(root, relative), { withFileTypes: true });
+          } catch (error) {
+            if (isMissing(error)) return;
+            throw error;
+          }
+          for (const entry of entries) {
+            // Editors leave dotfiles, and the store's atomic writes leave <name>.<pid>.<uuid>.tmp files.
+            if (
+              entry.name.startsWith(".") ||
+              /\.\d+\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.tmp$/u.test(entry.name)
+            )
+              continue;
+            const path = relative ? `${relative}/${entry.name}` : entry.name;
+            if (entry.isDirectory()) await visit(path);
+            else if (entry.isFile()) files.push(path);
+            else unsupported.push(path);
+          }
+        };
+        await visit("");
+        return Object.freeze({
+          files: Object.freeze(files.sort()),
+          unsupported: Object.freeze(unsupported.sort()),
+        });
+      },
       readWorkingFile: async (workingPath: string) => {
         try {
           return await readFile(pathsForDefinition(workingPath).absolute);
@@ -1205,6 +1237,23 @@ export async function createWorkspaceStore(
         await recordDefinitionBytes(request, "definition"),
       recordCandidateDefinition: async (request: DefinitionWriteRequest) =>
         await recordDefinitionBytes(request, "candidate", "candidate"),
+      removeWorkingFile: async (workingPath: string, keepDirectory: string) => {
+        const target = pathsForDefinition(workingPath).absolute;
+        const keep = pathsForDefinition(keepDirectory).absolute;
+        await rm(target, { force: true });
+        // Removing the last file in a subfolder removes the subfolder too.
+        for (let parent = dirname(target); parent.startsWith(`${keep}/`); parent = dirname(parent)) {
+          const removed = await rmdir(parent).then(
+            () => true,
+            (cause: unknown) => {
+              // A folder that still holds files, or is already gone, stays as it is.
+              if (isMissing(cause) || isAlreadyExists(cause) || isNotEmpty(cause)) return false;
+              throw cause;
+            },
+          );
+          if (!removed) break;
+        }
+      },
     }),
     definitionMetadata,
     definitionPublications,
@@ -1337,6 +1386,14 @@ function createDefinitionMetadataRepository(
          ORDER BY metadata.definition_id`)
       .all(namespace)
       .map(decode);
+  const getByRevisionId = async (
+    definitionRevisionId: string,
+  ): Promise<DefinitionMetadataRecord | undefined> => {
+    const row = db
+      .prepare(`${selectMetadata} WHERE metadata.definition_revision_id = ?`)
+      .get(definitionRevisionId);
+    return row === undefined ? undefined : decode(row);
+  };
   const listRevisions = async (
     namespace: string,
     definitionId: string,
@@ -1466,7 +1523,7 @@ function createDefinitionMetadataRepository(
       };
     });
   };
-  return Object.freeze({ getCurrent, listCurrent, listRevisions, commitRevision });
+  return Object.freeze({ getCurrent, getByRevisionId, listCurrent, listRevisions, commitRevision });
 }
 function createOperationalRepositories(
   database: WorkspaceDatabase,
@@ -2967,20 +3024,21 @@ function createOperationalRepositories(
   };
   const readProgramDefinition = async (program: {
     readonly mode: "script" | "workflow";
-    /** Namespaces to look in: the owning project's, the global library's, or both for a workflow run. */
+    /** Namespaces to look in. A workflow run does not say which owner its definition has. */
     readonly owners: readonly string[];
+    readonly anyFolder?: boolean;
     readonly name: string;
     readonly revision: number;
     readonly definitionRevisionId: string;
   }): Promise<JsonValue> => {
-    const definition = program.owners
+    const definition = [...program.owners, ...(program.anyFolder ? ["folder:*"] : [])]
       .map((owner) =>
         db
           .prepare(`SELECT revision.snapshot_path, revision.content_digest
            FROM definition_revision_metadata AS metadata
            JOIN file_revisions AS revision
              ON revision.revision_id = metadata.definition_revision_id
-           WHERE metadata.namespace = ?
+           WHERE metadata.namespace ${owner === "folder:*" ? "GLOB" : "="} ?
              AND metadata.definition_id = ?
              AND metadata.revision = ?
              AND metadata.definition_revision_id = ?`)
@@ -3012,7 +3070,11 @@ function createOperationalRepositories(
       const manifest = ScriptProgramManifestSchema.parse(
         await readProgramDefinition({
           ...record.program,
-          owners: [record.program.projectId ?? "global"],
+          owners: [
+            record.program.folderId !== undefined
+              ? `folder:${record.program.folderId}`
+              : (record.program.projectId ?? "global"),
+          ],
         }),
       );
       if (
@@ -3103,10 +3165,10 @@ function createOperationalRepositories(
           execution_id, logical_execution_id, parent_execution_id, session_id, project_id, turn_id,
           catalog_id, catalog_digest,
           source_digest,
-          program_project_id, program_mode, program_name, program_revision, program_definition_revision_id,
+          program_project_id, program_folder_id, program_mode, program_name, program_revision, program_definition_revision_id,
           source_artifact_id, stdout_artifact_id, stderr_artifact_id,
           status, result_json, error, call_count, started_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(execution_id) DO UPDATE SET
           status = excluded.status, result_json = excluded.result_json, error = excluded.error,
           stdout_artifact_id = excluded.stdout_artifact_id,
@@ -3122,6 +3184,7 @@ function createOperationalRepositories(
         record.catalogDigest,
         record.sourceDigest,
         record.program?.projectId ?? null,
+        record.program?.folderId ?? null,
         record.program?.mode ?? null,
         record.program?.name ?? null,
         record.program?.revision ?? null,
@@ -3577,6 +3640,7 @@ function createOperationalRepositories(
         await readProgramDefinition({
           mode: "workflow",
           owners: [record.projectId, "global"],
+          anyFolder: true,
           name: record.workflowName,
           revision: record.workflowRevision,
           definitionRevisionId: record.definitionRevisionId,
@@ -4965,6 +5029,9 @@ function ftsQuery(query: string): string {
 }
 function isMissing(cause: unknown): boolean {
   return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
+}
+function isNotEmpty(cause: unknown): boolean {
+  return cause instanceof Error && "code" in cause && cause.code === "ENOTEMPTY";
 }
 function isAlreadyExists(cause: unknown): boolean {
   return cause instanceof Error && "code" in cause && cause.code === "EEXIST";

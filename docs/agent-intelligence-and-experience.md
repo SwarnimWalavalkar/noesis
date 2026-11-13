@@ -17,7 +17,7 @@ Never claim an action or system state without runtime evidence.
 
 Active Capabilities and skills may add relevant instructions. The stable core stays short.
 
-Active Capability revisions contribute exact effects frozen at turn start. Each revision has exactly one instruction effect, the Capability file revision, and may attach one exact saved Program revision in script or workflow mode.
+Active Capability revisions contribute exact effects frozen at turn start. Each revision has exactly one instruction effect, its `SKILL.md`, and may attach one exact saved Program revision in script or workflow mode. It also pins an immutable snapshot of the whole folder by digest, including any Programs under `programs/`.
 
 The built-in `noesis` skill holds the operational guidance for inspecting and deliberately refining these systems. Its compact name and description appear with other skill metadata; its body loads only when relevant or when the user invokes `/noesis` or its `/refine` alias. The stable core prompt does not duplicate the publication contract.
 
@@ -102,7 +102,7 @@ An ordinary exact revision becomes active after SQLite validates its evidence an
 
 Credential export, recovery or audit control, and irreversible external actions without foreground intent create a pending gate. `/learning` offers approve, deny, and change for these requests.
 
-A Capability states when an ability should help, why the evidence supports it, what behavior changes, and its anticipated effect. Its revision contains exactly one instruction effect, the Capability's Markdown file, and optionally one saved Program effect.
+A Capability states when an ability should help, why the evidence supports it, what behavior changes, and its anticipated effect. Its revision contains exactly one instruction effect, the Capability's `SKILL.md`, optionally one saved Program effect, and a snapshot of its folder.
 
 New Capabilities are globally eligible and relevant by default. The foreground model sees each one's name and "when" text with the other skills and loads it when it applies. The user may narrow the scope or make one always active.
 
@@ -120,7 +120,7 @@ The current Capability lifecycle has these durable records and files:
 
 - `CapabilityDefinition` owns the stable ID, name, description, and applicability.
 - `CapabilityLifecycleRevision` owns one immutable revision, its exact effects, its rationale, its anticipated effect, and the evidence claim behind it.
-- Each Capability has one Markdown file under `definitions/capabilities/`. Its frontmatter holds `name`, `when`, and `description`, followed by the guidance and by notes that Noesis writes from the Capability's history. Every revision pins an immutable snapshot of the file as its instruction effect, and the model receives only the guidance. The user can edit the working file directly. Before the next turn, Noesis records the edit as a new revision through the publisher, or leaves an unreadable edit in place and reports it in `/learning`. A restore rewrites the working file to the restored revision.
+- Each Capability is a folder under `definitions/capabilities/`. It is a valid standard skill: `SKILL.md` has `name` (the folder's name), `description`, and `metadata` with `title` and `when`, followed by the guidance and by notes that Noesis writes from the Capability's history. The folder may also hold resources such as `references/` and Programs under `programs/<name>/`. Every revision pins an immutable snapshot of the folder by digest, so turns, inspection, and revert never depend on the working files. Noesis records direct edits anywhere in the folder as a new revision through the same publisher before the next turn, and leaves an edit it cannot read in place and reports it in `/learning`. Restoring or approving a revision rewrites the working folder to match, including files that a later revision took in. A restore the user chose also replaces edits Noesis has not recorded, after saving their bytes as revisions; an automatic restore leaves those edits in place for the next scan. Status, scope, and mode stay in the SQLite binding. A Capability from before folders is moved into one without a new revision, so its track record stays. A revision from before folders counts as a folder of that one file. Programs in a folder are discovered only when the folder is loaded through `skills.load` or an always-active delivery, and run only through explicit `programs.run` under the current authority. They never reach the provider tool list. A folder contains its Programs. There is no dependency graph between skills or Programs. An existing pinned reference to a saved Program stays valid, and `capabilities.export` copies that Program into the exported folder.
 - `CapabilityOutcome` records whether a revision helped or hurt in a turn that used it.
 - `CapabilityBinding` is the sole authority for the active revision, global, project, or session scope, relevant or always mode, and active or paused state.
 - `CapabilityFeedback` records a positive result, correction, regression, scope change, activation change, or restore request against one exact revision.

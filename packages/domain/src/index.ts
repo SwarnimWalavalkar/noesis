@@ -100,6 +100,19 @@ export function learnedCapabilitySkillSuffix(capabilityId: string): string {
   return sha256(capabilityId).slice(0, 6);
 }
 
+/** The digest of a folder snapshot. File order does not change it. */
+export function capabilityFolderDigest(
+  files: readonly { readonly path: string; readonly revision: { readonly contentDigest: string } }[],
+): string {
+  return sha256(
+    canonicalJson(
+      files
+        .map((file) => ({ path: file.path, contentDigest: file.revision.contentDigest }))
+        .sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0)),
+    ),
+  );
+}
+
 export function capabilityRevisionDigest(revision: CapabilityRevision): string {
   return sha256(canonicalJson(revision));
 }

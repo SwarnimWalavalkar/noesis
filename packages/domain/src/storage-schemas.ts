@@ -99,6 +99,27 @@ export const CapabilityEffectSchema = z.discriminatedUnion("kind", [
   }),
 ]);
 
+/** The immutable snapshot of a Capability's folder that one revision pins. */
+export const CapabilityFolderSchema = z.strictObject({
+  digest: ContentDigestSchema,
+  files: z
+    .array(
+      z.strictObject({
+        path: z.string().min(1),
+        revision: FileRevisionRefSchema,
+      }),
+    )
+    .min(1),
+  /** The Programs under `programs/`, each pinned to the exact revision compiled from those files. */
+  programs: z.array(
+    z.strictObject({
+      mode: z.enum(["script", "workflow"]),
+      name: CapabilityProgramNameSchema,
+      definitionRevision: FileRevisionRefSchema,
+    }),
+  ),
+});
+
 export const CapabilityRevisionSchema = z.strictObject({
   capabilityRevisionId: z.string().min(1),
   capabilityId: z.string().min(1),
@@ -109,6 +130,7 @@ export const CapabilityRevisionSchema = z.strictObject({
       isCapabilityRevisionEffects,
       "A Capability revision starts with its instruction and may attach one Program",
     ),
+  folder: CapabilityFolderSchema.exactOptional(),
   evidenceRefs: z.array(EvidenceRefSchema),
 });
 

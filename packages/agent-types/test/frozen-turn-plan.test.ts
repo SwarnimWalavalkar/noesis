@@ -108,3 +108,76 @@ describe("frozen context notebook", () => {
     expect(() => validateFrozenTurnPlan(tampered)).toThrow("context notebook failed rendering verification");
   });
 });
+
+describe("frozen Capability folder Programs", () => {
+  const material = (path: string, content: string) =>
+    Object.freeze({
+      revision: Object.freeze({
+        kind: "file_revision" as const,
+        revisionId: `revision-${path.replaceAll("/", "-")}`,
+        workingPath: `definitions/capabilities/review/${path}`,
+        snapshotPath: `snapshots/${path}`,
+        contentDigest: sha256(content),
+      }),
+      content,
+    });
+  const plan = (programContent: string): FrozenTurnPlan => {
+    const skill = material("SKILL.md", "Check the rollback path first.");
+    const program = material("programs/check/program.json", '{"mode":"script","name":"check"}');
+    const unsigned: Omit<FrozenTurnPlan, "canonicalDigest"> = Object.freeze({
+      schemaVersion: 2,
+      planId: "plan-folder",
+      sessionId: "session-1",
+      turnId: "turn-1",
+      selectedCapabilities: Object.freeze([
+        Object.freeze({
+          capabilityId: "capability-review",
+          name: "Review",
+          description: "Review migrations.",
+          applicability: "Reviewing a migration.",
+          selectionReason: "always active",
+          delivery: "prompt" as const,
+          revision: Object.freeze({
+            kind: "capability_revision" as const,
+            capabilityId: "capability-review",
+            capabilityRevisionId: "revision-review",
+            bundleDigest: sha256("bundle"),
+          }),
+          effects: Object.freeze([Object.freeze({ kind: "instruction" as const, material: skill })]),
+          folder: Object.freeze({
+            digest: sha256("folder"),
+            files: Object.freeze([Object.freeze({ path: "SKILL.md", revision: skill.revision })]),
+            programs: Object.freeze([
+              Object.freeze({
+                mode: "script" as const,
+                name: "check",
+                definition: Object.freeze({ ...program, content: programContent }),
+              }),
+            ]),
+          }),
+        }),
+      ]),
+      contextTokenBudget: 10_000,
+      requestTokenBudget: 20_000,
+      renderedSystemPrompt: "Follow the current user request.",
+      provider: "controlled",
+      model: "controlled",
+      thinkingLevel: "off",
+      permissionSnapshot: Object.freeze({
+        effects: Object.freeze([]),
+        resourcePatterns: Object.freeze([]),
+        credentialRefs: Object.freeze([]),
+      }),
+      retrievalCitations: Object.freeze([]),
+      createdAt: "2026-09-04T12:00:01.000Z",
+    });
+    return Object.freeze({ ...unsigned, canonicalDigest: frozenTurnPlanDigest(unsigned) });
+  };
+
+  test("admits a folder Program whose definition matches its pin and rejects one that does not", () => {
+    expect(validateFrozenTurnPlan(plan('{"mode":"script","name":"check"}')).planId).toBe("plan-folder");
+    expect(() => validateFrozenTurnPlan(plan('{"mode":"script","name":"other"}'))).toThrow(
+      "failed content digest verification",
+    );
+  });
+});

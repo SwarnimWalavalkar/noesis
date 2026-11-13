@@ -322,6 +322,14 @@ async function capabilityMaterialEntries(
     detailEntry("change", lifecycle.summary),
     ...effectEntries,
     detailEntry("materials", facetCountLabel(revision)),
+    ...(revision.folder
+      ? [
+          detailEntry(
+            "folder",
+            `${revision.folder.digest}\n${revision.folder.files.map((file) => file.path).join("\n")}`,
+          ),
+        ]
+      : []),
   ]);
 }
 function reflectionStatusLabel(status: string): string {

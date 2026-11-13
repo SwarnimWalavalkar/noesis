@@ -16,7 +16,9 @@ import {
   CapabilityRevisionSchema,
   type CapabilityScope,
   canonicalJson,
+  capabilityFolderDigest,
   capabilityRevisionRef,
+  isCapabilityFolderPath,
   type EvidenceRef,
   EvidenceRefSchema,
   sameCapabilityRevisionRef,
@@ -80,10 +82,9 @@ function normalizeLifecycleRevision(value: unknown): CapabilityLifecycleRevision
             }
           : undefined,
       )
-      .add({
-        effects: Object.freeze(bundle.effects),
-        evidenceRefs: Object.freeze(bundle.evidenceRefs),
-      } as const)
+      .add({ effects: Object.freeze(bundle.effects) } as const)
+      .addOptional(bundle.folder ? { folder: Object.freeze(bundle.folder) } : undefined)
+      .add({ evidenceRefs: Object.freeze(bundle.evidenceRefs) } as const)
       .finish(),
   );
   return Object.freeze(
@@ -197,10 +198,31 @@ export function createCapabilityLifecycleStore(
     const expected = capabilityRevisionRef(parsed.revision);
     if (!sameCapabilityRevisionRef(expected, parsed.reference))
       throw new Error("Capability revision reference does not match its exact bundle");
+    const { folder } = parsed.revision;
+    if (folder) {
+      if (folder.digest !== capabilityFolderDigest(folder.files))
+        throw new Error("Capability folder digest does not match its files");
+      if (folder.files.some((file) => !isCapabilityFolderPath(file.path)))
+        throw new Error("Capability folder files must stay inside the folder");
+      if (new Set(folder.files.map((file) => file.path)).size !== folder.files.length)
+        throw new Error("Capability folder lists a file path more than once");
+      // The guidance a turn reads and the SKILL.md a restore writes must be one file revision.
+      const skill = folder.files.filter((file) => file.path === "SKILL.md");
+      const [instruction] = parsed.revision.effects;
+      if (
+        skill.length !== 1 ||
+        instruction?.kind !== "instruction" ||
+        skill[0]?.revision.revisionId !== instruction.material.revisionId ||
+        skill[0]?.revision.contentDigest !== instruction.material.contentDigest
+      )
+        throw new Error("Capability folder must hold exactly one SKILL.md, matching its instruction");
+    }
     for (const reference of [
       ...parsed.revision.effects.map((effect) =>
         effect.kind === "instruction" ? effect.material : effect.program.definitionRevision,
       ),
+      ...(folder?.files.map((file) => file.revision) ?? []),
+      ...(folder?.programs.map((program) => program.definitionRevision) ?? []),
       ...parsed.revision.evidenceRefs,
     ])
       options.assertStoredReference(reference);

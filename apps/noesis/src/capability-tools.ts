@@ -8,21 +8,27 @@ import {
   type CapabilityGateRequest,
   type CapabilityLifecycleRevision,
   CapabilityScopeSchema,
+  capabilityDocumentInFolderFormat,
   EvidenceRefSchema,
   FileRevisionRefSchema,
   ProjectRefSchema,
   type ProjectRef,
 } from "@noesis/domain";
-import { join } from "node:path";
+import { mkdir, open as openFile, readdir, rm, stat } from "node:fs/promises";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
   capabilityDocumentRevision,
+  capabilityFolderFiles,
   capabilityWorkingDocumentPath,
+  capabilityWorkingFolderPath,
   CapabilityDecisionSchema,
   CapabilityPublicationResultSchema,
   type CapabilityProgramLibrary,
   type CapabilityPublisher,
 } from "@noesis/learning";
 import { defineTool, type ToolDefinition } from "@noesis/tools";
+import { folderProgramFilesForExport } from "./program-library.ts";
 import type { CapabilityLifecyclePageCursor, NoesisWorkspaceStore } from "@noesis/workspace";
 import { z } from "zod";
 
@@ -157,6 +163,14 @@ const CapabilityInspectInputSchema = z.discriminatedUnion("view", [
     start: z.number().int().nonnegative().optional(),
     maxCharacters: z.number().int().min(1).max(MAX_MATERIAL_CHARACTERS).optional(),
   }),
+  z.strictObject({
+    view: z.literal("file"),
+    capabilityId: z.string().trim().min(1),
+    capabilityRevisionId: z.string().trim().min(1),
+    path: z.string().min(1),
+    start: z.number().int().nonnegative().optional(),
+    maxCharacters: z.number().int().min(1).max(MAX_MATERIAL_CHARACTERS).optional(),
+  }),
 ]);
 
 const CapabilityInspectOutputSchema = z.discriminatedUnion("view", [
@@ -181,8 +195,23 @@ const CapabilityInspectOutputSchema = z.discriminatedUnion("view", [
         revisionCount: z.number().int().nonnegative(),
         feedbackCount: z.number().int().nonnegative(),
         gateCount: z.number().int().nonnegative(),
-        /** The editable Markdown file for this Capability. Direct edits apply from the next turn. */
+        /** The editable SKILL.md for this Capability. Direct edits apply from the next turn. */
         file: z.string().nullable(),
+        /** The editable folder and what its current revision pins there. */
+        folder: z
+          .strictObject({
+            path: z.string(),
+            digest: z.string().nullable(),
+            files: z.array(z.string()),
+            programs: z.array(
+              z.strictObject({
+                mode: z.enum(["script", "workflow"]),
+                name: z.string(),
+                definitionRevisionId: z.string(),
+              }),
+            ),
+          })
+          .nullable(),
         /** How the current revision did in turns that used it, as judged by reflection. */
         trackRecord: z.strictObject({
           helped: z.number().int().nonnegative(),
@@ -237,7 +266,38 @@ const CapabilityInspectOutputSchema = z.discriminatedUnion("view", [
       })
       .nullable(),
   }),
+  z.strictObject({
+    view: z.literal("file"),
+    file: z
+      .strictObject({
+        capabilityId: z.string(),
+        capabilityRevisionId: z.string(),
+        path: z.string(),
+        revision: FileRevisionRefSchema,
+        content: z.string(),
+        start: z.number().int().nonnegative(),
+        end: z.number().int().nonnegative(),
+        totalCharacters: z.number().int().nonnegative(),
+        truncated: z.boolean(),
+        nextStart: z.number().int().nonnegative().nullable(),
+      })
+      .nullable(),
+  }),
 ]);
+
+const CapabilityExportInputSchema = z.strictObject({
+  capabilityId: z.string().trim().min(1),
+  /** Defaults to the current revision. */
+  capabilityRevisionId: z.string().trim().min(1).optional(),
+  /** A new or empty directory. A relative path starts at the project root. */
+  destination: z.string().trim().min(1),
+});
+const CapabilityExportOutputSchema = z.strictObject({
+  destination: z.string(),
+  capabilityRevisionId: z.string(),
+  folderDigest: z.string().nullable(),
+  files: z.array(z.string()),
+});
 
 export interface CreateCapabilityToolsOptions {
   readonly workspace: NoesisWorkspaceStore;
@@ -332,12 +392,75 @@ function revisionSummary(revision: CapabilityLifecycleRevision | undefined) {
     : null;
 }
 
+/**
+ * The real directory an export writes to. Symbolic links in existing ancestors are resolved, so the
+ * path that is authorized is the path that is written.
+ */
+function exportDestination(project: ProjectRef, destination: string): string {
+  const requested = isAbsolute(destination) ? resolve(destination) : resolve(project.root, destination);
+  let existing = requested;
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    existing = parent;
+  }
+  return resolve(realpathSync(existing), relative(existing, requested));
+}
+
+/** A Capability revision as a self-contained folder. A folder holds its Programs, so copy any pinned one in. */
+async function capabilityExportFiles(
+  workspace: NoesisWorkspaceStore,
+  lifecycle: CapabilityLifecycleRevision,
+): Promise<readonly { readonly path: string; readonly bytes: Uint8Array }[]> {
+  const document = capabilityDocumentRevision(lifecycle);
+  const folderName = capabilityWorkingFolderPath(document).split("/").at(-1) ?? "capability";
+  const pinned = await Promise.all(
+    capabilityFolderFiles(lifecycle).map(async ({ path, revision }) => {
+      const stored = await workspace.reads.readRevision(revision);
+      return Object.freeze({
+        path,
+        bytes:
+          lifecycle.revision.folder || path !== "SKILL.md"
+            ? stored
+            : new TextEncoder().encode(capabilityDocumentInFolderFormat(folderName, decoder.decode(stored))),
+      });
+    }),
+  );
+  const paths = new Set(pinned.map((file) => file.path));
+  const attached = await Promise.all(
+    lifecycle.revision.effects.map(async (effect) =>
+      effect.kind === "program"
+        ? await folderProgramFilesForExport(workspace, effect.program.definitionRevision)
+        : [],
+    ),
+  );
+  const copied = attached.flat();
+  const collision = copied.find((file) => paths.has(file.path));
+  if (collision)
+    throw new Error(`The folder already has ${collision.path}, so the attached Program cannot be copied in`);
+  return Object.freeze([...pinned, ...copied]);
+}
+
 /** The complete progressively disclosed Capability surface for one frozen foreground turn. */
 export function createCapabilityTools(options: CreateCapabilityToolsOptions): readonly ToolDefinition[] {
   const capabilityFile = (revision: CapabilityLifecycleRevision | undefined): string | null => {
     if (!revision) return null;
     const path = capabilityWorkingDocumentPath(capabilityDocumentRevision(revision));
     return options.home ? join(options.home, path) : path;
+  };
+  const folderInspection = (revision: CapabilityLifecycleRevision | undefined) => {
+    if (!revision) return null;
+    const path = capabilityWorkingFolderPath(capabilityDocumentRevision(revision));
+    return {
+      path: options.home ? join(options.home, path) : path,
+      digest: revision.revision.folder?.digest ?? null,
+      files: capabilityFolderFiles(revision).map((file) => file.path),
+      programs: (revision.revision.folder?.programs ?? []).map((program) => ({
+        mode: program.mode,
+        name: program.name,
+        definitionRevisionId: program.definitionRevision.revisionId,
+      })),
+    };
   };
   const inspect = defineTool({
     name: "capabilities.inspect",
@@ -411,6 +534,7 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
             feedbackCount: counts.feedback,
             gateCount: counts.gates,
             file: capabilityFile(currentRevision),
+            folder: folderInspection(currentRevision),
             trackRecord: {
               helped: record?.helped ?? 0,
               hurt: record?.hurt ?? 0,
@@ -482,6 +606,38 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
         input.capabilityId,
         input.capabilityRevisionId,
       );
+      if (input.view === "file") {
+        const pinned = lifecycle
+          ? capabilityFolderFiles(lifecycle).find((file) => file.path === input.path)
+          : undefined;
+        if (!pinned) return CapabilityInspectOutputSchema.parse({ view: "file", file: null });
+        const bytes = await options.workspace.reads.readRevision(pinned.revision);
+        let content: string;
+        try {
+          content = decoder.decode(bytes);
+        } catch {
+          throw new Error(
+            `Capability file ${pinned.path} is not UTF-8 text (${String(bytes.byteLength)} bytes), so it cannot be shown as text`,
+          );
+        }
+        const start = Math.min(input.start ?? 0, content.length);
+        const end = Math.min(start + (input.maxCharacters ?? DEFAULT_MATERIAL_CHARACTERS), content.length);
+        return CapabilityInspectOutputSchema.parse({
+          view: "file",
+          file: {
+            capabilityId: input.capabilityId,
+            capabilityRevisionId: input.capabilityRevisionId,
+            path: pinned.path,
+            revision: pinned.revision,
+            content: content.slice(start, end),
+            start,
+            end,
+            totalCharacters: content.length,
+            truncated: end < content.length,
+            nextStart: end < content.length ? end : null,
+          },
+        });
+      }
       const effect = lifecycle?.revision.effects[input.effectIndex];
       if (!lifecycle || !effect)
         return CapabilityInspectOutputSchema.parse({ view: "material", material: null });
@@ -610,5 +766,61 @@ export function createCapabilityTools(options: CreateCapabilityToolsOptions): re
     },
   });
 
-  return Object.freeze([inspect, refine]);
+  const exportFolder = defineTool({
+    name: "capabilities.export",
+    label: "Export Capability",
+    description:
+      "Copy one exact Capability revision to a new folder as a standard skill. Its pinned files keep their recorded bytes, and an attached saved Program is copied into programs/, so the folder needs nothing else. Only the copy changes; the Capability does not.",
+    inputSchema: CapabilityExportInputSchema,
+    outputSchema: CapabilityExportOutputSchema,
+    effect: ({ destination }) => {
+      const target = exportDestination(options.project, destination);
+      return { effect: "write", resource: `file:${target}/*`, estimatedCost: 1 };
+    },
+    execute: async ({ capabilityId, capabilityRevisionId, destination }) => {
+      const binding = await options.workspace.capabilities.getBinding(capabilityId);
+      const lifecycle = capabilityRevisionId
+        ? await options.workspace.capabilities.getRevisionById(capabilityId, capabilityRevisionId)
+        : binding
+          ? await options.workspace.capabilities.getRevision(binding.revision)
+          : undefined;
+      if (!lifecycle) throw new Error(`Unknown Capability revision for ${capabilityId}`);
+      const target = exportDestination(options.project, destination);
+      const existing = await readdir(target).catch(() => undefined);
+      if (existing && existing.length > 0) throw new Error(`Export destination ${target} is not empty`);
+      if (!existing && (await stat(target).catch(() => undefined)))
+        throw new Error(`Export destination ${target} is not a directory`);
+      const files = await capabilityExportFiles(options.workspace, lifecycle);
+      const written: string[] = [];
+      try {
+        for (const file of files) {
+          const absolute = join(target, file.path);
+          await mkdir(dirname(absolute), { recursive: true });
+          const handle = await openFile(absolute, "wx", 0o644);
+          try {
+            await handle.writeFile(file.bytes);
+          } finally {
+            await handle.close();
+          }
+          written.push(file.path);
+        }
+      } catch (error) {
+        // A partial copy is not a usable skill, so leave nothing behind. The destination was empty or
+        // absent, so everything in it is ours; a directory that already existed stays.
+        if (existing)
+          for (const entry of await readdir(target).catch(() => []))
+            await rm(join(target, entry), { recursive: true, force: true });
+        else await rm(target, { recursive: true, force: true });
+        throw error;
+      }
+      return {
+        destination: target,
+        capabilityRevisionId: lifecycle.revision.capabilityRevisionId,
+        folderDigest: lifecycle.revision.folder?.digest ?? null,
+        files: written,
+      };
+    },
+  });
+
+  return Object.freeze([inspect, refine, exportFolder]);
 }

@@ -80,10 +80,21 @@ Automatic compaction is on by default. Use `/compact [FOCUS]` to compact manuall
 
 You get a result from the current turn before ambient learning runs. Noesis then waits for your reaction, which is your next message or the session going idle, and reflects on the turn and that reaction together. Most turns change nothing. When the evidence supports it, Noesis creates or revises a Capability. You can also ask Noesis to change what it has learned, or use `/refine`. Later turns can use the new version right away.
 
-A Capability is an ability Noesis can reuse. It has two parts:
+A Capability is an ability Noesis can reuse. It is a folder under `definitions/capabilities/` in your Noesis home, and the folder is also a valid standard skill, so you can copy it and other tools can read it:
 
-- **Instruction** is the guidance in the Capability's Markdown file, under `definitions/capabilities/` in your Noesis home. You can edit this file directly, and Noesis records your edit as a new version before the next turn.
-- **Program** is optional. It attaches one exact saved Program revision in script or workflow mode. Program effects use the same saved Programs you create during a turn. A Capability that attaches a project Program stays in that project. One that attaches a global Program can apply anywhere.
+```text
+review-migration-1a2b3c/
+  SKILL.md
+  references/checklist.md
+  programs/check-rollback/   # program.json and index.mjs
+```
+
+You can edit anything in the folder directly, and Noesis records a valid edit as a new version before the next turn. An edit it cannot read or apply stays in the folder and is reported in `/learning`. Restoring an earlier version rewrites the folder; an automatic restore leaves an edit Noesis has not recorded yet in place. A Capability has these parts:
+
+- **Guidance** is the body of `SKILL.md`, with the name and when it applies in its frontmatter.
+- **Resources** are any other files in the folder. Each version pins their exact bytes.
+- **Programs** in the folder are found when the Capability is loaded and run only when Noesis calls them explicitly, under the permissions of the current turn.
+- **An attached Program** is optional. It pins one exact saved Program revision in script or workflow mode, the same saved Programs you create during a turn. A Capability that attaches a project Program stays in that project. One that attaches a global Program can apply anywhere.
 
 New Capabilities apply anywhere they are relevant. The model sees each one's name and when it applies, and loads the guidance only when it needs it. You can narrow a Capability to a project or session, or make it always active.
 

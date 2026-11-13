@@ -1956,7 +1956,7 @@ describe("WorkspaceStore", () => {
     const inspection = new DatabaseSync(databasePath, { readOnly: true });
     expect(
       inspection.prepare("SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1").get(),
-    ).toEqual({ version: 61 });
+    ).toEqual({ version: 62 });
     inspection.close();
   });
   test("aborts migration 33 when an older workspace contains a malformed workflow dependency digest", async () => {
@@ -2586,7 +2586,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 61,
+      version: 62,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2691,7 +2691,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 61,
+      version: 62,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -2842,7 +2842,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"));
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 61,
+      version: 62,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     for (const table of [
@@ -2914,7 +2914,7 @@ describe("WorkspaceStore", () => {
     store.close();
     const upgraded = new DatabaseSync(join(root, "database", "noesis.sqlite"), { readOnly: true });
     expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({
-      version: 61,
+      version: 62,
     });
     expect(upgraded.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(
@@ -3083,7 +3083,7 @@ describe("WorkspaceStore", () => {
         ),
     ).toThrow(/action sequence is required/iu);
     database.close();
-    expect(versions.at(-1)).toBe(61);
+    expect(versions.at(-1)).toBe(62);
     expect(ownerTable).toBeDefined();
     expect(lineageTrigger).toMatchObject({
       name: "codemode_execution_lineage_immutable",

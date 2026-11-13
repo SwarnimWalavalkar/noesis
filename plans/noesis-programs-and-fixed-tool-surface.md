@@ -30,6 +30,8 @@ The public codemode API is `programs.list`, `programs.describe`, `programs.save`
 
 Workflow manifests do not yet declare exact saved-Program dependencies. Until they do, a paused workflow conservatively pins the complete visible Program library, including the global library, and fails closed after any library edit, as specified by the retained workflow plan. This is an explicit safety limitation rather than silent dependency drift.
 
+A Program can also live in a skill or Capability folder, under `programs/<name>/`. Those files stay the editable source. When a Capability revision records them, or a standard skill loads, each Program is compiled to an exact revision in the namespace `program:folder:<folder-id>:<mode>`, which a run pins and records. Folder Programs are reachable only after their folder is loaded in the turn, and resolve before project and global Programs. They are not part of the workflow library pin, because the set a turn has loaded varies; a paused run from a folder still resumes from its pinned definition.
+
 A Program owns only executable mechanics: mode, schemas, required tools or phases, implementation source, immutable revisions, and run records. It does not independently own semantic applicability, scope, or activation.
 
 ## Capability exposure

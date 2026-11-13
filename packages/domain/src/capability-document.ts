@@ -1,14 +1,17 @@
 /**
- * One readable Markdown file per Capability. The frontmatter and guidance are the editable
- * content. Noesis writes the notes below the marker from the Capability's recorded history.
+ * The SKILL.md of a Capability folder. It is a standard skill: `name` is the folder's name and
+ * `description` says what it does, while Noesis keeps the readable title and the "when" text under
+ * `metadata`. The frontmatter and guidance are the editable content. Noesis writes the notes below
+ * the marker from the Capability's recorded history.
  */
 export const CAPABILITY_NOTES_MARKER =
   "<!-- Noesis writes everything below this line from the Capability's history. Edits below it are ignored. -->";
 
-const FIELDS = ["name", "when", "description"] as const;
-type DocumentField = (typeof FIELDS)[number];
+const FOLDER_FIELDS = ["name", "description", "metadata"] as const;
+const LEGACY_FIELDS = ["name", "when", "description"] as const;
 
 export interface CapabilityDocumentContent {
+  /** The Capability's readable name. In the file it is `metadata.title`, because `name` is the folder. */
   readonly name: string;
   readonly when: string;
   readonly description: string;
@@ -31,17 +34,57 @@ export type CapabilityDocumentParseResult =
   | { readonly ok: false; readonly error: string };
 
 const singleLine = (value: string): string => value.replaceAll(/\s+/gu, " ").trim();
+/** One YAML value. A plain value is easy to read; anything YAML could misread becomes a JSON string. */
+function yamlValue(value: string): string {
+  const line = singleLine(value);
+  return /^[A-Za-z0-9][A-Za-z0-9 ,.()/'_-]*$/u.test(line) &&
+    !line.endsWith(" ") &&
+    // YAML reads these as numbers, booleans, or null rather than text.
+    !/^[0-9]/u.test(line) &&
+    !/^(?:true|false|yes|no|on|off|null|y|n)$/iu.test(line)
+    ? line
+    : JSON.stringify(line);
+}
+function unquoted(value: string): string | undefined {
+  // A single-quoted YAML string escapes a quote by doubling it.
+  if (value.startsWith("'")) {
+    const inner = value.slice(1, -1);
+    if (value.length < 2 || !value.endsWith("'") || inner.replaceAll("''", "").includes("'"))
+      return undefined;
+    return inner.replaceAll("''", "'");
+  }
+  if (!value.startsWith('"')) return value;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return typeof parsed === "string" ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The frontmatter that makes a Capability folder a valid standard skill. */
+function folderFrontmatter(
+  folderName: string,
+  content: Pick<CapabilityDocumentContent, "name" | "when" | "description">,
+): readonly string[] {
+  return [
+    "---",
+    `name: ${folderName}`,
+    `description: ${yamlValue(content.description)}`,
+    "metadata:",
+    `  title: ${yamlValue(content.name)}`,
+    `  when: ${yamlValue(content.when)}`,
+    "---",
+  ];
+}
 
 export function renderCapabilityDocument(
+  folderName: string,
   content: CapabilityDocumentContent,
   notes: CapabilityDocumentNotes,
 ): string {
   const lines = [
-    "---",
-    `name: ${singleLine(content.name)}`,
-    `when: ${singleLine(content.when)}`,
-    `description: ${singleLine(content.description)}`,
-    "---",
+    ...folderFrontmatter(folderName, content),
     "",
     content.guidance.trim(),
     "",
@@ -61,28 +104,73 @@ export function renderCapabilityDocument(
   return `${lines.join("\n")}\n`;
 }
 
-/** Reads the editable part of a Capability file. This checks syntax only. */
+/**
+ * A single-file Capability's text in the folder format. Only the frontmatter changes, so the
+ * guidance and the notes keep their exact bytes.
+ */
+export function capabilityDocumentInFolderFormat(folderName: string, text: string): string {
+  const parsed = parseCapabilityDocument(text);
+  // Only the frontmatter changes. The guidance and notes keep their exact bytes, line endings included.
+  const close = /\r?\n---\r?\n/u.exec(text.slice(3));
+  if (!parsed.ok || !close) return text;
+  return `${folderFrontmatter(folderName, parsed.content).join("\n")}\n${text.slice(3 + close.index + close[0].length)}`;
+}
+
+function parseFrontmatter(
+  block: string,
+):
+  | { readonly ok: true; readonly fields: ReadonlyMap<string, string> }
+  | { readonly ok: false; readonly error: string } {
+  const fields = new Map<string, string>();
+  let section: string | undefined;
+  for (const line of block.split("\n")) {
+    if (line.trim().length === 0) continue;
+    const separator = line.indexOf(":");
+    if (separator < 0)
+      return { ok: false, error: `Frontmatter line "${line.trim()}" needs a colon after its field name` };
+    const key = line.slice(0, separator).trim();
+    const value = line.slice(separator + 1).trim();
+    if (/^\s/u.test(line)) {
+      if (!section)
+        return { ok: false, error: `Frontmatter line "${line.trim()}" is indented with nothing above it` };
+      fields.set(`${section}.${key}`, value);
+      continue;
+    }
+    section = value.length === 0 ? key : undefined;
+    fields.set(key, value);
+  }
+  return { ok: true, fields };
+}
+
+/** Reads the editable part of a Capability file, in either format. This checks syntax only. */
 export function parseCapabilityDocument(text: string): CapabilityDocumentParseResult {
   const normalized = text.replaceAll("\r\n", "\n");
   if (!normalized.startsWith("---\n"))
     return { ok: false, error: "The file must start with a --- line that opens the frontmatter" };
   const close = normalized.indexOf("\n---\n", 3);
   if (close < 0) return { ok: false, error: "The frontmatter needs a closing --- line" };
-  const fields = new Map<DocumentField, string>();
-  for (const line of normalized.slice(4, close).split("\n")) {
-    if (line.trim().length === 0) continue;
-    const separator = line.indexOf(":");
-    if (separator < 0)
-      return { ok: false, error: `Frontmatter line "${line.trim()}" needs a colon after its field name` };
-    const key = line.slice(0, separator).trim();
-    const field = FIELDS.find((candidate) => candidate === key);
-    if (!field)
-      return { ok: false, error: `Unknown frontmatter field "${key}". Use name, when, and description` };
-    fields.set(field, line.slice(separator + 1).trim());
+  const frontmatter = parseFrontmatter(normalized.slice(4, close));
+  if (!frontmatter.ok) return frontmatter;
+  const { fields } = frontmatter;
+  const folderFormat = fields.has("metadata");
+  const allowed: readonly string[] = folderFormat ? FOLDER_FIELDS : LEGACY_FIELDS;
+  for (const key of fields.keys()) {
+    const top = key.split(".")[0] ?? key;
+    if (!allowed.includes(top))
+      return {
+        ok: false,
+        error: `Unknown frontmatter field "${key}". Use ${
+          folderFormat ? "name, description, and metadata" : "name, when, and description"
+        }`,
+      };
   }
-  const name = fields.get("name");
-  const when = fields.get("when");
-  const description = fields.get("description");
+  const read = (key: string) => {
+    const value = fields.get(key);
+    return value === undefined ? undefined : unquoted(value);
+  };
+  const name = folderFormat ? (read("metadata.title") ?? read("name")) : read("name");
+  const when = folderFormat ? read("metadata.when") : read("when");
+  const description = read("description");
   if (!name) return { ok: false, error: "The frontmatter needs a name" };
   if (!when) return { ok: false, error: "The frontmatter needs a when line" };
   if (!description) return { ok: false, error: "The frontmatter needs a description" };

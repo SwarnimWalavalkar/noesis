@@ -1,6 +1,7 @@
 import { renderComposerAttachmentText } from "./attachments.ts";
 import {
   type AgentThinkingLevel,
+  capabilityFolderIndex,
   type FrozenCapabilitySelection,
   type FrozenContextCheckpoint,
   type FrozenContextDocument,
@@ -629,16 +630,37 @@ export function createTurnIntelligencePlanner(
           ),
         );
         const always = binding.activationMode === "always";
-        return Object.freeze({
-          capabilityId: definition.capabilityId,
-          name: definition.name,
-          description: definition.description,
-          applicability: definition.applicability,
-          selectionReason: always ? "always active" : "listed for the model to load when relevant",
-          delivery: always ? ("prompt" as const) : ("on_demand" as const),
-          revision: binding.revision,
-          effects: Object.freeze(frozenEffects),
-        });
+        const folder = revision.folder
+          ? Object.freeze({
+              digest: revision.folder.digest,
+              files: revision.folder.files,
+              programs: Object.freeze(
+                await Promise.all(
+                  revision.folder.programs.map(async (program) =>
+                    Object.freeze({
+                      mode: program.mode,
+                      name: program.name,
+                      definition: await materialize(options.workspace, program.definitionRevision),
+                    }),
+                  ),
+                ),
+              ),
+            })
+          : undefined;
+        return Object.freeze(
+          createConditionalObject({
+            capabilityId: definition.capabilityId,
+            name: definition.name,
+            description: definition.description,
+            applicability: definition.applicability,
+            selectionReason: always ? "always active" : "listed for the model to load when relevant",
+            delivery: always ? ("prompt" as const) : ("on_demand" as const),
+            revision: binding.revision,
+            effects: Object.freeze(frozenEffects),
+          } as const)
+            .addOptional(folder ? { folder } : undefined)
+            .finish(),
+        );
       }),
     );
     // Always-active guidance shares one allowance. A Capability past it is listed on demand for
@@ -664,9 +686,12 @@ export function createTurnIntelligencePlanner(
     const promptLayers = deliveredSelections.flatMap((selection) =>
       selection.delivery === "on_demand"
         ? []
-        : selection.effects.flatMap((effect) =>
-            effect.kind === "instruction" ? [capabilityGuidance(effect.material.content).trim()] : [],
-          ),
+        : [
+            ...selection.effects.flatMap((effect) =>
+              effect.kind === "instruction" ? [capabilityGuidance(effect.material.content).trim()] : [],
+            ),
+            ...capabilityFolderIndex(selection),
+          ],
     );
     // SAFETY: The surrounding typed boundary establishes this representation before it is consumed.
     const unsigned = Object.freeze(
