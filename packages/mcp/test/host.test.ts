@@ -458,7 +458,10 @@ describe("MCP host", () => {
         },
       );
       expect(result.structuredContent).toEqual({ echoed: "hello" });
-      expect(progress).toEqual([1]);
+      // The progress notification can arrive after the result on a slow machine.
+      await vi.waitFor(() => {
+        expect(progress).toEqual([1]);
+      });
       expect(events).toContain("log");
       expect((await manager.callTool("mcp.controlled.environment", {})).content[0]).toMatchObject({
         type: "text",
