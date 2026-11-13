@@ -49,7 +49,7 @@ describe("built-in Noesis skill", () => {
       content: expect.stringContaining("noesis.search(query)"),
     });
     expect(execute?.content).toContain(
-      "agents.spawn({ name?, systemPrompt?, prompt, tools?, thinkingLevel? })",
+      "agents.spawn({ name?, systemPrompt?, prompt, tools?, output?, thinkingLevel? })",
     );
     expect(execute?.content).toContain("agents.wait({ taskId, timeoutMs? })");
     expect(execute?.content).toContain("Make admission a short boundary");

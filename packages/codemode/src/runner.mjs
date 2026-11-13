@@ -333,6 +333,16 @@ function encodeAgentPrompt(value) {
   if (value && typeof value === "object" && typeof value.toJSON === "function") return value.toJSON();
   throw new TypeError("agents.spawn prompt must be a string, ContextView, or an array of them");
 }
+/**
+ * Reduce the handle returned by `agents.spawn` to the exact task reference the Broker accepts.
+ * Any other shape reaches the Broker unchanged, so its strict schema still rejects mistakes.
+ */
+function agentWaitInput(input) {
+  if (!input || typeof input !== "object" || input.status !== "accepted" || typeof input.agentId !== "string")
+    return input;
+  const { agentId: _agentId, name: _name, status: _status, ...reference } = input;
+  return reference;
+}
 process.on("message", async (message) => {
   if (!message || typeof message !== "object") return;
   if (message.type === "sdk-result" && typeof message.requestId === "string") {
@@ -394,7 +404,7 @@ process.on("message", async (message) => {
     send: (input) => delegate("invoke", { name: "agents.send", input }),
     list: (filter = {}) => delegate("invoke", { name: "agents.list", input: filter }),
     inspect: (input) => delegate("invoke", { name: "agents.inspect", input }),
-    wait: (input) => delegate("invoke", { name: "agents.wait", input }),
+    wait: (input) => delegate("invoke", { name: "agents.wait", input: agentWaitInput(input) }),
     cancel: (input) => delegate("invoke", { name: "agents.cancel", input }),
     close: (input) => delegate("invoke", { name: "agents.close", input }),
   };

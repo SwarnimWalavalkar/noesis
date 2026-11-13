@@ -21,6 +21,7 @@ import {
   isCapabilityRevisionEffects,
   JsonValueSchema,
   learnedCapabilitySkillName,
+  type JsonObject,
   ProjectRefSchema,
   sha256,
 } from "@noesis/domain";
@@ -149,7 +150,10 @@ export interface FrozenSubAgentPlan {
   };
   readonly thinkingLevel: AgentThinkingLevel;
   readonly renderedSystemPrompt: string;
+  /** The exact tools this actor may use. An empty list makes each task a plain model call. */
   readonly frozenTools: readonly FrozenSubAgentToolReference[];
+  /** JSON Schema that every task's final answer must satisfy. Absent means a text answer. */
+  readonly output?: JsonObject;
   /** Exact immutable material needed to reconstruct the actor's Broker catalog in this process. */
   readonly executionTemplate: FrozenTurnPlan;
   readonly authority: {
@@ -189,6 +193,7 @@ export const FrozenSubAgentPlanSchema = z.strictObject({
       outputSchema: JsonValueSchema,
     }),
   ),
+  output: z.record(z.string(), JsonValueSchema).optional(),
   executionTemplate: z.lazy(() => FrozenTurnPlanSchema),
   authority: z.strictObject({
     permissionSnapshot: z.strictObject({
@@ -244,6 +249,7 @@ export function validateFrozenSubAgentPlan(value: unknown): FrozenSubAgentPlan {
     canonicalDigest: plan.canonicalDigest,
   } as const)
     .addOptional(plan.context ? { context: plan.context } : undefined)
+    .addOptional(plan.output ? { output: Object.freeze({ ...plan.output }) } : undefined)
     .finish();
   const { canonicalDigest, ...unsigned } = normalized;
   if (frozenSubAgentPlanDigest(unsigned) !== canonicalDigest)

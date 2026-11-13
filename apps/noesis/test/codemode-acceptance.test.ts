@@ -967,7 +967,7 @@ describe("production codemode journey", () => {
           "execute",
           {
             source:
-              'const child = await agents.spawn({ name: "sender", prompt: "Send the requested peer handoff.", tools: ["agents.send"] }); return await agents.wait({ taskId: child.taskId });',
+              'const child = await agents.spawn({ name: "sender", prompt: "Send the requested peer handoff.", tools: ["agents.list", "agents.send"] }); return await agents.wait({ taskId: child.taskId });',
           },
           "call-create-sender",
         );
@@ -1621,9 +1621,10 @@ describe("production codemode journey", () => {
 
     expect(nestedRequests).toHaveLength(2);
     for (const request of nestedRequests)
-      expect(request.plan.frozenTools.map((tool) => tool.name)).toEqual(
-        expect.arrayContaining(["programs.describe", "programs.run", "agents.send"]),
-      );
+      expect(request.plan.frozenTools.map((tool) => tool.name)).toEqual([
+        "programs.describe",
+        "programs.run",
+      ]);
     const agents = await runtime.listSubAgents();
     expect(agents).toHaveLength(2);
     expect(await runtime.getSubAgentTranscript(agents[0]?.agentId ?? "missing")).toContainEqual(
@@ -1665,7 +1666,7 @@ describe("production codemode journey", () => {
           "execute",
           {
             source:
-              'const parent = await agents.spawn({ name: "parent", prompt: "Delegate to a grandchild.", tools: ["agents.spawn"] }); return await agents.wait({ taskId: parent.taskId });',
+              'const parent = await agents.spawn({ name: "parent", prompt: "Delegate to a grandchild.", tools: ["agents.spawn", "agents.wait"] }); return await agents.wait({ taskId: parent.taskId });',
           },
           "call-foreground-spawns-parent",
         );
