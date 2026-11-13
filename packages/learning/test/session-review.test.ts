@@ -359,7 +359,9 @@ test("promotes a Program when the reviewer decides to, and offers the library on
       workspace,
       store: workspace.capabilities,
       history: Object.freeze({
-        rebuild: async () => undefined,
+        rebuild: async () => {
+          throw new Error("Nothing to search, so the index must not be rebuilt");
+        },
         search: async () => {
           throw new Error("The model wrote no queries, so nothing may be searched");
         },

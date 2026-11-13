@@ -316,7 +316,9 @@ export function createSessionReview(options: CreateSessionReviewOptions) {
                         revision,
                       } as const)
                         .addOptional(
-                          scope === "global" ? { definitionRevisionId: definitionRevision.revisionId } : undefined,
+                          scope === "global"
+                            ? { definitionRevisionId: definitionRevision.revisionId }
+                            : undefined,
                         )
                         .finish(),
                     ),
